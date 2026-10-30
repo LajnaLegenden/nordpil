@@ -3,6 +3,7 @@
 
 pub mod connection_form;
 pub mod dialogs;
+pub mod documents;
 pub mod sidebar;
 
 use nordpil_backend::Password;

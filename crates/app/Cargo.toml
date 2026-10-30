@@ -19,6 +19,7 @@ eframe = { version = "0.37", default-features = false, features = [
     "wayland",
     "x11",
 ] }
+egui_extras = { version = "0.37", default-features = false }
 nordpil-backend.workspace = true
 nordpil-query.workspace = true
 tracing = "0.1.44"

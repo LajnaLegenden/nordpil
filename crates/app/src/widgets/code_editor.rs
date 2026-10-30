@@ -151,7 +151,8 @@ fn byte_offset(text: &str, char_index: usize) -> usize {
         .map_or(text.len(), |(offset, _)| offset)
 }
 
-fn layout_job(ui: &egui::Ui, text: &str, spans: &[Span]) -> LayoutJob {
+/// Monospace text colored by `spans`.
+pub fn layout_job(ui: &egui::Ui, text: &str, spans: &[Span]) -> LayoutJob {
     let font_id = TextStyle::Monospace.resolve(ui.style());
     let visuals = ui.visuals();
     let mut job = LayoutJob::default();
@@ -182,7 +183,7 @@ fn layout_job(ui: &egui::Ui, text: &str, spans: &[Span]) -> LayoutJob {
 }
 
 /// VS Code Dark+ / Light+ inspired colors.
-fn color(kind: Highlight, visuals: &egui::Visuals) -> Color32 {
+pub fn color(kind: Highlight, visuals: &egui::Visuals) -> Color32 {
     let pick = |dark: [u8; 3], light: [u8; 3]| {
         let [r, g, b] = if visuals.dark_mode { dark } else { light };
         Color32::from_rgb(r, g, b)

@@ -4,15 +4,14 @@ use nordpil_backend::{
     Backend, BackendError, Bridge, Command, DatabaseInfo, ErrorKind, Outcome, Password, RequestId,
     Response,
 };
-use nordpil_query::{ParseError, Style};
 use uuid::Uuid;
 
 use crate::connections::{Collections, ConnectionEntry, ConnectionState, Selection};
-use crate::query_language::QueryLanguage;
+use crate::tabs::{CollectionTab, build_query};
 use crate::ui::connection_form::{ConnectionForm, FormResult};
 use crate::ui::dialogs::{CreateCollectionDialog, Dialog, DropDialog, PasswordPrompt};
-use crate::ui::{Action, sidebar};
-use crate::widgets::code_editor::CodeEditor;
+use crate::ui::documents::TabAction;
+use crate::ui::{Action, documents, sidebar};
 
 /// Older notifications are dropped beyond this many.
 const MAX_NOTIFICATIONS: usize = 5;
@@ -21,16 +20,14 @@ pub struct NordpilApp {
     backend: Bridge<Backend>,
     connections: Vec<ConnectionEntry>,
     keyring_available: bool,
-    selection: Option<Selection>,
+    tabs: Vec<CollectionTab>,
+    active_tab: Option<usize>,
+    next_tab_id: u64,
     form: Option<ConnectionForm>,
     /// Connect once the form's save succeeds.
     connect_after_save: Option<(Uuid, Option<Password>)>,
     dialog: Option<Dialog>,
     notifications: Vec<BackendError>,
-    filter: String,
-    filter_editor: CodeEditor,
-    /// The last submitted filter, parsed. Phase 3 runs it instead.
-    submitted_filter: Option<Result<bson::Document, Vec<ParseError>>>,
 }
 
 impl NordpilApp {
@@ -44,15 +41,13 @@ impl NordpilApp {
             backend,
             connections: Vec::new(),
             keyring_available: false,
-            selection: None,
+            tabs: Vec::new(),
+            active_tab: None,
+            next_tab_id: 0,
             form: None,
             connect_after_save: None,
             dialog: None,
             notifications: Vec::new(),
-            filter: String::new(),
-            filter_editor: CodeEditor::new(egui::Id::unique("filter"), false)
-                .hint("{ field: 'value' }"),
-            submitted_filter: None,
         })
     }
 
@@ -85,13 +80,98 @@ impl NordpilApp {
         }
     }
 
+    /// Closes the tabs whose collection matches, e.g. after a drop.
     fn deselect_if(&mut self, matches: impl Fn(&Selection) -> bool) {
-        if self.selection.as_ref().is_some_and(matches) {
-            self.selection = None;
+        let active_id = self.active_tab.map(|index| self.tabs[index].id);
+        for tab in self.tabs.iter().filter(|tab| matches(&tab.target)) {
+            for request in [tab.pending_find, tab.pending_count].into_iter().flatten() {
+                self.backend.cancel(request);
+            }
+        }
+        self.tabs.retain(|tab| !matches(&tab.target));
+        self.active_tab = active_id
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+            .or_else(|| self.tabs.len().checked_sub(1));
+    }
+
+    fn selection(&self) -> Option<&Selection> {
+        self.active_tab.map(|index| &self.tabs[index].target)
+    }
+
+    fn open_tab(&mut self, target: Selection) {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.target == target) {
+            self.active_tab = Some(index);
+            return;
+        }
+        self.next_tab_id += 1;
+        self.tabs.push(CollectionTab::new(self.next_tab_id, target));
+        let index = self.tabs.len() - 1;
+        self.active_tab = Some(index);
+        self.tab_action(index, TabAction::Run);
+    }
+
+    fn close_tab(&mut self, index: usize) {
+        let target = self.tabs[index].target.clone();
+        self.deselect_if(|t| *t == target);
+    }
+
+    fn tab_action(&mut self, index: usize, action: TabAction) {
+        let tab = &mut self.tabs[index];
+        match action {
+            TabAction::Run | TabAction::Reset => {
+                if matches!(action, TabAction::Reset) {
+                    tab.inputs = Default::default();
+                }
+                match build_query(&tab.inputs) {
+                    Ok(applied) => {
+                        tab.input_errors.clear();
+                        tab.applied = Some(applied);
+                        tab.page = 0;
+                        tab.count = None;
+                        self.fetch_page(index, true);
+                    }
+                    Err(errors) => tab.input_errors = errors,
+                }
+            }
+            TabAction::Page(page) => {
+                tab.page = page;
+                self.fetch_page(index, false);
+            }
+            TabAction::Refresh => {
+                tab.count = None;
+                self.fetch_page(index, true);
+            }
         }
     }
 
-    fn handle_response(&mut self, response: Response) {
+    /// Sends the find for the tab's current page, and a count if asked.
+    fn fetch_page(&mut self, index: usize, count: bool) {
+        let tab = &mut self.tabs[index];
+        let Some(query) = tab.page_query() else {
+            return;
+        };
+        let namespace = tab.namespace();
+        for request in [tab.pending_find.take()].into_iter().flatten() {
+            self.backend.cancel(request);
+        }
+        tab.error = None;
+        tab.pending_find = Some(self.backend.send(Command::Find {
+            namespace: namespace.clone(),
+            query: Box::new(query.clone()),
+        }));
+        if count {
+            if let Some(request) = tab.pending_count.take() {
+                self.backend.cancel(request);
+            }
+            tab.pending_count = Some(self.backend.send(Command::Count {
+                namespace,
+                filter: query.filter,
+                hint: query.hint,
+            }));
+        }
+    }
+
+    fn handle_response(&mut self, request: RequestId, response: Response) {
         match response {
             Response::Connections {
                 result,
@@ -153,6 +233,35 @@ impl NordpilApp {
                 }
                 Err(error) => self.notify(error),
             },
+            Response::Documents(result) => {
+                let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.pending_find == Some(request))
+                else {
+                    return;
+                };
+                tab.pending_find = None;
+                match result {
+                    Ok(documents) => tab.set_documents(documents),
+                    Err(error) => {
+                        tab.results = None;
+                        tab.error = Some(error.message);
+                    }
+                }
+            }
+            Response::Count(result) => {
+                let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.pending_count == Some(request))
+                else {
+                    return;
+                };
+                tab.pending_count = None;
+                // A failed count shouldn't hide the documents; show the total as unknown.
+                tab.count = Some(result.unwrap_or(None));
+            }
             Response::DatabaseDropped {
                 connection,
                 database,
@@ -262,6 +371,14 @@ impl NordpilApp {
     }
 
     fn cancelled(&mut self, request: RequestId) {
+        for tab in &mut self.tabs {
+            if tab.pending_find == Some(request) {
+                tab.pending_find = None;
+            }
+            if tab.pending_count == Some(request) {
+                tab.pending_count = None;
+            }
+        }
         for entry in &mut self.connections {
             if matches!(entry.state, ConnectionState::Connecting(r) if r == request) {
                 entry.state = ConnectionState::Disconnected;
@@ -320,7 +437,7 @@ impl NordpilApp {
                     database,
                 });
             }
-            Action::Select(selection) => self.selection = Some(selection),
+            Action::Select(selection) => self.open_tab(selection),
             Action::CreateCollection {
                 connection,
                 database,
@@ -425,7 +542,7 @@ impl NordpilApp {
     }
 
     fn show_main(&mut self, ui: &mut egui::Ui) {
-        let Some(selection) = &self.selection else {
+        if self.tabs.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.weak(if self.connections.is_empty() {
                     "Add a connection to get started."
@@ -434,32 +551,40 @@ impl NordpilApp {
                 });
             });
             return;
+        }
+
+        let mut close = None;
+        egui::ScrollArea::horizontal()
+            .id_salt("tab_bar")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (index, tab) in self.tabs.iter().enumerate() {
+                        let active = self.active_tab == Some(index);
+                        let response = ui.selectable_label(active, tab.title());
+                        if response.clicked() {
+                            self.active_tab = Some(index);
+                        }
+                        if response.middle_clicked() {
+                            close = Some(index);
+                        }
+                        if ui.small_button("x").on_hover_text("Close tab").clicked() {
+                            close = Some(index);
+                        }
+                        ui.add_space(6.0);
+                    }
+                });
+            });
+        ui.separator();
+        if let Some(index) = close {
+            self.close_tab(index);
+            return;
+        }
+
+        let Some(index) = self.active_tab else {
+            return;
         };
-        ui.heading(format!("{}.{}", selection.database, selection.collection));
-        ui.horizontal(|ui| {
-            let label = ui.label("Filter");
-            let output = self
-                .filter_editor
-                .show(ui, &mut self.filter, &QueryLanguage);
-            output.response.labelled_by(label.id);
-            if output.submitted {
-                self.submitted_filter = Some(nordpil_query::parse_document(&self.filter));
-            }
-        });
-        match &self.submitted_filter {
-            Some(Ok(filter)) => {
-                ui.monospace(nordpil_query::format_document(filter, Style::Pretty(2)));
-            }
-            Some(Err(errors)) => {
-                for error in errors {
-                    let column = self.filter[..error.span.start].chars().count() + 1;
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        format!("Column {column}: {}", error.message),
-                    );
-                }
-            }
-            None => {}
+        if let Some(action) = documents::show(ui, &mut self.tabs[index]) {
+            self.tab_action(index, action);
         }
     }
 
@@ -468,7 +593,7 @@ impl NordpilApp {
         let events: Vec<_> = self.backend.drain().collect();
         for event in events {
             match event.outcome {
-                Outcome::Done(response) => self.handle_response(response),
+                Outcome::Done(response) => self.handle_response(event.id, response),
                 Outcome::Cancelled => self.cancelled(event.id),
             }
         }
@@ -480,7 +605,7 @@ impl NordpilApp {
             .resizable(true)
             .default_size(260.0)
             .show(ui, |ui| {
-                sidebar::show(ui, &self.connections, self.selection.as_ref(), &mut actions);
+                sidebar::show(ui, &self.connections, self.selection(), &mut actions);
             });
         self.show_notifications(ui);
         egui::CentralPanel::default().show(ui, |ui| self.show_main(ui));
@@ -648,6 +773,21 @@ mod tests {
             database: "shop".to_owned(),
         });
         run_until(&mut harness, |app| collection_loaded(app, "shop", "orders"));
+
+        harness.state_mut().apply(Action::Select(Selection {
+            connection,
+            database: "shop".to_owned(),
+            collection: "orders".to_owned(),
+        }));
+        run_until(&mut harness, |app| {
+            app.tabs
+                .first()
+                .is_some_and(|tab| tab.results.is_some() && tab.count.is_some())
+        });
+        let tab = &harness.state().tabs[0];
+        assert_eq!(tab.error, None);
+        assert_eq!(tab.count, Some(Some(0)));
+        assert!(harness.query_by_label("No documents match.").is_some());
     }
 }
 
@@ -718,16 +858,32 @@ mod screenshots {
         ]);
         let production =
             ConnectionEntry::new(saved("Production", Some(ConnectionColor::Red), true));
-        app.selection = Some(Selection {
+        let target = Selection {
             connection: local.saved.id,
             database: "shop".to_owned(),
             collection: "orders".to_owned(),
-        });
+        };
         app.connections = vec![local, production];
-        app.filter =
-            "{ status: 'shipped', total: { $gt: 100 }, created: { $gte: ISODate('2024-01-01') } }"
-                .to_owned();
-        app.submitted_filter = Some(nordpil_query::parse_document(&app.filter));
+        let mut tab = CollectionTab::new(1, target);
+        tab.inputs.filter = "{ status: 'shipped', total: { $gt: 100 } }".to_owned();
+        tab.applied = Some(build_query(&tab.inputs).unwrap());
+        tab.count = Some(Some(1234));
+        tab.set_documents(
+            (0..6)
+                .map(|n| {
+                    bson::doc! {
+                        "_id": bson::oid::ObjectId::from_bytes([n; 12]),
+                        "status": "shipped",
+                        "total": 100.5 + f64::from(n) * 12.25,
+                        "items": [{ "sku": "A-1", "qty": 2 }, { "sku": "B-7", "qty": 1 }],
+                        "customer": { "name": "Ada Lovelace", "email": "ada@example.com" },
+                        "created": bson::DateTime::from_millis(1_700_000_000_000 + i64::from(n) * 86_400_000),
+                    }
+                })
+                .collect(),
+        );
+        app.tabs.push(tab);
+        app.active_tab = Some(0);
         app
     }
 
@@ -756,6 +912,14 @@ mod screenshots {
         harness.get_by_label("shop").click();
         harness.run();
         save(&mut harness, "main");
+
+        harness.state_mut().tabs[0].view = crate::tabs::View::Table;
+        harness.run();
+        save(&mut harness, "table");
+        harness.state_mut().tabs[0].view = crate::tabs::View::Json;
+        harness.state_mut().tabs[0].show_options = true;
+        harness.run();
+        save(&mut harness, "json-options");
 
         harness.state_mut().apply(Action::NewConnection);
         harness.run();

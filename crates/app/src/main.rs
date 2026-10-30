@@ -4,6 +4,7 @@ mod app;
 mod connections;
 mod logging;
 mod query_language;
+mod tabs;
 mod ui;
 mod widgets;
 
