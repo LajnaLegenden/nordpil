@@ -1,5 +1,6 @@
 //! Runs against a real mongod in Docker. Run with `just test-int`.
 
+use futures_util::TryStreamExt as _;
 use mongodb::bson::{Document, doc};
 use nordpil_backend::secrets::MemorySecrets;
 use nordpil_backend::store::{ConnectionStore, SavedConnection};
@@ -286,4 +287,92 @@ async fn creates_hides_lists_and_drops_indexes() {
     };
     changed(send(&backend, drop).await).unwrap();
     assert_eq!(list().await.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn exports_and_imports_every_format() {
+    use std::sync::Arc;
+
+    use nordpil_backend::transfer::{ExportJob, Format, ImportJob, JsonMode, Progress};
+
+    let (_mongo, backend, id, uri) = connected_backend(false).await;
+    let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
+    let source = client.database("shop").collection::<Document>("orders");
+    let documents: Vec<Document> = (0..2500)
+        .map(|n| {
+            doc! {
+                "_id": n,
+                "name": format!("order {n}"),
+                "total": f64::from(n) + 0.5,
+                "big": 9_007_199_254_740_993_i64,
+                "address": { "city": "Oslo", "zip": "0150" },
+            }
+        })
+        .collect();
+    source.insert_many(documents.clone()).await.unwrap();
+    let dir = std::env::temp_dir().join(format!("nordpil-transfer-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let namespace = |collection: &str| Namespace {
+        connection: id,
+        database: "shop".to_owned(),
+        collection: collection.to_owned(),
+    };
+
+    for (format, file) in [
+        (Format::JsonArray, "orders.json"),
+        (Format::Ndjson, "orders.ndjson"),
+        (Format::Csv, "orders.csv"),
+    ] {
+        let path = dir.join(file);
+        let export = ExportJob {
+            namespace: namespace("orders"),
+            query: FindQuery {
+                sort: Some(doc! { "_id": 1 }),
+                ..FindQuery::default()
+            },
+            path: path.clone(),
+            format,
+            json_mode: JsonMode::Canonical,
+            fields: ["_id", "name", "total", "big", "address.city", "address.zip"]
+                .map(str::to_owned)
+                .into(),
+            progress: Arc::new(Progress::default()),
+        };
+        let Response::Exported(result) = send(&backend, Command::Export(Box::new(export))).await
+        else {
+            panic!("unexpected response");
+        };
+        assert_eq!(result.unwrap(), 2500, "{file}");
+
+        let target = format!("copy_{file}").replace('.', "_");
+        let import = ImportJob {
+            namespace: namespace(&target),
+            path,
+            format,
+            csv_as_text: false,
+            progress: Arc::new(Progress::default()),
+        };
+        let Response::Imported { result, .. } =
+            send(&backend, Command::Import(Box::new(import))).await
+        else {
+            panic!("unexpected response");
+        };
+        let summary = result.unwrap();
+        assert_eq!((summary.inserted, summary.failed), (2500, 0), "{file}");
+
+        let copied: Vec<Document> = client
+            .database("shop")
+            .collection::<Document>(&target)
+            .find(doc! {})
+            .sort(doc! { "_id": 1 })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        // CSV keeps "0150" as text and reads whole totals like "1.5" back as doubles.
+        assert_eq!(copied, documents, "{file}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }

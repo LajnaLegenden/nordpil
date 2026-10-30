@@ -11,6 +11,7 @@ mod queries;
 pub mod secrets;
 pub mod store;
 mod toml_file;
+pub mod transfer;
 pub mod uri;
 mod writes;
 
@@ -164,6 +165,8 @@ pub enum Command {
         name: String,
         hidden: bool,
     },
+    Export(Box<transfer::ExportJob>),
+    Import(Box<transfer::ImportJob>),
 }
 
 /// Results of [`Command`]s, with enough context to act on them.
@@ -228,6 +231,12 @@ pub enum Response {
     IndexChanged {
         namespace: Namespace,
         result: Result<(), BackendError>,
+    },
+    /// How many documents were exported.
+    Exported(Result<u64, BackendError>),
+    Imported {
+        namespace: Namespace,
+        result: Result<transfer::ImportSummary, BackendError>,
     },
     /// The collection's saved queries after a query command: favorites first,
     /// then most recent.
@@ -482,6 +491,14 @@ impl Handler for Backend {
                 result: self.set_index_hidden(&namespace, &name, hidden).await,
                 namespace,
             },
+            Command::Export(job) => Response::Exported(self.export(*job).await),
+            Command::Import(job) => {
+                let namespace = job.namespace.clone();
+                Response::Imported {
+                    result: self.import(*job).await,
+                    namespace,
+                }
+            }
         }
     }
 }

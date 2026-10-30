@@ -7,7 +7,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bson = { version = "3.1", features = ["serde_json-1"] }
 crossbeam-channel = "0.5.17"
+csv = "1.4"
 directories = "6"
 futures-util = "0.3.34"
 keyring = "4.2"
@@ -20,6 +22,7 @@ mongodb = { version = "3.9", default-features = false, features = [
 nordpil-query.workspace = true
 percent-encoding = "2.3"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tokio-util = "0.7.20"
 toml = "1.1"
