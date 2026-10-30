@@ -12,6 +12,7 @@ mod format;
 mod highlight;
 pub mod lexer;
 pub mod parser;
+mod values;
 
 use bson::{Bson, Document};
 
@@ -19,6 +20,7 @@ pub use complete::{FieldHint, Mode, Suggestion, complete, is_word_char};
 pub use format::{Style, format_document, format_value};
 pub use highlight::{Highlight, highlight};
 pub use parser::ParseError;
+pub use values::{ValueHint, value_hints};
 
 /// A document's pretty-printed, highlighted text for display, cut after
 /// `max_bytes` so huge documents stay quick to show.
