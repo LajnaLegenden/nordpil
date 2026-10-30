@@ -650,3 +650,128 @@ mod tests {
         run_until(&mut harness, |app| collection_loaded(app, "shop", "orders"));
     }
 }
+
+#[cfg(all(test, feature = "screenshots"))]
+mod screenshots {
+    use eframe::egui::Role;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable as _;
+    use nordpil_backend::secrets::MemorySecrets;
+    use nordpil_backend::store::{ConnectionColor, ConnectionStore};
+    use nordpil_backend::{CollectionInfo, CollectionKind};
+
+    use super::*;
+    use crate::connections::DatabaseNode;
+
+    fn database(name: &str, collections: &[(&str, CollectionKind)]) -> DatabaseNode {
+        DatabaseNode {
+            info: DatabaseInfo {
+                name: name.to_owned(),
+                size_on_disk: 0,
+                empty: false,
+            },
+            collections: Collections::Loaded(
+                collections
+                    .iter()
+                    .map(|&(name, kind)| CollectionInfo {
+                        name: name.to_owned(),
+                        kind,
+                        capped: false,
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    fn sample_app() -> NordpilApp {
+        let dir = std::env::temp_dir().join(format!("nordpil-shot-{}", Uuid::new_v4()));
+        let backend = Backend::new(
+            ConnectionStore::new(dir.join("connections.toml")),
+            MemorySecrets::default(),
+        );
+        let mut app = NordpilApp::new(&egui::Context::default(), backend).unwrap();
+        // Let the initial (empty) load finish so it doesn't replace the sample data.
+        while !app.keyring_available {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app.process_events();
+        }
+        let saved = |name: &str, color, read_only| SavedConnection {
+            id: Uuid::new_v4(),
+            name: name.to_owned(),
+            uri: "mongodb://localhost:27017".to_owned(),
+            color,
+            read_only,
+        };
+        let mut local =
+            ConnectionEntry::new(saved("Local dev", Some(ConnectionColor::Green), false));
+        local.state = ConnectionState::Connected(vec![
+            database("admin", &[("system.version", CollectionKind::Collection)]),
+            database(
+                "shop",
+                &[
+                    ("customers", CollectionKind::Collection),
+                    ("orders", CollectionKind::Collection),
+                    ("orders_by_day", CollectionKind::View),
+                    ("metrics", CollectionKind::Timeseries),
+                ],
+            ),
+        ]);
+        let production =
+            ConnectionEntry::new(saved("Production", Some(ConnectionColor::Red), true));
+        app.selection = Some(Selection {
+            connection: local.saved.id,
+            database: "shop".to_owned(),
+            collection: "orders".to_owned(),
+        });
+        app.connections = vec![local, production];
+        app.filter =
+            "{ status: 'shipped', total: { $gt: 100 }, created: { $gte: ISODate('2024-01-01') } }"
+                .to_owned();
+        app.submitted_filter = Some(nordpil_query::parse_document(&app.filter));
+        app
+    }
+
+    fn save(harness: &mut Harness<'_, NordpilApp>, name: &str) {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/screenshots");
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = harness.render().unwrap();
+        image.save(dir.join(format!("{name}.png"))).unwrap();
+    }
+
+    #[test]
+    #[ignore = "renders with wgpu; run with `just screenshots`"]
+    fn screenshot_main_window() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1100.0, 650.0))
+            .wgpu()
+            .build_ui_state(
+                |ui, app: &mut NordpilApp| {
+                    app.process_events();
+                    app.show(ui);
+                },
+                sample_app(),
+            );
+        harness.run();
+        save(&mut harness, "main-collapsed");
+        harness.get_by_label("shop").click();
+        harness.run();
+        save(&mut harness, "main");
+
+        harness.state_mut().apply(Action::NewConnection);
+        harness.run();
+        save(&mut harness, "connection-form");
+
+        harness
+            .get_by_role_and_label(Role::Button, "Cancel")
+            .click();
+        harness.run();
+        let production = harness.state().connections[1].saved.id;
+        harness.state_mut().apply(Action::Drop {
+            connection: production,
+            database: "shop".to_owned(),
+            collection: Some("orders".to_owned()),
+        });
+        harness.run();
+        save(&mut harness, "drop-dialog");
+    }
+}

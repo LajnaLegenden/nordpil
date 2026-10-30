@@ -19,3 +19,7 @@ check:
 # Integration tests against a real mongod. Needs Docker.
 test-int:
     cargo test --workspace -- --ignored
+
+# Render UI screenshots to target/screenshots for a visual check
+screenshots:
+    cargo test -p nordpil --features screenshots -- --ignored screenshot

@@ -26,6 +26,10 @@ tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = "1"
 
+[features]
+# Lets tests render the UI to PNG files (pulls in wgpu). See `just screenshots`.
+screenshots = ["egui_kittest/wgpu"]
+
 [lints]
 workspace = true
 
