@@ -172,3 +172,66 @@ async fn finds_pages_and_counts_documents() {
         .collect();
     assert_eq!(paths, ["_id", "n", "even"]);
 }
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn inserts_edits_and_deletes_documents() {
+    let (_mongo, backend, id, uri) = connected_backend(false).await;
+    let namespace = Namespace {
+        connection: id,
+        database: "shop".to_owned(),
+        collection: "orders".to_owned(),
+    };
+    let written = |response: Response| match response {
+        Response::Written { result, .. } => result,
+        _ => panic!("unexpected response"),
+    };
+
+    let insert = Command::InsertDocuments {
+        namespace: namespace.clone(),
+        documents: vec![
+            doc! { "_id": 1, "status": "new", "address": { "city": "x", "zip": "1" } },
+            doc! { "_id": 2, "status": "new" },
+        ],
+    };
+    assert_eq!(written(send(&backend, insert).await), Ok(2));
+
+    let original = doc! { "_id": 1, "status": "new", "address": { "city": "x", "zip": "1" } };
+    let edit = |updated: Document| Command::UpdateDocument {
+        namespace: namespace.clone(),
+        original: Box::new(original.clone()),
+        updated: Box::new(updated),
+    };
+    let updated = doc! { "_id": 1, "status": "paid", "address": { "city": "y", "zip": "1" } };
+    assert_eq!(written(send(&backend, edit(updated.clone())).await), Ok(1));
+
+    // The same edit again starts from a stale original, so it must conflict.
+    let stale = written(send(&backend, edit(doc! { "_id": 1, "status": "x" })).await);
+    assert_eq!(stale.unwrap_err().kind, ErrorKind::Conflict);
+
+    let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
+    let orders = client.database("shop").collection::<Document>("orders");
+    assert_eq!(
+        orders.find_one(doc! { "_id": 1 }).await.unwrap(),
+        Some(updated)
+    );
+
+    let update_many = Command::UpdateMany {
+        namespace: namespace.clone(),
+        filter: doc! { "status": "new" },
+        update: doc! { "$set": { "status": "seen" } }.into(),
+    };
+    assert_eq!(written(send(&backend, update_many).await), Ok(1));
+
+    let delete = Command::DeleteDocument {
+        namespace: namespace.clone(),
+        id: 2.into(),
+    };
+    assert_eq!(written(send(&backend, delete).await), Ok(1));
+    let delete_many = Command::DeleteMany {
+        namespace,
+        filter: doc! {},
+    };
+    assert_eq!(written(send(&backend, delete_many).await), Ok(1));
+    assert_eq!(orders.count_documents(doc! {}).await.unwrap(), 0);
+}

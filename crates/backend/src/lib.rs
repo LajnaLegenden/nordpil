@@ -11,6 +11,7 @@ pub mod secrets;
 pub mod store;
 mod toml_file;
 pub mod uri;
+mod writes;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -120,6 +121,31 @@ pub enum Command {
         namespace: Namespace,
         id: Uuid,
     },
+    InsertDocuments {
+        namespace: Namespace,
+        documents: Vec<mongodb::bson::Document>,
+    },
+    /// Saves only what changed, and fails with [`ErrorKind::Conflict`] if
+    /// those fields changed on the server since `original` was loaded.
+    UpdateDocument {
+        namespace: Namespace,
+        original: Box<mongodb::bson::Document>,
+        updated: Box<mongodb::bson::Document>,
+    },
+    DeleteDocument {
+        namespace: Namespace,
+        id: mongodb::bson::Bson,
+    },
+    /// `update` is an operator document or a pipeline array.
+    UpdateMany {
+        namespace: Namespace,
+        filter: mongodb::bson::Document,
+        update: mongodb::bson::Bson,
+    },
+    DeleteMany {
+        namespace: Namespace,
+        filter: mongodb::bson::Document,
+    },
 }
 
 /// Results of [`Command`]s, with enough context to act on them.
@@ -170,6 +196,11 @@ pub enum Response {
     Fields {
         namespace: Namespace,
         result: Result<Vec<FieldInfo>, BackendError>,
+    },
+    /// Any document write; the count is how many documents it affected.
+    Written {
+        namespace: Namespace,
+        result: Result<u64, BackendError>,
     },
     /// The collection's saved queries after a query command: favorites first,
     /// then most recent.
@@ -364,6 +395,40 @@ impl Handler for Backend {
             },
             Command::DeleteQuery { namespace, id } => Response::Queries {
                 result: self.delete_query(namespace.clone(), id).await,
+                namespace,
+            },
+            Command::InsertDocuments {
+                namespace,
+                documents,
+            } => Response::Written {
+                result: self.insert_documents(&namespace, documents).await,
+                namespace,
+            },
+            Command::UpdateDocument {
+                namespace,
+                original,
+                updated,
+            } => Response::Written {
+                result: self
+                    .update_document(&namespace, &original, &updated)
+                    .await
+                    .map(|()| 1),
+                namespace,
+            },
+            Command::DeleteDocument { namespace, id } => Response::Written {
+                result: self.delete_document(&namespace, id).await.map(|()| 1),
+                namespace,
+            },
+            Command::UpdateMany {
+                namespace,
+                filter,
+                update,
+            } => Response::Written {
+                result: self.update_many(&namespace, filter, update).await,
+                namespace,
+            },
+            Command::DeleteMany { namespace, filter } => Response::Written {
+                result: self.delete_many(&namespace, filter).await,
                 namespace,
             },
         }

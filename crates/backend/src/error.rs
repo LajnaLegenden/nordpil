@@ -11,6 +11,8 @@ pub enum ErrorKind {
     PasswordRequired,
     AuthenticationFailed,
     ReadOnly,
+    /// The document changed or was deleted since it was loaded.
+    Conflict,
     Other,
 }
 
