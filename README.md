@@ -14,22 +14,30 @@ when idle, against roughly 1 GB for Compass.
   write.
 - **Browse**: a tree of databases and collections (with views, time series and capped
   collections marked). Create and drop databases and collections.
+- **Go to collection**: Ctrl+K finds any collection by name, recent ones first, across
+  every saved connection; picking one on a closed connection connects to it first.
 - **Query**: filters in mongosh syntax (`{ age: { $gt: 30 }, _id: ObjectId('…') }`) with
-  highlighting and autocomplete for operators, constructors and field names sampled from
-  the collection. Project, sort, collation, hint, skip, limit and max time. Query history
-  and favorites per collection.
+  highlighting and autocomplete for operators, constructors, field names sampled from the
+  collection and values from the current results. Brackets and quotes close themselves,
+  and operators such as `$in` insert their brackets. Ctrl+L focuses the filter. Project,
+  sort, collation, hint, skip, limit and max time. Query history and favorites per
+  collection.
 - **View**: list, JSON and table views with paging and counts.
 - **Edit**: insert, edit, clone and delete documents. Edits save only the changed fields
   and refuse to overwrite a document that changed since it was loaded. Bulk update and
   delete show how many documents match first.
 - **Indexes**: keys, properties, size and usage; create, drop, hide and unhide.
 - **Import and export**: JSON, JSON lines and CSV, streamed with progress and cancel.
+- **Settings**: dark, light or system theme, three text sizes, and whether Ctrl+K searches
+  all saved connections or only open ones.
 
-| Table view | Autocomplete |
+| Go to collection (Ctrl+K) | Values from the results |
 | --- | --- |
-| ![Table view](docs/screenshots/table.png) | ![Autocomplete](docs/screenshots/autocomplete.png) |
-| **Editing a document** | **Indexes** |
-| ![Edit dialog](docs/screenshots/edit-document.png) | ![Indexes](docs/screenshots/indexes.png) |
+| ![Go to collection](docs/screenshots/goto.png) | ![Value autocomplete](docs/screenshots/autocomplete.png) |
+| **Table view** | **Editing a document** |
+| ![Table view](docs/screenshots/table.png) | ![Edit dialog](docs/screenshots/edit-document.png) |
+| **Indexes** | **Light theme** |
+| ![Indexes](docs/screenshots/indexes.png) | ![Light theme](docs/screenshots/main-light.png) |
 
 ## Install
 
@@ -43,9 +51,9 @@ nordpil
 On Linux, saving passwords needs a Secret Service keyring (GNOME Keyring, KeePassXC, …),
 and the file picker uses the XDG desktop portal.
 
-Saved connections and query history live in the platform config folder
-(`~/.config/nordpil/` on Linux); logs in the platform state folder
-(`~/.local/state/nordpil/logs/` on Linux).
+Saved connections, settings, query history and recent collections live in the
+platform config folder (`~/.config/nordpil/` on Linux); logs in the platform state
+folder (`~/.local/state/nordpil/logs/` on Linux).
 
 ## Development
 
@@ -74,3 +82,7 @@ Licensed under either of
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
+
+The bundled [Geist](https://github.com/vercel/geist-font) fonts are under the SIL Open
+Font License and the [Lucide](https://lucide.dev) icons under the ISC license; see
+`crates/app/assets/fonts`.
