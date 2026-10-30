@@ -3368,6 +3368,7 @@ dependencies = [
  "keyring",
  "mongodb",
  "nordpil-backend",
+ "nordpil-query",
  "percent-encoding",
  "serde",
  "testcontainers-modules",

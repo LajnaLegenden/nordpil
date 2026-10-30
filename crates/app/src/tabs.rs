@@ -5,7 +5,7 @@ use std::time::Duration;
 use bson::{Bson, Document};
 use eframe::egui;
 use nordpil_backend::{FindQuery, Namespace, RequestId, SavedQuery};
-use nordpil_query::{Style, format_document};
+use nordpil_query::{FieldHint, Style, format_document};
 
 use crate::connections::Selection;
 use crate::widgets::code_editor::{CodeEditor, Span};
@@ -70,6 +70,8 @@ pub struct CollectionTab {
     pub input_errors: Vec<String>,
     /// This collection's favorite and recent queries.
     pub history: Vec<SavedQuery>,
+    /// Field paths sampled from the collection, for autocomplete.
+    pub fields: Vec<FieldHint>,
 }
 
 impl CollectionTab {
@@ -100,6 +102,7 @@ impl CollectionTab {
             error: None,
             input_errors: Vec::new(),
             history: Vec::new(),
+            fields: Vec::new(),
         }
     }
 

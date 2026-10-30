@@ -209,6 +209,8 @@ mod tests {
     use egui_kittest::kittest::Queryable as _;
 
     use super::*;
+    use nordpil_query::Mode;
+
     use crate::query_language::QueryLanguage;
 
     struct State {
@@ -226,7 +228,8 @@ mod tests {
         Harness::new_ui_state(
             |ui, state: &mut State| {
                 let label = ui.label("Query");
-                let output = state.editor.show(ui, &mut state.text, &QueryLanguage);
+                let language = QueryLanguage::new(Mode::Filter, &[]);
+                let output = state.editor.show(ui, &mut state.text, &language);
                 output.response.labelled_by(label.id);
                 state.submitted |= output.submitted;
             },
@@ -244,7 +247,7 @@ mod tests {
     #[test]
     fn arrow_down_and_enter_accept_second_completion() {
         let mut harness = harness();
-        type_text(&mut harness, "$gt");
+        type_text(&mut harness, "{ age: { $gt");
         assert!(harness.state().editor.popup_open);
 
         harness.key_press(Key::ArrowDown);
@@ -252,7 +255,7 @@ mod tests {
         harness.key_press(Key::Enter);
         harness.run();
 
-        assert_eq!(harness.state().text, "$gte: ");
+        assert_eq!(harness.state().text, "{ age: { $gte: ");
         assert!(!harness.state().editor.popup_open);
         assert!(!harness.state().submitted);
     }

@@ -6,7 +6,7 @@ use eframe::egui::collapsing_header::CollapsingState;
 use eframe::egui::{self, Align, Label, Layout, RichText, Sense, TextEdit};
 use egui_extras::{Column, TableBuilder};
 use nordpil_backend::SavedQuery;
-use nordpil_query::{Highlight, Style, format_document, format_value};
+use nordpil_query::{Highlight, Mode, Style, format_document, format_value};
 use uuid::Uuid;
 
 use crate::query_language::QueryLanguage;
@@ -87,10 +87,11 @@ fn query_bar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
                     ui.close();
                 }
             });
+            let language = QueryLanguage::new(Mode::Filter, &tab.fields);
             let output = tab
                 .editors
                 .filter
-                .show(ui, &mut tab.inputs.filter, &QueryLanguage);
+                .show(ui, &mut tab.inputs.filter, &language);
             output.response.labelled_by(label.id);
             if output.submitted {
                 action = Some(TabAction::Run);
@@ -104,15 +105,25 @@ fn query_bar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
             .show(ui, |ui| {
                 let editors = &mut tab.editors;
                 let inputs = &mut tab.inputs;
-                let rows: [(&str, &mut CodeEditor, &mut String); 4] = [
-                    ("Project", &mut editors.project, &mut inputs.project),
-                    ("Sort", &mut editors.sort, &mut inputs.sort),
-                    ("Collation", &mut editors.collation, &mut inputs.collation),
-                    ("Hint", &mut editors.hint, &mut inputs.hint),
+                let rows: [(&str, &mut CodeEditor, &mut String, Mode); 4] = [
+                    (
+                        "Project",
+                        &mut editors.project,
+                        &mut inputs.project,
+                        Mode::Fields,
+                    ),
+                    ("Sort", &mut editors.sort, &mut inputs.sort, Mode::Fields),
+                    (
+                        "Collation",
+                        &mut editors.collation,
+                        &mut inputs.collation,
+                        Mode::Collation,
+                    ),
+                    ("Hint", &mut editors.hint, &mut inputs.hint, Mode::Fields),
                 ];
-                for (name, editor, text) in rows {
+                for (name, editor, text, mode) in rows {
                     let label = ui.label(name);
-                    let output = editor.show(ui, text, &QueryLanguage);
+                    let output = editor.show(ui, text, &QueryLanguage::new(mode, &tab.fields));
                     output.response.labelled_by(label.id);
                     if output.submitted {
                         action = Some(TabAction::Run);
@@ -380,7 +391,7 @@ fn value_label(ui: &mut egui::Ui, value: &Bson) -> egui::Response {
         .monospace()
         .color(code_editor::color(value_highlight(value), ui.visuals()));
     ui.add(Label::new(text).truncate().sense(Sense::click()))
-        .on_hover_text(type_name(value))
+        .on_hover_text(nordpil_query::type_name(value))
 }
 
 /// Strings copy without quotes; everything else as shell syntax.
@@ -515,31 +526,6 @@ fn value_highlight(value: &Bson) -> Highlight {
         }
         Bson::RegularExpression(_) => Highlight::Regex,
         _ => Highlight::Function,
-    }
-}
-
-fn type_name(value: &Bson) -> &'static str {
-    match value {
-        Bson::Double(_) => "Double",
-        Bson::String(_) => "String",
-        Bson::Array(_) => "Array",
-        Bson::Document(_) => "Object",
-        Bson::Boolean(_) => "Boolean",
-        Bson::Null => "Null",
-        Bson::RegularExpression(_) => "Regular expression",
-        Bson::JavaScriptCode(_) | Bson::JavaScriptCodeWithScope(_) => "JavaScript code",
-        Bson::Int32(_) => "Int32",
-        Bson::Int64(_) => "Int64",
-        Bson::Timestamp(_) => "Timestamp",
-        Bson::Binary(_) => "Binary",
-        Bson::ObjectId(_) => "ObjectId",
-        Bson::DateTime(_) => "Date",
-        Bson::Symbol(_) => "Symbol",
-        Bson::Decimal128(_) => "Decimal128",
-        Bson::Undefined => "Undefined",
-        Bson::MaxKey => "MaxKey",
-        Bson::MinKey => "MinKey",
-        Bson::DbPointer(_) => "DBPointer",
     }
 }
 

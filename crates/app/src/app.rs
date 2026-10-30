@@ -106,6 +106,7 @@ impl NordpilApp {
         self.next_tab_id += 1;
         let tab = CollectionTab::new(self.next_tab_id, target);
         self.backend.send(Command::LoadQueries(tab.namespace()));
+        self.backend.send(Command::SampleFields(tab.namespace()));
         self.tabs.push(tab);
         let index = self.tabs.len() - 1;
         self.active_tab = Some(index);
@@ -146,6 +147,7 @@ impl NordpilApp {
                 self.fetch_page(index, false);
             }
             TabAction::Refresh => {
+                self.backend.send(Command::SampleFields(tab.namespace()));
                 tab.count = None;
                 self.fetch_page(index, true);
             }
@@ -275,6 +277,24 @@ impl NordpilApp {
                     }
                 }
             }
+            Response::Fields { namespace, result } => match result {
+                Ok(fields) => {
+                    let hints: Vec<_> = fields
+                        .into_iter()
+                        .map(|field| nordpil_query::FieldHint {
+                            path: field.path,
+                            detail: field.types.join(", "),
+                        })
+                        .collect();
+                    for tab in &mut self.tabs {
+                        if tab.namespace() == namespace {
+                            tab.fields = hints.clone();
+                        }
+                    }
+                }
+                // Autocomplete then just lacks field names; not worth an error.
+                Err(error) => tracing::warn!(%error, "could not sample fields"),
+            },
             Response::Queries { namespace, result } => match result {
                 Ok(history) => {
                     for tab in &mut self.tabs {
@@ -939,6 +959,22 @@ mod screenshots {
             ),
             saved("{ 'customer.email': /@example\\.com$/ }", "", false),
         ];
+        tab.fields = [
+            "_id",
+            "status",
+            "total",
+            "items",
+            "items.sku",
+            "items.qty",
+            "customer.name",
+            "customer.email",
+            "created",
+        ]
+        .map(|path| nordpil_query::FieldHint {
+            path: path.to_owned(),
+            detail: String::new(),
+        })
+        .into();
         app.tabs.push(tab);
         app.active_tab = Some(0);
         app
@@ -977,6 +1013,19 @@ mod screenshots {
         harness.state_mut().tabs[0].show_options = true;
         harness.run();
         save(&mut harness, "json-options");
+
+        harness
+            .get_by_role_and_label(Role::TextInput, "Filter")
+            .focus();
+        harness.run();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness
+            .get_by_role_and_label(Role::TextInput, "Filter")
+            .type_text("{ status: 'shipped', cust");
+        harness.run();
+        save(&mut harness, "autocomplete");
+        harness.key_press(egui::Key::Escape);
+        harness.run();
 
         harness
             .get_by_role_and_label(Role::Button, "History")
