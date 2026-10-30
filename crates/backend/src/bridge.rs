@@ -59,7 +59,10 @@ impl<H: Handler> Bridge<H> {
     /// `wake` runs on a background thread after each event is queued. The UI
     /// uses it to request a repaint, so it drains the event promptly.
     pub fn new(handler: H, wake: impl Fn() + Send + Sync + 'static) -> std::io::Result<Self> {
+        // Database work is I/O-bound, so two workers are plenty; blocking work
+        // (keyring, files) runs on tokio's separate blocking pool.
         let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .thread_name("nordpil-backend")
             .build()?;
