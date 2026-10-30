@@ -62,6 +62,8 @@ pub struct CodeEditor {
     line_numbers: bool,
     /// Drawn without its own frame, inside one the caller draws.
     frameless: bool,
+    /// Only an object is valid, so focusing it empty puts in `{  }`.
+    object: bool,
     popup_open: bool,
     /// Set by Ctrl+Space; cleared when the popup closes.
     explicit: bool,
@@ -79,6 +81,7 @@ impl CodeEditor {
             rows: 4,
             line_numbers: false,
             frameless: false,
+            object: false,
             popup_open: false,
             explicit: false,
             accepted_word: None,
@@ -103,6 +106,14 @@ impl CodeEditor {
 
     pub fn frameless(mut self) -> Self {
         self.frameless = true;
+        self
+    }
+
+    /// Only an object is valid here: focusing the editor while it is empty
+    /// puts in `{  }` with the cursor inside, and leaving it with nothing
+    /// else in it empties it again.
+    pub fn object(mut self) -> Self {
+        self.object = true;
         self
     }
 
@@ -241,6 +252,9 @@ impl CodeEditor {
             self.explicit = false;
         }
         let response = output.text_edit.response.response;
+        if self.object {
+            self.fill_empty_object(ui.ctx(), &response, text);
+        }
         if self.line_numbers {
             paint_line_numbers(
                 ui,
@@ -261,6 +275,20 @@ impl CodeEditor {
         CodeEditorOutput {
             response,
             submitted,
+        }
+    }
+
+    fn fill_empty_object(&self, ctx: &egui::Context, response: &egui::Response, text: &mut String) {
+        if response.gained_focus() && text.trim().is_empty() {
+            *text = "{  }".to_owned();
+            let mut state = TextEditState::load(ctx, self.id).unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(CCursorRange::one(CCursor::new(2))));
+            state.store(ctx, self.id);
+            ctx.request_repaint();
+        } else if response.lost_focus() && is_empty_object(text) {
+            text.clear();
         }
     }
 
@@ -487,6 +515,12 @@ impl Typing<'_> {
     }
 }
 
+/// `{ }` and nothing else, which is what an object editor holds after it is
+/// focused empty.
+pub fn is_empty_object(text: &str) -> bool {
+    text.chars().filter(|c| !c.is_whitespace()).eq("{}".chars())
+}
+
 fn byte_offset(text: &str, char_index: usize) -> usize {
     text.char_indices()
         .nth(char_index)
@@ -595,9 +629,13 @@ mod tests {
     }
 
     fn harness(multiline: bool) -> Harness<'static, State> {
+        harness_with(CodeEditor::new(egui::Id::unique("editor"), multiline))
+    }
+
+    fn harness_with(editor: CodeEditor) -> Harness<'static, State> {
         let state = State {
             text: String::new(),
-            editor: CodeEditor::new(egui::Id::unique("editor"), multiline),
+            editor,
             submitted: false,
             values: nordpil_query::value_hints(&[
                 bson::doc! { "status": "shipped" },
@@ -651,6 +689,23 @@ mod tests {
         assert_eq!(with_cursor(&harness), "{ age: { $gte: |}}");
         assert!(!harness.state().editor.popup_open);
         assert!(!harness.state().submitted);
+    }
+
+    #[test]
+    fn object_editor_puts_in_braces_on_focus_and_removes_them_on_leave() {
+        let mut harness = harness_with(CodeEditor::new(egui::Id::unique("editor"), false).object());
+        harness.get_by_role(Role::TextInput).focus();
+        harness.run();
+        assert_eq!(with_cursor(&harness), "{ | }");
+
+        harness.key_press(Key::Escape);
+        harness.run();
+        assert_eq!(harness.state().text, "");
+
+        type_text(&mut harness, "a: 1");
+        harness.key_press(Key::Escape);
+        harness.run();
+        assert_eq!(harness.state().text, "{ a: 1 }");
     }
 
     #[test]

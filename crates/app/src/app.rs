@@ -11,7 +11,7 @@ use nordpil_backend::{
 use uuid::Uuid;
 
 use crate::connections::{Collections, ConnectionEntry, ConnectionState, Selection};
-use crate::tabs::{CollectionTab, Panel, build_query};
+use crate::tabs::{CollectionTab, Panel, build_query, history_entry};
 use crate::ui::connection_form::{ConnectionForm, FormResult};
 use crate::ui::dialogs::{CreateCollectionDialog, Dialog, DropDialog, PasswordPrompt};
 use crate::ui::document_dialogs::{self, DocumentDialog};
@@ -309,10 +309,11 @@ impl NordpilApp {
                 }
                 match build_query(&tab.inputs) {
                     Ok(applied) => {
-                        if !tab.inputs.is_empty() {
+                        let entry = history_entry(&tab.inputs);
+                        if !entry.is_empty() {
                             self.backend.send(Command::RecordQuery {
                                 namespace: tab.namespace(),
-                                query: tab.inputs.clone(),
+                                query: entry,
                             });
                         }
                         tab.input_errors.clear();

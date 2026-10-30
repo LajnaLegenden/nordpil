@@ -8,7 +8,7 @@ use nordpil_backend::{FindQuery, FoundDocument, IndexInfo, Namespace, RequestId,
 use nordpil_query::{FieldHint, Preview, ValueHint};
 
 use crate::connections::Selection;
-use crate::widgets::code_editor::CodeEditor;
+use crate::widgets::code_editor::{CodeEditor, is_empty_object};
 
 pub const PAGE_SIZES: [u64; 4] = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE: u64 = 20;
@@ -97,10 +97,10 @@ impl CollectionTab {
             target,
             inputs: QueryInputs::default(),
             editors: QueryEditors {
-                filter: editor("filter", "{ field: 'value' }").frameless(),
-                project: editor("project", "{ field: 1 }"),
-                sort: editor("sort", "{ field: -1 }"),
-                collation: editor("collation", "{ locale: 'en' }"),
+                filter: editor("filter", "{ field: 'value' }").frameless().object(),
+                project: editor("project", "{ field: 1 }").object(),
+                sort: editor("sort", "{ field: -1 }").object(),
+                collation: editor("collation", "{ locale: 'en' }").object(),
                 hint: editor("hint", "{ field: 1 } or 'index_name'"),
             },
             show_options: false,
@@ -252,6 +252,25 @@ pub fn build_query(inputs: &QueryInputs) -> Result<AppliedQuery, Vec<String>> {
     })
 }
 
+/// What the history keeps of `inputs`: an editor holding only the `{  }` it
+/// put in on focus counts as empty.
+pub fn history_entry(inputs: &QueryInputs) -> QueryInputs {
+    let clear = |text: &String| {
+        if is_empty_object(text) {
+            String::new()
+        } else {
+            text.clone()
+        }
+    };
+    QueryInputs {
+        filter: clear(&inputs.filter),
+        project: clear(&inputs.project),
+        sort: clear(&inputs.sort),
+        collation: clear(&inputs.collation),
+        ..inputs.clone()
+    }
+}
+
 fn document(name: &str, text: &str, errors: &mut Vec<String>) -> Option<Document> {
     nordpil_query::parse_document(text)
         .map_err(|parse_errors| push_parse_errors(name, text, &parse_errors, errors))
@@ -324,6 +343,23 @@ mod tests {
         assert_eq!(applied.query.hint, Some(Bson::String("a_1".to_owned())));
         assert_eq!(applied.query.max_time, Some(Duration::from_millis(1500)));
         assert_eq!((applied.skip, applied.limit), (5, 0));
+    }
+
+    #[test]
+    fn history_entry_drops_braces_left_by_focus() {
+        let blank = QueryInputs {
+            filter: "{  }".to_owned(),
+            sort: "{}".to_owned(),
+            ..QueryInputs::default()
+        };
+        let set = QueryInputs {
+            filter: "{ a: 1 }".to_owned(),
+            ..blank.clone()
+        };
+
+        assert!(history_entry(&blank).is_empty());
+        assert_eq!(history_entry(&set).filter, "{ a: 1 }");
+        assert_eq!(history_entry(&set).sort, "");
     }
 
     #[test]
