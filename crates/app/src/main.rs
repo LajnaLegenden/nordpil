@@ -2,6 +2,8 @@
 
 mod app;
 mod logging;
+mod spike_language;
+mod widgets;
 
 use eframe::egui;
 
