@@ -7,11 +7,13 @@ use nordpil_backend::{
 use uuid::Uuid;
 
 use crate::connections::{Collections, ConnectionEntry, ConnectionState, Selection};
-use crate::tabs::{CollectionTab, build_query};
+use crate::tabs::{CollectionTab, Panel, build_query};
 use crate::ui::connection_form::{ConnectionForm, FormResult};
 use crate::ui::dialogs::{CreateCollectionDialog, Dialog, DropDialog, PasswordPrompt};
 use crate::ui::document_dialogs::{self, DocumentDialog};
 use crate::ui::documents::TabAction;
+use crate::ui::index_dialog::{self, IndexDialog};
+use crate::ui::indexes::{self, IndexAction};
 use crate::ui::{Action, documents, sidebar};
 
 /// Older notifications are dropped beyond this many.
@@ -29,6 +31,7 @@ pub struct NordpilApp {
     connect_after_save: Option<(Uuid, Option<Password>)>,
     dialog: Option<Dialog>,
     document_dialog: Option<DocumentDialog>,
+    index_dialog: Option<IndexDialog>,
     notifications: Vec<BackendError>,
 }
 
@@ -50,6 +53,7 @@ impl NordpilApp {
             connect_after_save: None,
             dialog: None,
             document_dialog: None,
+            index_dialog: None,
             notifications: Vec::new(),
         })
     }
@@ -378,6 +382,35 @@ impl NordpilApp {
                     dialog.count = Some(result.unwrap_or(None));
                 }
             }
+            Response::Indexes { namespace, result } => {
+                for tab in &mut self.tabs {
+                    if tab.namespace() == namespace {
+                        tab.indexes_request = None;
+                        tab.indexes = Some(result.clone().map_err(|error| error.message));
+                    }
+                }
+            }
+            Response::IndexChanged { namespace, result } => {
+                let ours = self
+                    .index_dialog
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.pending == Some(request));
+                match result {
+                    Ok(()) => {
+                        if ours {
+                            self.index_dialog = None;
+                        }
+                        self.load_indexes(&namespace);
+                    }
+                    Err(error) => match &mut self.index_dialog {
+                        Some(dialog) if ours => {
+                            dialog.pending = None;
+                            dialog.error = Some(error.message);
+                        }
+                        _ => self.notify(error),
+                    },
+                }
+            }
             Response::Written { namespace, result } => {
                 let ours = self
                     .document_dialog
@@ -672,6 +705,50 @@ impl NordpilApp {
         }
     }
 
+    fn load_indexes(&mut self, namespace: &nordpil_backend::Namespace) {
+        let request = self.backend.send(Command::ListIndexes(namespace.clone()));
+        for tab in &mut self.tabs {
+            if tab.namespace() == *namespace {
+                tab.indexes_request = Some(request);
+            }
+        }
+    }
+
+    fn index_action(&mut self, index: usize, action: IndexAction) {
+        let namespace = self.tabs[index].namespace();
+        match action {
+            IndexAction::Refresh => self.load_indexes(&namespace),
+            IndexAction::Create => self.index_dialog = Some(IndexDialog::create(namespace)),
+            IndexAction::Drop(name) => self.index_dialog = Some(IndexDialog::drop(namespace, name)),
+            IndexAction::SetHidden { name, hidden } => {
+                self.backend.send(Command::SetIndexHidden {
+                    namespace,
+                    name,
+                    hidden,
+                });
+            }
+        }
+    }
+
+    fn show_index_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.index_dialog else {
+            return;
+        };
+        let fields = self
+            .tabs
+            .iter()
+            .find(|tab| tab.namespace() == dialog.namespace)
+            .map(|tab| tab.fields.clone())
+            .unwrap_or_default();
+        match dialog.show(ctx, &fields) {
+            index_dialog::Outcome::Open => {}
+            index_dialog::Outcome::Cancel => self.index_dialog = None,
+            index_dialog::Outcome::Send(command) => {
+                dialog.pending = Some(self.backend.send(*command));
+            }
+        }
+    }
+
     fn show_document_dialog(&mut self, ctx: &egui::Context) {
         let Some(dialog) = &mut self.document_dialog else {
             return;
@@ -759,8 +836,26 @@ impl NordpilApp {
         let read_only = self
             .entry(self.tabs[index].target.connection)
             .is_none_or(|entry| entry.saved.read_only);
-        if let Some(action) = documents::show(ui, &mut self.tabs[index], read_only) {
-            self.tab_action(index, action);
+        let tab = &mut self.tabs[index];
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut tab.panel, Panel::Documents, "Documents");
+            ui.selectable_value(&mut tab.panel, Panel::Indexes, "Indexes");
+        });
+        match tab.panel {
+            Panel::Documents => {
+                if let Some(action) = documents::show(ui, tab, read_only) {
+                    self.tab_action(index, action);
+                }
+            }
+            Panel::Indexes => {
+                if tab.indexes.is_none() && tab.indexes_request.is_none() {
+                    let namespace = tab.namespace();
+                    self.load_indexes(&namespace);
+                }
+                if let Some(action) = indexes::show(ui, &self.tabs[index], read_only) {
+                    self.index_action(index, action);
+                }
+            }
         }
     }
 
@@ -789,6 +884,7 @@ impl NordpilApp {
         let ctx = ui.ctx().clone();
         self.show_form(&ctx);
         self.show_document_dialog(&ctx);
+        self.show_index_dialog(&ctx);
         if let Some(dialog) = &mut self.dialog
             && !dialog.show(&ctx, &mut actions)
         {
@@ -1171,6 +1267,48 @@ mod screenshots {
             .get_by_role_and_label(Role::Button, "Cancel")
             .click();
         harness.run();
+
+        {
+            let tab = &mut harness.state_mut().tabs[0];
+            tab.panel = Panel::Indexes;
+            tab.indexes = Some(Ok(vec![
+                nordpil_backend::IndexInfo {
+                    name: "_id_".to_owned(),
+                    spec: bson::doc! { "v": 2, "key": { "_id": 1 }, "name": "_id_" },
+                    size: Some(36_864),
+                    ops: Some(1_204),
+                    since: Some(bson::DateTime::from_millis(1_700_000_000_000)),
+                },
+                nordpil_backend::IndexInfo {
+                    name: "status_1_created_-1".to_owned(),
+                    spec: bson::doc! {
+                        "key": { "status": 1, "created": -1 },
+                        "name": "status_1_created_-1",
+                        "partialFilterExpression": { "status": { "$exists": true } },
+                    },
+                    size: Some(2_310_144),
+                    ops: Some(88),
+                    since: None,
+                },
+                nordpil_backend::IndexInfo {
+                    name: "email_1".to_owned(),
+                    spec: bson::doc! { "key": { "customer.email": 1 }, "unique": true, "hidden": true },
+                    size: Some(512_000),
+                    ops: Some(0),
+                    since: None,
+                },
+            ]));
+        }
+        harness.run();
+        save(&mut harness, "indexes");
+        harness.state_mut().index_action(0, IndexAction::Create);
+        harness.run();
+        save(&mut harness, "create-index");
+        harness
+            .get_by_role_and_label(Role::Button, "Cancel")
+            .click();
+        harness.run();
+        harness.state_mut().tabs[0].panel = Panel::Documents;
 
         harness.state_mut().apply(Action::NewConnection);
         harness.run();

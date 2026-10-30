@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bson::{Bson, Document};
 use eframe::egui;
-use nordpil_backend::{FindQuery, Namespace, RequestId, SavedQuery};
+use nordpil_backend::{FindQuery, IndexInfo, Namespace, RequestId, SavedQuery};
 use nordpil_query::{FieldHint, Style, format_document};
 
 use crate::connections::Selection;
@@ -15,6 +15,13 @@ const DEFAULT_PAGE_SIZE: u64 = 20;
 /// Like Compass, queries without a max time get one, so a bad filter on a
 /// huge collection can't run forever.
 const DEFAULT_MAX_TIME: Duration = Duration::from_secs(60);
+
+/// What a tab shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Panel {
+    Documents,
+    Indexes,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -72,6 +79,10 @@ pub struct CollectionTab {
     pub history: Vec<SavedQuery>,
     /// Field paths sampled from the collection, for autocomplete.
     pub fields: Vec<FieldHint>,
+    pub panel: Panel,
+    /// `None` until loaded.
+    pub indexes: Option<Result<Vec<IndexInfo>, String>>,
+    pub indexes_request: Option<RequestId>,
 }
 
 impl CollectionTab {
@@ -103,6 +114,9 @@ impl CollectionTab {
             input_errors: Vec::new(),
             history: Vec::new(),
             fields: Vec::new(),
+            panel: Panel::Documents,
+            indexes: None,
+            indexes_request: None,
         }
     }
 
