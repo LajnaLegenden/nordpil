@@ -7,20 +7,7 @@ use eframe::egui::text::LayoutJob;
 use eframe::egui::{
     self, Color32, CompletionPopup, Key, Modifiers, RectAlign, Suggestion, TextFormat, TextStyle,
 };
-
-/// Highlight classes the editor knows how to color.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Highlight {
-    Plain,
-    Key,
-    String,
-    Number,
-    Operator,
-    Function,
-    Keyword,
-    Regex,
-    Punctuation,
-}
+use nordpil_query::Highlight;
 
 /// Highlighted byte range of the editor text.
 pub type Span = (Range<usize>, Highlight);
@@ -168,8 +155,9 @@ fn layout_job(ui: &egui::Ui, text: &str, spans: &[Span]) -> LayoutJob {
     let font_id = TextStyle::Monospace.resolve(ui.style());
     let visuals = ui.visuals();
     let mut job = LayoutJob::default();
-    let mut push = |range: Range<usize>, kind: Highlight| {
-        let format = TextFormat::simple(font_id.clone(), color(kind, visuals));
+    let mut push = |range: Range<usize>, kind: Option<Highlight>| {
+        let color = kind.map_or(visuals.text_color(), |kind| color(kind, visuals));
+        let format = TextFormat::simple(font_id.clone(), color);
         job.append(&text[range], 0.0, format);
     };
 
@@ -183,13 +171,13 @@ fn layout_job(ui: &egui::Ui, text: &str, spans: &[Span]) -> LayoutJob {
             continue;
         }
         if pos < range.start {
-            push(pos..range.start, Highlight::Plain);
+            push(pos..range.start, None);
         }
-        push(range.clone(), *kind);
+        push(range.clone(), Some(*kind));
         pos = range.end;
     }
     // Always push, even when empty, so an empty editor still has a font and row height.
-    push(pos..text.len(), Highlight::Plain);
+    push(pos..text.len(), None);
     job
 }
 
@@ -200,7 +188,9 @@ fn color(kind: Highlight, visuals: &egui::Visuals) -> Color32 {
         Color32::from_rgb(r, g, b)
     };
     match kind {
-        Highlight::Plain | Highlight::Punctuation => visuals.text_color(),
+        Highlight::Punctuation => visuals.text_color(),
+        Highlight::Comment => visuals.weak_text_color(),
+        Highlight::Error => visuals.error_fg_color,
         Highlight::Key => pick([156, 220, 254], [0, 16, 128]),
         Highlight::String => pick([206, 145, 120], [163, 21, 21]),
         Highlight::Number => pick([181, 206, 168], [9, 134, 88]),
@@ -218,7 +208,7 @@ mod tests {
     use egui_kittest::kittest::Queryable as _;
 
     use super::*;
-    use crate::spike_language::SpikeLanguage;
+    use crate::query_language::QueryLanguage;
 
     struct State {
         text: String,
@@ -235,7 +225,7 @@ mod tests {
         Harness::new_ui_state(
             |ui, state: &mut State| {
                 let label = ui.label("Query");
-                let output = state.editor.show(ui, &mut state.text, &SpikeLanguage);
+                let output = state.editor.show(ui, &mut state.text, &QueryLanguage);
                 output.response.labelled_by(label.id);
                 state.submitted |= output.submitted;
             },

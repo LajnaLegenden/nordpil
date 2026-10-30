@@ -3,7 +3,7 @@
 mod app;
 mod connections;
 mod logging;
-mod spike_language;
+mod query_language;
 mod ui;
 mod widgets;
 

@@ -1,9 +1,9 @@
-//! Placeholder query language for the editor spike. The `nordpil-query`
-//! lexer and autocomplete replace it in phases 2 and 4.
+//! Connects the editor to the `nordpil-query` crate. Completion is still a
+//! fixed list of operators and constructors; phase 4 makes it context-aware.
 
-use crate::widgets::code_editor::{Completion, Highlight, Language, Span};
+use crate::widgets::code_editor::{Completion, Language, Span};
 
-pub struct SpikeLanguage;
+pub struct QueryLanguage;
 
 const OPERATORS: &[(&str, &str)] = &[
     ("$eq", "equal to"),
@@ -35,62 +35,9 @@ const CONSTRUCTORS: &[(&str, &str)] = &[
     ("UUID", "UUID binary"),
 ];
 
-impl Language for SpikeLanguage {
+impl Language for QueryLanguage {
     fn highlight(&self, text: &str) -> Vec<Span> {
-        let bytes = text.as_bytes();
-        let mut spans = Vec::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            let start = i;
-            let kind = match bytes[i] {
-                b'"' | b'\'' => {
-                    i = skip_quoted(bytes, i);
-                    Highlight::String
-                }
-                b'/' => {
-                    i = skip_quoted(bytes, i);
-                    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
-                        i += 1;
-                    }
-                    Highlight::Regex
-                }
-                b'0'..=b'9' => {
-                    while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
-                        i += 1;
-                    }
-                    Highlight::Number
-                }
-                b'{' | b'}' | b'[' | b']' | b':' | b',' | b'(' | b')' => {
-                    i += 1;
-                    Highlight::Punctuation
-                }
-                c if c == b'$' || c == b'_' || c.is_ascii_alphabetic() => {
-                    while i < bytes.len() && is_word_byte(bytes[i]) {
-                        i += 1;
-                    }
-                    let word = &text[start..i];
-                    let next = text[i..].trim_start().chars().next();
-                    if word.starts_with('$') {
-                        Highlight::Operator
-                    } else if next == Some('(') {
-                        Highlight::Function
-                    } else if next == Some(':') {
-                        Highlight::Key
-                    } else if matches!(word, "true" | "false" | "null" | "new") {
-                        Highlight::Keyword
-                    } else {
-                        Highlight::Plain
-                    }
-                }
-                _ => {
-                    // Step over one whole char so ranges stay on char boundaries.
-                    i += text[i..].chars().next().map_or(1, char::len_utf8);
-                    continue;
-                }
-            };
-            spans.push((start..i, kind));
-        }
-        spans
+        nordpil_query::highlight(text)
     }
 
     fn is_word_char(&self, c: char) -> bool {
@@ -127,19 +74,4 @@ impl Language for SpikeLanguage {
 
 fn is_word_byte(c: u8) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$' | b'.')
-}
-
-/// Skips a string or regex literal that starts at `start`; returns the index
-/// after the closing delimiter, or the text length when it is unterminated.
-fn skip_quoted(bytes: &[u8], start: usize) -> usize {
-    let quote = bytes[start];
-    let mut i = start + 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' => i += 2,
-            c if c == quote => return i + 1,
-            _ => i += 1,
-        }
-    }
-    bytes.len()
 }

@@ -4,10 +4,11 @@ use nordpil_backend::{
     Backend, BackendError, Bridge, Command, DatabaseInfo, ErrorKind, Outcome, Password, RequestId,
     Response,
 };
+use nordpil_query::{ParseError, Style};
 use uuid::Uuid;
 
 use crate::connections::{Collections, ConnectionEntry, ConnectionState, Selection};
-use crate::spike_language::SpikeLanguage;
+use crate::query_language::QueryLanguage;
 use crate::ui::connection_form::{ConnectionForm, FormResult};
 use crate::ui::dialogs::{CreateCollectionDialog, Dialog, DropDialog, PasswordPrompt};
 use crate::ui::{Action, sidebar};
@@ -28,7 +29,8 @@ pub struct NordpilApp {
     notifications: Vec<BackendError>,
     filter: String,
     filter_editor: CodeEditor,
-    submitted_filter: Option<String>,
+    /// The last submitted filter, parsed. Phase 3 runs it instead.
+    submitted_filter: Option<Result<bson::Document, Vec<ParseError>>>,
 }
 
 impl NordpilApp {
@@ -438,14 +440,26 @@ impl NordpilApp {
             let label = ui.label("Filter");
             let output = self
                 .filter_editor
-                .show(ui, &mut self.filter, &SpikeLanguage);
+                .show(ui, &mut self.filter, &QueryLanguage);
             output.response.labelled_by(label.id);
             if output.submitted {
-                self.submitted_filter = Some(self.filter.clone());
+                self.submitted_filter = Some(nordpil_query::parse_document(&self.filter));
             }
         });
-        if let Some(filter) = &self.submitted_filter {
-            ui.label(format!("Submitted: {filter}"));
+        match &self.submitted_filter {
+            Some(Ok(filter)) => {
+                ui.monospace(nordpil_query::format_document(filter, Style::Pretty(2)));
+            }
+            Some(Err(errors)) => {
+                for error in errors {
+                    let column = self.filter[..error.span.start].chars().count() + 1;
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        format!("Column {column}: {}", error.message),
+                    );
+                }
+            }
+            None => {}
         }
     }
 
