@@ -1,4 +1,6 @@
 use eframe::egui;
+use nordpil_backend::secrets::Keyring;
+use nordpil_backend::store::ConnectionStore;
 use nordpil_backend::{Backend, Bridge, Outcome};
 
 use crate::spike_language::SpikeLanguage;
@@ -13,8 +15,11 @@ pub struct NordpilApp {
 
 impl NordpilApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> std::io::Result<Self> {
+        let store_path = ConnectionStore::default_path()
+            .ok_or_else(|| std::io::Error::other("Could not find a home directory."))?;
+        let backend = Backend::new(ConnectionStore::new(store_path), Keyring);
         let ctx = cc.egui_ctx.clone();
-        let backend = Bridge::new(Backend::default(), move || ctx.request_repaint())?;
+        let backend = Bridge::new(backend, move || ctx.request_repaint())?;
         Ok(Self {
             backend,
             filter: String::new(),
@@ -29,7 +34,7 @@ impl eframe::App for NordpilApp {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         for event in self.backend.drain() {
             match event.outcome {
-                Outcome::Done(response) => match response {},
+                Outcome::Done(_response) => {}
                 Outcome::Cancelled => {}
             }
         }

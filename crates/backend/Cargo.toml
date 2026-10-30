@@ -8,9 +8,25 @@ rust-version.workspace = true
 
 [dependencies]
 crossbeam-channel = "0.5.17"
-tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time"] }
+directories = "6"
+futures-util = "0.3.34"
+keyring = "4.2"
+mongodb = { version = "3.9", default-features = false, features = [
+    "bson-3",
+    "compat-3-3-0",
+    "dns-resolver",
+    "rustls-tls",
+] }
+percent-encoding = "2.3"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tokio-util = "0.7.20"
+toml = "1.1"
 tracing = "0.1.44"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+testcontainers-modules = { version = "0.15", features = ["mongo"] }
