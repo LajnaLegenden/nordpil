@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=nordpil
+GenericName=MongoDB Client
+Comment=Browse and query MongoDB databases
+Exec=nordpil
+Icon=nordpil
+Terminal=false
+Categories=Development;Database;
+Keywords=mongo;mongodb;database;query;
+StartupWMClass=nordpil

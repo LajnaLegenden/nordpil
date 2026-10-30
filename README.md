@@ -41,7 +41,17 @@ when idle, against roughly 1 GB for Compass.
 
 ## Install
 
-There are no release builds yet. Build from source with Rust 1.97 or newer:
+There are no release builds yet. Build from source with Rust 1.97 or newer.
+
+On Linux, install it system-wide with a launcher entry and icon. This builds a release as
+you, then copies the files to `/usr/local` with sudo:
+
+```sh
+just install          # or another prefix: just install /usr
+just uninstall        # same prefix as install
+```
+
+On other platforms, or for the binary only:
 
 ```sh
 cargo install --path crates/app

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- The top-bar logo. The arrow is Lucide "navigation", see fonts/LICENSE-lucide.txt. -->
+  <rect x="16" y="16" width="224" height="224" rx="60" fill="#88c0d0"/>
+  <g transform="translate(60.5 72) scale(5.4)" fill="none" stroke="#0b1a20" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polygon points="3 11 22 2 13 21 11 13 3 11"/>
+  </g>
+</svg>
