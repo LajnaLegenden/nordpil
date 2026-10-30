@@ -36,6 +36,8 @@ pub enum TabAction {
     Delete(usize),
     UpdateMany,
     DeleteMany,
+    Export,
+    Import,
 }
 
 /// The table shows at most this many columns, so huge documents stay usable.
@@ -246,8 +248,14 @@ fn toolbar(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Optio
         ] {
             ui.selectable_value(&mut tab.view, view, name);
         }
+        ui.separator();
+        if ui.button("Export").clicked() {
+            action = Some(TabAction::Export);
+        }
         if !read_only {
-            ui.separator();
+            if ui.button("Import").clicked() {
+                action = Some(TabAction::Import);
+            }
             if ui.button("Insert").clicked() {
                 action = Some(TabAction::Insert);
             }

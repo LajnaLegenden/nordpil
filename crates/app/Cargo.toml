@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 bson = "3.1"
+crossbeam-channel = "0.5.17"
 directories = "6"
 eframe = { version = "0.37", default-features = false, features = [
     "accesskit",
@@ -22,6 +23,7 @@ eframe = { version = "0.37", default-features = false, features = [
 egui_extras = { version = "0.37", default-features = false }
 nordpil-backend.workspace = true
 nordpil-query.workspace = true
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

@@ -14,6 +14,7 @@ use crate::ui::document_dialogs::{self, DocumentDialog};
 use crate::ui::documents::TabAction;
 use crate::ui::index_dialog::{self, IndexDialog};
 use crate::ui::indexes::{self, IndexAction};
+use crate::ui::transfer_dialog::{self, TransferDialog};
 use crate::ui::{Action, documents, sidebar};
 
 /// Older notifications are dropped beyond this many.
@@ -32,6 +33,7 @@ pub struct NordpilApp {
     dialog: Option<Dialog>,
     document_dialog: Option<DocumentDialog>,
     index_dialog: Option<IndexDialog>,
+    transfer_dialog: Option<TransferDialog>,
     notifications: Vec<BackendError>,
 }
 
@@ -54,6 +56,7 @@ impl NordpilApp {
             dialog: None,
             document_dialog: None,
             index_dialog: None,
+            transfer_dialog: None,
             notifications: Vec::new(),
         })
     }
@@ -174,6 +177,23 @@ impl NordpilApp {
                     namespace: tab.namespace(),
                     id,
                 });
+            }
+            TabAction::Export => {
+                let query = tab
+                    .applied
+                    .as_ref()
+                    .map(|applied| nordpil_backend::FindQuery {
+                        skip: applied.skip,
+                        limit: i64::try_from(applied.limit).unwrap_or(0),
+                        max_time: None,
+                        ..applied.query.clone()
+                    });
+                let fields: Vec<String> = tab.fields.iter().map(|f| f.path.clone()).collect();
+                self.transfer_dialog =
+                    Some(TransferDialog::export(tab.namespace(), query, &fields));
+            }
+            TabAction::Import => {
+                self.transfer_dialog = Some(TransferDialog::import(tab.namespace()));
             }
             TabAction::Insert => {
                 self.document_dialog = Some(DocumentDialog::new(
@@ -411,6 +431,27 @@ impl NordpilApp {
                     },
                 }
             }
+            Response::Exported(result) => {
+                if let Some(dialog) = &mut self.transfer_dialog {
+                    let path = dialog.path().to_owned();
+                    dialog.finished(result.map(|n| format!("Exported {n} documents to {path}.")));
+                }
+            }
+            Response::Imported { namespace, result } => {
+                let imported = result.is_ok();
+                if let Some(dialog) = &mut self.transfer_dialog {
+                    dialog
+                        .finished(result.map(|summary| transfer_dialog::import_message(&summary)));
+                }
+                if imported {
+                    let indexes: Vec<_> = (0..self.tabs.len())
+                        .filter(|&index| self.tabs[index].namespace() == namespace)
+                        .collect();
+                    for index in indexes {
+                        self.tab_action(index, TabAction::Refresh);
+                    }
+                }
+            }
             Response::Written { namespace, result } => {
                 let ours = self
                     .document_dialog
@@ -558,6 +599,13 @@ impl NordpilApp {
     }
 
     fn cancelled(&mut self, request: RequestId) {
+        if let Some(dialog) = &mut self.transfer_dialog
+            && dialog.running.as_ref().is_some_and(|(r, _)| *r == request)
+        {
+            dialog.finished(Err(BackendError::new(
+                "Cancelled. Documents imported so far were kept.",
+            )));
+        }
         for tab in &mut self.tabs {
             if tab.pending_find == Some(request) {
                 tab.pending_find = None;
@@ -730,6 +778,21 @@ impl NordpilApp {
         }
     }
 
+    fn show_transfer_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.transfer_dialog else {
+            return;
+        };
+        match dialog.show(ctx) {
+            transfer_dialog::Outcome::Open => {}
+            transfer_dialog::Outcome::Close => self.transfer_dialog = None,
+            transfer_dialog::Outcome::Send(command, progress) => {
+                let request = self.backend.send(*command);
+                dialog.started(request, progress);
+            }
+            transfer_dialog::Outcome::Cancel(request) => self.backend.cancel(request),
+        }
+    }
+
     fn show_index_dialog(&mut self, ctx: &egui::Context) {
         let Some(dialog) = &mut self.index_dialog else {
             return;
@@ -885,6 +948,7 @@ impl NordpilApp {
         self.show_form(&ctx);
         self.show_document_dialog(&ctx);
         self.show_index_dialog(&ctx);
+        self.show_transfer_dialog(&ctx);
         if let Some(dialog) = &mut self.dialog
             && !dialog.show(&ctx, &mut actions)
         {
@@ -1309,6 +1373,24 @@ mod screenshots {
             .click();
         harness.run();
         harness.state_mut().tabs[0].panel = Panel::Documents;
+
+        harness.state_mut().tab_action(0, TabAction::Export);
+        harness.run();
+        harness.get_by_label("CSV").click();
+        harness.run();
+        save(&mut harness, "export");
+        harness
+            .get_by_role_and_label(Role::Button, "Cancel")
+            .click();
+        harness.run();
+        harness.state_mut().tab_action(0, TabAction::Import);
+        harness.run();
+        save(&mut harness, "import");
+        harness
+            .get_by_role_and_label(Role::Button, "Cancel")
+            .click();
+        harness.run();
+        assert!(harness.state().transfer_dialog.is_none());
 
         harness.state_mut().apply(Action::NewConnection);
         harness.run();

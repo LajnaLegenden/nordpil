@@ -8,6 +8,7 @@ pub mod documents;
 pub mod index_dialog;
 pub mod indexes;
 pub mod sidebar;
+pub mod transfer_dialog;
 
 use nordpil_backend::Password;
 use uuid::Uuid;
