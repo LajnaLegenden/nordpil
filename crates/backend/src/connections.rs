@@ -79,6 +79,9 @@ impl Backend {
         if let Err(error) = deleted {
             tracing::warn!(%id, %error, detail = ?error.detail, "could not delete stored password");
         }
+        if let Err(error) = self.forget_queries(id).await {
+            tracing::warn!(%id, %error, detail = ?error.detail, "could not delete saved queries");
+        }
         Ok(())
     }
 

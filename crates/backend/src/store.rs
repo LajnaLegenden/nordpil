@@ -1,14 +1,12 @@
 //! Saved connections, persisted as TOML in the platform config directory.
 //! Passwords are never stored here; see [`crate::secrets`].
 
-use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::BackendError;
+use crate::{BackendError, toml_file};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedConnection {
@@ -80,53 +78,28 @@ impl ConnectionStore {
 
     /// Returns no connections when the file doesn't exist yet.
     pub fn load(&self) -> Result<Vec<SavedConnection>, BackendError> {
-        let text = match fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(self.error("read", error)),
+        let Some(file) = toml_file::read::<ConnectionsFile>(&self.path)? else {
+            return Ok(Vec::new());
         };
-        let file: ConnectionsFile =
-            toml::from_str(&text).map_err(|error| self.error("parse", error))?;
         if file.version > FILE_VERSION {
-            return Err(BackendError::new(format!(
-                "{} was written by a newer version of nordpil.",
-                self.path.display()
-            )));
+            return Err(toml_file::newer_version_error(&self.path));
         }
         Ok(file.connections)
     }
 
-    /// Replaces the file atomically, so a crash never leaves it half-written.
     pub fn save(&self, connections: &[SavedConnection]) -> Result<(), BackendError> {
         let file = ConnectionsFile {
             version: FILE_VERSION,
             connections: connections.to_vec(),
         };
-        let text = toml::to_string_pretty(&file).map_err(|error| self.error("serialize", error))?;
-
-        let dir = self.path.parent().unwrap_or(Path::new("."));
-        fs::create_dir_all(dir).map_err(|error| self.error("create the folder for", error))?;
-        let temp = self.path.with_extension("toml.tmp");
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut out = options
-            .open(&temp)
-            .map_err(|error| self.error("write", error))?;
-        out.write_all(text.as_bytes())
-            .and_then(|()| out.sync_all())
-            .map_err(|error| self.error("write", error))?;
-        fs::rename(&temp, &self.path).map_err(|error| self.error("replace", error))
-    }
-
-    fn error(&self, action: &str, error: impl std::fmt::Display) -> BackendError {
-        BackendError::new(format!("Could not {action} {}.", self.path.display())).with_detail(error)
+        toml_file::write(&self.path, &file)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     fn temp_store() -> ConnectionStore {

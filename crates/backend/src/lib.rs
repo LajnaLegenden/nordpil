@@ -5,8 +5,10 @@ mod connections;
 mod databases;
 mod documents;
 mod error;
+mod queries;
 pub mod secrets;
 pub mod store;
+mod toml_file;
 pub mod uri;
 
 use std::collections::HashMap;
@@ -18,6 +20,8 @@ pub use databases::{CollectionInfo, CollectionKind, DatabaseInfo};
 pub use documents::{FindQuery, Namespace};
 pub use error::{BackendError, ErrorKind};
 use mongodb::Client;
+use queries::QueryStore;
+pub use queries::{QueryText, SavedQuery};
 use secrets::SecretStore;
 use store::{ConnectionStore, SavedConnection};
 pub use tokio_util::sync::CancellationToken;
@@ -97,6 +101,21 @@ pub enum Command {
         filter: mongodb::bson::Document,
         hint: Option<mongodb::bson::Bson>,
     },
+    LoadQueries(Namespace),
+    /// Adds a query to the collection's history, or moves it to the top.
+    RecordQuery {
+        namespace: Namespace,
+        query: QueryText,
+    },
+    SetQueryFavorite {
+        namespace: Namespace,
+        id: Uuid,
+        favorite: bool,
+    },
+    DeleteQuery {
+        namespace: Namespace,
+        id: Uuid,
+    },
 }
 
 /// Results of [`Command`]s, with enough context to act on them.
@@ -144,6 +163,12 @@ pub enum Response {
     Documents(Result<Vec<mongodb::bson::Document>, BackendError>),
     /// `None` when counting took too long.
     Count(Result<Option<u64>, BackendError>),
+    /// The collection's saved queries after a query command: favorites first,
+    /// then most recent.
+    Queries {
+        namespace: Namespace,
+        result: Result<Vec<SavedQuery>, BackendError>,
+    },
 }
 
 /// An open connection.
@@ -156,14 +181,18 @@ struct Session {
 /// Handles [`Command`]s on the background runtime.
 pub struct Backend {
     store: Arc<tokio::sync::Mutex<ConnectionStore>>,
+    queries: Arc<tokio::sync::Mutex<QueryStore>>,
     secrets: Arc<dyn SecretStore>,
     sessions: Mutex<HashMap<Uuid, Session>>,
 }
 
 impl Backend {
+    /// Saved queries live in `queries.toml` next to the connections file.
     pub fn new(store: ConnectionStore, secrets: impl SecretStore) -> Self {
+        let queries = QueryStore::new(store.path().with_file_name("queries.toml"));
         Self {
             store: Arc::new(tokio::sync::Mutex::new(store)),
+            queries: Arc::new(tokio::sync::Mutex::new(queries)),
             secrets: Arc::new(secrets),
             sessions: Mutex::default(),
         }
@@ -198,6 +227,14 @@ impl Backend {
     ) -> Result<T, BackendError> {
         let store = Arc::clone(&self.store).lock_owned().await;
         blocking(move || f(&store)).await
+    }
+
+    async fn with_queries<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&QueryStore) -> Result<T, BackendError> + Send + 'static,
+    ) -> Result<T, BackendError> {
+        let queries = Arc::clone(&self.queries).lock_owned().await;
+        blocking(move || f(&queries)).await
     }
 
     async fn with_secrets<T: Send + 'static>(
@@ -297,6 +334,26 @@ impl Handler for Backend {
                 filter,
                 hint,
             } => Response::Count(self.count(&namespace, filter, hint).await),
+            Command::LoadQueries(namespace) => Response::Queries {
+                result: self.load_queries(namespace.clone()).await,
+                namespace,
+            },
+            Command::RecordQuery { namespace, query } => Response::Queries {
+                result: self.record_query(namespace.clone(), query).await,
+                namespace,
+            },
+            Command::SetQueryFavorite {
+                namespace,
+                id,
+                favorite,
+            } => Response::Queries {
+                result: self.set_favorite(namespace.clone(), id, favorite).await,
+                namespace,
+            },
+            Command::DeleteQuery { namespace, id } => Response::Queries {
+                result: self.delete_query(namespace.clone(), id).await,
+                namespace,
+            },
         }
     }
 }
