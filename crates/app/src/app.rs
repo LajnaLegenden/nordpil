@@ -104,7 +104,9 @@ impl NordpilApp {
             return;
         }
         self.next_tab_id += 1;
-        self.tabs.push(CollectionTab::new(self.next_tab_id, target));
+        let tab = CollectionTab::new(self.next_tab_id, target);
+        self.backend.send(Command::LoadQueries(tab.namespace()));
+        self.tabs.push(tab);
         let index = self.tabs.len() - 1;
         self.active_tab = Some(index);
         self.tab_action(index, TabAction::Run);
@@ -124,6 +126,12 @@ impl NordpilApp {
                 }
                 match build_query(&tab.inputs) {
                     Ok(applied) => {
+                        if !tab.inputs.is_empty() {
+                            self.backend.send(Command::RecordQuery {
+                                namespace: tab.namespace(),
+                                query: tab.inputs.clone(),
+                            });
+                        }
                         tab.input_errors.clear();
                         tab.applied = Some(applied);
                         tab.page = 0;
@@ -140,6 +148,23 @@ impl NordpilApp {
             TabAction::Refresh => {
                 tab.count = None;
                 self.fetch_page(index, true);
+            }
+            TabAction::Apply(inputs) => {
+                tab.apply_inputs(inputs);
+                self.tab_action(index, TabAction::Run);
+            }
+            TabAction::SetFavorite { id, favorite } => {
+                self.backend.send(Command::SetQueryFavorite {
+                    namespace: tab.namespace(),
+                    id,
+                    favorite,
+                });
+            }
+            TabAction::DeleteQuery(id) => {
+                self.backend.send(Command::DeleteQuery {
+                    namespace: tab.namespace(),
+                    id,
+                });
             }
         }
     }
@@ -250,6 +275,16 @@ impl NordpilApp {
                     }
                 }
             }
+            Response::Queries { namespace, result } => match result {
+                Ok(history) => {
+                    for tab in &mut self.tabs {
+                        if tab.namespace() == namespace {
+                            tab.history = history.clone();
+                        }
+                    }
+                }
+                Err(error) => self.notify(error),
+            },
             Response::Count(result) => {
                 let Some(tab) = self
                     .tabs
@@ -882,6 +917,28 @@ mod screenshots {
                 })
                 .collect(),
         );
+        let saved = |filter: &str, sort: &str, favorite: bool| nordpil_backend::SavedQuery {
+            id: Uuid::new_v4(),
+            connection: Uuid::nil(),
+            database: "shop".to_owned(),
+            collection: "orders".to_owned(),
+            favorite,
+            used_at: 0,
+            query: crate::tabs::QueryInputs {
+                filter: filter.to_owned(),
+                sort: sort.to_owned(),
+                ..Default::default()
+            },
+        };
+        tab.history = vec![
+            saved("{ status: 'pending', total: { $gt: 1000 } }", "", true),
+            saved(
+                "{ status: 'shipped', total: { $gt: 100 } }",
+                "{ created: -1 }",
+                false,
+            ),
+            saved("{ 'customer.email': /@example\\.com$/ }", "", false),
+        ];
         app.tabs.push(tab);
         app.active_tab = Some(0);
         app
@@ -920,6 +977,14 @@ mod screenshots {
         harness.state_mut().tabs[0].show_options = true;
         harness.run();
         save(&mut harness, "json-options");
+
+        harness
+            .get_by_role_and_label(Role::Button, "History")
+            .click();
+        harness.run();
+        save(&mut harness, "history");
+        harness.key_press(egui::Key::Escape);
+        harness.run();
 
         harness.state_mut().apply(Action::NewConnection);
         harness.run();

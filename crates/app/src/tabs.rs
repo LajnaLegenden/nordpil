@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bson::{Bson, Document};
 use eframe::egui;
-use nordpil_backend::{FindQuery, Namespace, RequestId};
+use nordpil_backend::{FindQuery, Namespace, RequestId, SavedQuery};
 use nordpil_query::{Style, format_document};
 
 use crate::connections::Selection;
@@ -23,17 +23,8 @@ pub enum View {
     Table,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct QueryInputs {
-    pub filter: String,
-    pub project: String,
-    pub sort: String,
-    pub collation: String,
-    pub hint: String,
-    pub skip: String,
-    pub limit: String,
-    pub max_time_ms: String,
-}
+/// The query inputs as typed; also what the history stores.
+pub type QueryInputs = nordpil_backend::QueryText;
 
 pub struct QueryEditors {
     pub filter: CodeEditor,
@@ -77,6 +68,8 @@ pub struct CollectionTab {
     pub error: Option<String>,
     /// From reading the query inputs.
     pub input_errors: Vec<String>,
+    /// This collection's favorite and recent queries.
+    pub history: Vec<SavedQuery>,
 }
 
 impl CollectionTab {
@@ -106,6 +99,7 @@ impl CollectionTab {
             pending_count: None,
             error: None,
             input_errors: Vec::new(),
+            history: Vec::new(),
         }
     }
 
@@ -119,6 +113,16 @@ impl CollectionTab {
 
     pub fn title(&self) -> String {
         format!("{}.{}", self.target.database, self.target.collection)
+    }
+
+    /// Fills in a saved query, opening the options when it uses any.
+    pub fn apply_inputs(&mut self, inputs: QueryInputs) {
+        let uses_options = QueryInputs {
+            filter: String::new(),
+            ..inputs.clone()
+        } != QueryInputs::default();
+        self.show_options |= uses_options;
+        self.inputs = inputs;
     }
 
     pub fn is_loading(&self) -> bool {

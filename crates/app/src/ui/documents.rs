@@ -5,10 +5,12 @@ use bson::{Bson, Document};
 use eframe::egui::collapsing_header::CollapsingState;
 use eframe::egui::{self, Align, Label, Layout, RichText, Sense, TextEdit};
 use egui_extras::{Column, TableBuilder};
+use nordpil_backend::SavedQuery;
 use nordpil_query::{Highlight, Style, format_document, format_value};
+use uuid::Uuid;
 
 use crate::query_language::QueryLanguage;
-use crate::tabs::{CollectionTab, PAGE_SIZES, View};
+use crate::tabs::{CollectionTab, PAGE_SIZES, QueryInputs, View};
 use crate::widgets::code_editor::{self, CodeEditor};
 
 pub enum TabAction {
@@ -20,6 +22,13 @@ pub enum TabAction {
     Page(u64),
     /// Run the applied query again.
     Refresh,
+    /// Fill in a query from the history and run it.
+    Apply(QueryInputs),
+    SetFavorite {
+        id: Uuid,
+        favorite: bool,
+    },
+    DeleteQuery(Uuid),
 }
 
 /// The table shows at most this many columns, so huge documents stay usable.
@@ -72,6 +81,12 @@ fn query_bar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
                 action = Some(TabAction::Reset);
             }
             ui.toggle_value(&mut tab.show_options, "Options");
+            ui.menu_button("History", |ui| {
+                if let Some(chosen) = history_menu(ui, &tab.history) {
+                    action = Some(chosen);
+                    ui.close();
+                }
+            });
             let output = tab
                 .editors
                 .filter
@@ -130,6 +145,75 @@ fn query_bar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
             });
     }
     action
+}
+
+fn history_menu(ui: &mut egui::Ui, history: &[SavedQuery]) -> Option<TabAction> {
+    if history.is_empty() {
+        ui.weak("Queries you run show up here.");
+        return None;
+    }
+    ui.set_max_width(480.0);
+    let mut action = None;
+    let mut heading = None;
+    for saved in history {
+        let section = if saved.favorite {
+            "Favorites"
+        } else {
+            "Recent"
+        };
+        if heading != Some(section) {
+            if heading.is_some() {
+                ui.separator();
+            }
+            ui.weak(section);
+            heading = Some(section);
+        }
+        ui.horizontal(|ui| {
+            let star = if saved.favorite { "Unstar" } else { "Star" };
+            if ui.small_button(star).clicked() {
+                action = Some(TabAction::SetFavorite {
+                    id: saved.id,
+                    favorite: !saved.favorite,
+                });
+            }
+            if ui.small_button("Delete").clicked() {
+                action = Some(TabAction::DeleteQuery(saved.id));
+            }
+            let summary = query_summary(&saved.query);
+            let response = ui.add(
+                egui::Button::new(RichText::new(&summary).monospace())
+                    .frame(false)
+                    .truncate(),
+            );
+            if response.on_hover_text(summary.as_str()).clicked() {
+                action = Some(TabAction::Apply(saved.query.clone()));
+            }
+        });
+    }
+    action
+}
+
+/// The filter plus any options, on one line.
+fn query_summary(query: &QueryInputs) -> String {
+    let mut parts = vec![if query.filter.trim().is_empty() {
+        "{}".to_owned()
+    } else {
+        query.filter.trim().to_owned()
+    }];
+    for (name, value) in [
+        ("project", &query.project),
+        ("sort", &query.sort),
+        ("collation", &query.collation),
+        ("hint", &query.hint),
+        ("skip", &query.skip),
+        ("limit", &query.limit),
+        ("maxTimeMS", &query.max_time_ms),
+    ] {
+        if !value.trim().is_empty() {
+            parts.push(format!("{name}: {}", value.trim()));
+        }
+    }
+    parts.join("  ")
 }
 
 fn toolbar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
