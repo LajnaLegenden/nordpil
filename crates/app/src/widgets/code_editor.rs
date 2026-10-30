@@ -48,6 +48,8 @@ pub struct CodeEditor {
     id: egui::Id,
     multiline: bool,
     hint: String,
+    /// Visible rows of a multiline editor.
+    rows: usize,
     popup_open: bool,
     /// Set by Ctrl+Space; cleared when the popup closes.
     explicit: bool,
@@ -60,6 +62,7 @@ impl CodeEditor {
             id,
             multiline,
             hint: String::new(),
+            rows: 4,
             popup_open: false,
             explicit: false,
             highlight_cache: None,
@@ -68,6 +71,11 @@ impl CodeEditor {
 
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = hint.into();
+        self
+    }
+
+    pub fn rows(mut self, rows: usize) -> Self {
+        self.rows = rows;
         self
     }
 
@@ -107,7 +115,9 @@ impl CodeEditor {
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
         let edit = if self.multiline {
-            egui::TextEdit::multiline(text).lock_focus(true)
+            egui::TextEdit::multiline(text)
+                .lock_focus(true)
+                .desired_rows(self.rows)
         } else {
             egui::TextEdit::singleline(text)
         };

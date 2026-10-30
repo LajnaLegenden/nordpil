@@ -10,6 +10,7 @@ use crate::connections::{Collections, ConnectionEntry, ConnectionState, Selectio
 use crate::tabs::{CollectionTab, build_query};
 use crate::ui::connection_form::{ConnectionForm, FormResult};
 use crate::ui::dialogs::{CreateCollectionDialog, Dialog, DropDialog, PasswordPrompt};
+use crate::ui::document_dialogs::{self, DocumentDialog};
 use crate::ui::documents::TabAction;
 use crate::ui::{Action, documents, sidebar};
 
@@ -27,6 +28,7 @@ pub struct NordpilApp {
     /// Connect once the form's save succeeds.
     connect_after_save: Option<(Uuid, Option<Password>)>,
     dialog: Option<Dialog>,
+    document_dialog: Option<DocumentDialog>,
     notifications: Vec<BackendError>,
 }
 
@@ -47,6 +49,7 @@ impl NordpilApp {
             form: None,
             connect_after_save: None,
             dialog: None,
+            document_dialog: None,
             notifications: Vec::new(),
         })
     }
@@ -167,6 +170,65 @@ impl NordpilApp {
                     namespace: tab.namespace(),
                     id,
                 });
+            }
+            TabAction::Insert => {
+                self.document_dialog = Some(DocumentDialog::new(
+                    tab.namespace(),
+                    document_dialogs::Kind::Insert,
+                ));
+            }
+            TabAction::Edit(document)
+            | TabAction::Clone(document)
+            | TabAction::Delete(document) => {
+                let Some(document_value) = tab
+                    .results
+                    .as_ref()
+                    .and_then(|results| results.documents.get(document))
+                else {
+                    return;
+                };
+                let namespace = tab.namespace();
+                self.document_dialog = Some(match action {
+                    TabAction::Clone(_) => DocumentDialog::clone_of(namespace, document_value),
+                    TabAction::Delete(_) => {
+                        let Some(id) = document_value.get("_id").cloned() else {
+                            self.notify(BackendError::new(
+                                "Documents without an _id can't be deleted here.",
+                            ));
+                            return;
+                        };
+                        DocumentDialog::new(namespace, document_dialogs::Kind::Delete { id })
+                    }
+                    _ => DocumentDialog::new(
+                        namespace,
+                        document_dialogs::Kind::Edit {
+                            original: Box::new(document_value.clone()),
+                        },
+                    ),
+                });
+            }
+            TabAction::UpdateMany | TabAction::DeleteMany => {
+                let Some(applied) = &tab.applied else {
+                    return;
+                };
+                let filter = applied.query.filter.clone();
+                let namespace = tab.namespace();
+                let kind = if matches!(action, TabAction::UpdateMany) {
+                    document_dialogs::Kind::UpdateMany {
+                        filter: filter.clone(),
+                    }
+                } else {
+                    document_dialogs::Kind::DeleteMany {
+                        filter: filter.clone(),
+                    }
+                };
+                let mut dialog = DocumentDialog::new(namespace.clone(), kind);
+                dialog.count_request = Some(self.backend.send(Command::Count {
+                    namespace,
+                    filter,
+                    hint: None,
+                }));
+                self.document_dialog = Some(dialog);
             }
         }
     }
@@ -305,6 +367,43 @@ impl NordpilApp {
                 }
                 Err(error) => self.notify(error),
             },
+            Response::Count(result)
+                if self
+                    .document_dialog
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.count_request == Some(request)) =>
+            {
+                if let Some(dialog) = &mut self.document_dialog {
+                    dialog.count_request = None;
+                    dialog.count = Some(result.unwrap_or(None));
+                }
+            }
+            Response::Written { namespace, result } => {
+                let ours = self
+                    .document_dialog
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.pending == Some(request));
+                match result {
+                    Ok(_) => {
+                        if ours {
+                            self.document_dialog = None;
+                        }
+                        let indexes: Vec<_> = (0..self.tabs.len())
+                            .filter(|&index| self.tabs[index].namespace() == namespace)
+                            .collect();
+                        for index in indexes {
+                            self.tab_action(index, TabAction::Refresh);
+                        }
+                    }
+                    Err(error) => match &mut self.document_dialog {
+                        Some(dialog) if ours => {
+                            dialog.pending = None;
+                            dialog.error = Some(error.message);
+                        }
+                        _ => self.notify(error),
+                    },
+                }
+            }
             Response::Count(result) => {
                 let Some(tab) = self
                     .tabs
@@ -573,6 +672,25 @@ impl NordpilApp {
         }
     }
 
+    fn show_document_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.document_dialog else {
+            return;
+        };
+        let fields = self
+            .tabs
+            .iter()
+            .find(|tab| tab.namespace() == dialog.namespace)
+            .map(|tab| tab.fields.clone())
+            .unwrap_or_default();
+        match dialog.show(ctx, &fields) {
+            document_dialogs::Outcome::Open => {}
+            document_dialogs::Outcome::Cancel => self.document_dialog = None,
+            document_dialogs::Outcome::Send(command) => {
+                dialog.pending = Some(self.backend.send(*command));
+            }
+        }
+    }
+
     fn show_notifications(&mut self, ui: &mut egui::Ui) {
         if self.notifications.is_empty() {
             return;
@@ -638,7 +756,10 @@ impl NordpilApp {
         let Some(index) = self.active_tab else {
             return;
         };
-        if let Some(action) = documents::show(ui, &mut self.tabs[index]) {
+        let read_only = self
+            .entry(self.tabs[index].target.connection)
+            .is_none_or(|entry| entry.saved.read_only);
+        if let Some(action) = documents::show(ui, &mut self.tabs[index], read_only) {
             self.tab_action(index, action);
         }
     }
@@ -667,6 +788,7 @@ impl NordpilApp {
 
         let ctx = ui.ctx().clone();
         self.show_form(&ctx);
+        self.show_document_dialog(&ctx);
         if let Some(dialog) = &mut self.dialog
             && !dialog.show(&ctx, &mut actions)
         {
@@ -1033,6 +1155,21 @@ mod screenshots {
         harness.run();
         save(&mut harness, "history");
         harness.key_press(egui::Key::Escape);
+        harness.run();
+
+        harness.state_mut().tab_action(0, TabAction::Edit(0));
+        harness.run();
+        save(&mut harness, "edit-document");
+        harness
+            .get_by_role_and_label(Role::Button, "Cancel")
+            .click();
+        harness.run();
+        harness.state_mut().tab_action(0, TabAction::DeleteMany);
+        harness.run();
+        save(&mut harness, "delete-many");
+        harness
+            .get_by_role_and_label(Role::Button, "Cancel")
+            .click();
         harness.run();
 
         harness.state_mut().apply(Action::NewConnection);

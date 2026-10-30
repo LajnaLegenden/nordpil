@@ -29,18 +29,26 @@ pub enum TabAction {
         favorite: bool,
     },
     DeleteQuery(Uuid),
+    Insert,
+    /// Documents by index on the current page.
+    Edit(usize),
+    Clone(usize),
+    Delete(usize),
+    UpdateMany,
+    DeleteMany,
 }
 
 /// The table shows at most this many columns, so huge documents stay usable.
 const MAX_TABLE_COLUMNS: usize = 60;
 
-pub fn show(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
+/// `read_only` hides everything that writes.
+pub fn show(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Option<TabAction> {
     let mut action = query_bar(ui, tab);
     for error in &tab.input_errors {
         ui.colored_label(ui.visuals().error_fg_color, error);
     }
     ui.add_space(4.0);
-    action = toolbar(ui, tab).or(action);
+    action = toolbar(ui, tab, read_only).or(action);
     ui.separator();
 
     if let Some(error) = &tab.error {
@@ -61,12 +69,13 @@ pub fn show(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
         });
         return action;
     }
+    let mut view_action = None;
     match tab.view {
-        View::List => list_view(ui, tab),
-        View::Json => json_view(ui, tab),
-        View::Table => table_view(ui, tab),
+        View::List => list_view(ui, tab, read_only, &mut view_action),
+        View::Json => json_view(ui, tab, read_only, &mut view_action),
+        View::Table => table_view(ui, tab, read_only, &mut view_action),
     }
-    action
+    view_action.or(action)
 }
 
 fn query_bar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
@@ -227,7 +236,7 @@ fn query_summary(query: &QueryInputs) -> String {
     parts.join("  ")
 }
 
-fn toolbar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
+fn toolbar(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Option<TabAction> {
     let mut action = None;
     ui.horizontal(|ui| {
         for (view, name) in [
@@ -236,6 +245,20 @@ fn toolbar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
             (View::Table, "Table"),
         ] {
             ui.selectable_value(&mut tab.view, view, name);
+        }
+        if !read_only {
+            ui.separator();
+            if ui.button("Insert").clicked() {
+                action = Some(TabAction::Insert);
+            }
+            ui.menu_button("Bulk", |ui| {
+                if ui.button("Update matching…").clicked() {
+                    action = Some(TabAction::UpdateMany);
+                }
+                if ui.button("Delete matching…").clicked() {
+                    action = Some(TabAction::DeleteMany);
+                }
+            });
         }
         if tab.is_loading() {
             ui.spinner();
@@ -309,7 +332,12 @@ fn thousands(n: u64) -> String {
     out
 }
 
-fn list_view(ui: &mut egui::Ui, tab: &CollectionTab) {
+fn list_view(
+    ui: &mut egui::Ui,
+    tab: &CollectionTab,
+    read_only: bool,
+    action: &mut Option<TabAction>,
+) {
     let Some(results) = &tab.results else {
         return;
     };
@@ -333,17 +361,39 @@ fn list_view(ui: &mut egui::Ui, tab: &CollectionTab) {
                         },
                     )
                     .response;
-                document_menu(&response, document);
+                if response.double_clicked() && !read_only {
+                    *action = Some(TabAction::Edit(index));
+                }
+                document_menu(&response, document, index, read_only, action);
                 ui.add_space(4.0);
             }
         });
 }
 
-fn document_menu(response: &egui::Response, document: &Document) {
+fn document_menu(
+    response: &egui::Response,
+    document: &Document,
+    index: usize,
+    read_only: bool,
+    action: &mut Option<TabAction>,
+) {
     response.context_menu(|ui| {
         if ui.button("Copy document").clicked() {
             ui.ctx()
                 .copy_text(format_document(document, Style::Pretty(2)));
+        }
+        if read_only {
+            return;
+        }
+        ui.separator();
+        if ui.button("Edit…").clicked() {
+            *action = Some(TabAction::Edit(index));
+        }
+        if ui.button("Clone…").clicked() {
+            *action = Some(TabAction::Clone(index));
+        }
+        if ui.button("Delete…").clicked() {
+            *action = Some(TabAction::Delete(index));
         }
     });
 }
@@ -422,7 +472,12 @@ fn copy_text(value: &Bson) -> String {
     }
 }
 
-fn json_view(ui: &mut egui::Ui, tab: &CollectionTab) {
+fn json_view(
+    ui: &mut egui::Ui,
+    tab: &CollectionTab,
+    read_only: bool,
+    action: &mut Option<TabAction>,
+) {
     let Some(results) = &tab.results else {
         return;
     };
@@ -443,12 +498,17 @@ fn json_view(ui: &mut egui::Ui, tab: &CollectionTab) {
                         .desired_width(f32::INFINITY)
                         .layouter(&mut layouter),
                 );
-                document_menu(&response, document);
+                document_menu(&response, document, index, read_only, action);
             }
         });
 }
 
-fn table_view(ui: &mut egui::Ui, tab: &CollectionTab) {
+fn table_view(
+    ui: &mut egui::Ui,
+    tab: &CollectionTab,
+    read_only: bool,
+    action: &mut Option<TabAction>,
+) {
     let Some(results) = &tab.results else {
         return;
     };
@@ -475,13 +535,19 @@ fn table_view(ui: &mut egui::Ui, tab: &CollectionTab) {
                 })
                 .body(|body| {
                     body.rows(row_height, results.documents.len(), |mut row| {
-                        let document = &results.documents[row.index()];
+                        let index = row.index();
+                        let document = &results.documents[index];
                         for name in &columns {
-                            row.col(|ui| {
+                            let (_, response) = row.col(|ui| {
                                 if let Some(value) = document.get(name) {
                                     table_cell(ui, value);
                                 }
                             });
+                            let response = response.interact(Sense::click());
+                            if response.double_clicked() && !read_only {
+                                *action = Some(TabAction::Edit(index));
+                            }
+                            document_menu(&response, document, index, read_only, action);
                         }
                     });
                 });
@@ -518,11 +584,8 @@ fn table_cell(ui: &mut egui::Ui, value: &Bson) {
                 .on_hover_text(format_value(value, Style::Pretty(2)));
         }
         _ => {
-            value_label(ui, value).context_menu(|ui| {
-                if ui.button("Copy value").clicked() {
-                    ui.ctx().copy_text(copy_text(value));
-                }
-            });
+            // The row's menu (copy/edit/delete) covers the cell.
+            value_label(ui, value);
         }
     }
 }
@@ -577,7 +640,8 @@ mod tests {
         tab.set_documents(vec![doc! { "_id": 1, "address": { "city": "Oslo" } }]);
         let mut harness = Harness::new_ui_state(
             |ui, tab: &mut CollectionTab| {
-                list_view(ui, tab);
+                let mut action = None;
+                list_view(ui, tab, false, &mut action);
             },
             tab,
         );
