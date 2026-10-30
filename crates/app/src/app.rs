@@ -880,7 +880,7 @@ impl NordpilApp {
                         if response.middle_clicked() {
                             close = Some(index);
                         }
-                        if ui.small_button("x").on_hover_text("Close tab").clicked() {
+                        if ui.small_button("×").on_hover_text("Close tab").clicked() {
                             close = Some(index);
                         }
                         ui.add_space(6.0);
