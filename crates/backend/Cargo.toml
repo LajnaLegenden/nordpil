@@ -1,0 +1,12 @@
+[package]
+name = "nordpil-backend"
+description = "Database access and background runtime for nordpil"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
