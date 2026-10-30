@@ -7,6 +7,16 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+eframe = { version = "0.37", default-features = false, features = [
+    "accesskit",
+    "clipboard",
+    "default_fonts",
+    "glow",
+    "links",
+    "system_fonts",
+    "wayland",
+    "x11",
+] }
 nordpil-backend.workspace = true
 nordpil-query.workspace = true
 
