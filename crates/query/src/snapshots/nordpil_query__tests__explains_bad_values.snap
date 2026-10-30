@@ -1,0 +1,60 @@
+---
+source: crates/query/src/tests.rs
+expression: messages
+---
+[
+    (
+        "{ a: b }",
+        [
+            "Unknown name b. Put text in quotes, e.g. 'b'.",
+        ],
+    ),
+    (
+        "{ a: Foo(1) }",
+        [
+            "Unknown function Foo. Supported: ObjectId, ISODate, NumberInt, NumberLong, NumberDecimal, UUID, BinData, Timestamp, RegExp, MinKey, MaxKey.",
+        ],
+    ),
+    (
+        "{ a: ObjectId('123') }",
+        [
+            "ObjectId() needs 24 hex characters.",
+        ],
+    ),
+    (
+        "{ a: /x/g }",
+        [
+            "The regex flag g isn't supported by MongoDB. Use i, m, s, x, l or u.",
+        ],
+    ),
+    (
+        "{ a: NumberInt('1.5') }",
+        [
+            "NumberInt() needs a 32-bit integer.",
+        ],
+    ),
+    (
+        "{ a: ISODate('yesterday') }",
+        [
+            "ISODate() needs a date like '2024-01-31' or '2024-01-31T12:00:00Z'.",
+        ],
+    ),
+    (
+        "{ a: -'x' }",
+        [
+            "Only numbers can be negative.",
+        ],
+    ),
+    (
+        "{ a: undefined }",
+        [
+            "undefined isn't supported. Use null.",
+        ],
+    ),
+    (
+        "[1, 2]",
+        [
+            "Expected a document in braces, e.g. { field: 'value' }.",
+        ],
+    ),
+]

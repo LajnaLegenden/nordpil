@@ -1,0 +1,62 @@
+---
+source: crates/query/src/parser.rs
+expression: "[\"{ a: \", \"{ a: 1\", \"{ a 1 }\", \"{ a: 1 b: 2 }\", \"{ a: [1, 2 }\", \"{ a: 'x }\",\n\"{ a: 1 } }\", \"{ : 1 }\",\n\"{ a: ObjectId('x' }\",].map(|text| (text, messages(text)))"
+---
+[
+    (
+        "{ a: ",
+        [
+            "5..5: Expected a value.",
+            "0..5: Missing } to close this object.",
+        ],
+    ),
+    (
+        "{ a: 1",
+        [
+            "0..6: Missing } to close this object.",
+        ],
+    ),
+    (
+        "{ a 1 }",
+        [
+            "4..5: Expected : after the field name.",
+        ],
+    ),
+    (
+        "{ a: 1 b: 2 }",
+        [
+            "7..8: Expected , or } after the value.",
+        ],
+    ),
+    (
+        "{ a: [1, 2 }",
+        [
+            "11..12: Expected ] to close this array.",
+        ],
+    ),
+    (
+        "{ a: 'x }",
+        [
+            "5..9: This string is missing its closing quote.",
+            "0..9: Missing } to close this object.",
+        ],
+    ),
+    (
+        "{ a: 1 } }",
+        [
+            "9..10: Unexpected text after the value.",
+        ],
+    ),
+    (
+        "{ : 1 }",
+        [
+            "2..3: Expected a field name.",
+        ],
+    ),
+    (
+        "{ a: ObjectId('x' }",
+        [
+            "18..19: Missing ) to close the call.",
+        ],
+    ),
+]
