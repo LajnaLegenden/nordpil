@@ -1,9 +1,11 @@
 //! Runs against a real mongod in Docker. Run with `just test-int`.
 
+use mongodb::bson::{Document, doc};
 use nordpil_backend::secrets::MemorySecrets;
 use nordpil_backend::store::{ConnectionStore, SavedConnection};
 use nordpil_backend::{
-    Backend, CancellationToken, Command, ErrorKind, Handler, PasswordChange, Response,
+    Backend, CancellationToken, Command, ErrorKind, FindQuery, Handler, Namespace, PasswordChange,
+    Response,
 };
 use testcontainers_modules::mongo::Mongo;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -15,7 +17,7 @@ async fn send(backend: &Backend, command: Command) -> Response {
 }
 
 /// Starts mongod and returns a backend connected to it.
-async fn connected_backend(read_only: bool) -> (ContainerAsync<Mongo>, Backend, Uuid) {
+async fn connected_backend(read_only: bool) -> (ContainerAsync<Mongo>, Backend, Uuid, String) {
     let mongo = Mongo::default().with_tag("8.0").start().await.unwrap();
     let port = mongo.get_host_port_ipv4(27017).await.unwrap();
     let dir = std::env::temp_dir().join(format!("nordpil-it-{}", Uuid::new_v4()));
@@ -25,10 +27,11 @@ async fn connected_backend(read_only: bool) -> (ContainerAsync<Mongo>, Backend, 
     );
 
     let id = Uuid::new_v4();
+    let uri = format!("mongodb://127.0.0.1:{port}/?directConnection=true");
     let connection = SavedConnection {
         id,
         name: "test".to_owned(),
-        uri: format!("mongodb://127.0.0.1:{port}/?directConnection=true"),
+        uri: uri.clone(),
         color: None,
         read_only,
     };
@@ -51,7 +54,7 @@ async fn connected_backend(read_only: bool) -> (ContainerAsync<Mongo>, Backend, 
     };
     let databases = result.unwrap();
     assert!(databases.iter().any(|db| db.name == "admin"));
-    (mongo, backend, id)
+    (mongo, backend, id, uri)
 }
 
 async fn collection_names(backend: &Backend, connection: Uuid, database: &str) -> Vec<String> {
@@ -68,7 +71,7 @@ async fn collection_names(backend: &Backend, connection: Uuid, database: &str) -
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn creates_lists_and_drops_collections() {
-    let (_mongo, backend, id) = connected_backend(false).await;
+    let (_mongo, backend, id, _) = connected_backend(false).await;
 
     let create = Command::CreateCollection {
         connection: id,
@@ -96,7 +99,7 @@ async fn creates_lists_and_drops_collections() {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn read_only_connection_rejects_writes() {
-    let (_mongo, backend, id) = connected_backend(true).await;
+    let (_mongo, backend, id, _) = connected_backend(true).await;
 
     let create = Command::CreateCollection {
         connection: id,
@@ -109,4 +112,52 @@ async fn read_only_connection_rejects_writes() {
 
     assert_eq!(result.unwrap_err().kind, ErrorKind::ReadOnly);
     assert!(collection_names(&backend, id, "shop").await.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn finds_pages_and_counts_documents() {
+    let (_mongo, backend, id, uri) = connected_backend(false).await;
+    let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
+    let orders = client.database("shop").collection::<Document>("orders");
+    orders
+        .insert_many((0..30).map(|n| doc! { "n": n, "even": n % 2 == 0 }))
+        .await
+        .unwrap();
+    let namespace = Namespace {
+        connection: id,
+        database: "shop".to_owned(),
+        collection: "orders".to_owned(),
+    };
+
+    let find = Command::Find {
+        namespace: namespace.clone(),
+        query: Box::new(FindQuery {
+            filter: doc! { "even": true },
+            projection: Some(doc! { "_id": 0, "n": 1 }),
+            sort: Some(doc! { "n": -1 }),
+            skip: 2,
+            limit: 3,
+            ..FindQuery::default()
+        }),
+    };
+    let Response::Documents(result) = send(&backend, find).await else {
+        panic!("unexpected response");
+    };
+    assert_eq!(
+        result.unwrap(),
+        [doc! { "n": 24 }, doc! { "n": 22 }, doc! { "n": 20 }]
+    );
+
+    for (filter, expected) in [(doc! {}, 30), (doc! { "even": true }, 15)] {
+        let count = Command::Count {
+            namespace: namespace.clone(),
+            filter,
+            hint: None,
+        };
+        let Response::Count(result) = send(&backend, count).await else {
+            panic!("unexpected response");
+        };
+        assert_eq!(result.unwrap(), Some(expected));
+    }
 }

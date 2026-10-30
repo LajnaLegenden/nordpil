@@ -3,6 +3,7 @@
 mod bridge;
 mod connections;
 mod databases;
+mod documents;
 mod error;
 pub mod secrets;
 pub mod store;
@@ -14,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 pub use bridge::{Bridge, Event, Handler, Outcome, RequestId};
 pub use databases::{CollectionInfo, CollectionKind, DatabaseInfo};
+pub use documents::{FindQuery, Namespace};
 pub use error::{BackendError, ErrorKind};
 use mongodb::Client;
 use secrets::SecretStore;
@@ -85,6 +87,16 @@ pub enum Command {
         connection: Uuid,
         database: String,
     },
+    Find {
+        namespace: Namespace,
+        query: Box<FindQuery>,
+    },
+    /// Counts documents matching `filter`, giving up after a few seconds.
+    Count {
+        namespace: Namespace,
+        filter: mongodb::bson::Document,
+        hint: Option<mongodb::bson::Bson>,
+    },
 }
 
 /// Results of [`Command`]s, with enough context to act on them.
@@ -128,6 +140,10 @@ pub enum Response {
         database: String,
         result: Result<(), BackendError>,
     },
+    /// Matched to its query through the request id.
+    Documents(Result<Vec<mongodb::bson::Document>, BackendError>),
+    /// `None` when counting took too long.
+    Count(Result<Option<u64>, BackendError>),
 }
 
 /// An open connection.
@@ -273,6 +289,14 @@ impl Handler for Backend {
                 connection,
                 database,
             },
+            Command::Find { namespace, query } => {
+                Response::Documents(self.find(&namespace, *query).await)
+            }
+            Command::Count {
+                namespace,
+                filter,
+                hint,
+            } => Response::Count(self.count(&namespace, filter, hint).await),
         }
     }
 }
