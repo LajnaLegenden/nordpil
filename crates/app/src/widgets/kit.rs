@@ -71,21 +71,107 @@ pub fn button(ui: &mut Ui, tone: Tone, icon: Option<&str>, label: &str, height: 
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A square button showing only an icon; `label` names it for screen
-/// readers and shows as a tooltip.
+/// A square button showing only an icon, exactly `size` wide and high;
+/// `label` names it for screen readers and shows as a tooltip.
 pub fn icon_button(ui: &mut Ui, icon: &str, label: &str, size: f32) -> Response {
-    let palette = theme::palette(ui);
-    let response = ui
-        .add(
-            Button::new(RichText::new(icon).size(size * 0.5).color(palette.muted))
-                .frame_when_inactive(false)
-                .min_size(vec2(size, size))
-                .corner_radius(CornerRadius::same(8)),
-        )
-        .on_hover_text(label);
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    paint_icon_button(ui, &response, icon, size, None);
     let enabled = ui.is_enabled();
     response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, label));
+    let _ = rect;
     response
+        .on_hover_text(label)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Paints an icon button into `response`'s rect: a hover fill and the
+/// centered icon, in `color` or the muted text color.
+pub fn paint_icon_button(
+    ui: &Ui,
+    response: &Response,
+    icon: &str,
+    size: f32,
+    color: Option<Color32>,
+) {
+    let palette = theme::palette(ui);
+    let rect = response.rect;
+    let enabled = ui.is_enabled();
+    if enabled && (response.hovered() || response.has_focus()) {
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(if size <= 24.0 { 6 } else { 8 }),
+            palette.hover,
+        );
+    }
+    let color = match color {
+        Some(color) => color,
+        None if enabled && response.hovered() => palette.text,
+        None => palette.muted,
+    };
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional((size * 0.5).clamp(12.0, 18.0)),
+        if enabled {
+            color
+        } else {
+            color.gamma_multiply(0.45)
+        },
+    );
+}
+
+/// The width [`button`] takes for this label.
+pub fn button_width(ui: &Ui, tone: Tone, icon: Option<&str>, label: &str) -> f32 {
+    let family = if tone == Tone::Primary {
+        theme::semibold()
+    } else {
+        egui::FontFamily::Proportional
+    };
+    let icon_width = icon.map_or(0.0, |icon| {
+        text_width(ui, icon, egui::FontId::proportional(16.0)) + ui.spacing().icon_spacing
+    });
+    text_width(ui, label, egui::FontId::new(14.0, family))
+        + icon_width
+        + 2.0 * ui.spacing().button_padding.x
+        + 2.0
+}
+
+/// The width [`segmented`] takes for these items.
+pub fn segmented_width<T>(ui: &Ui, items: &[(T, Option<&str>, &str)], labels: bool) -> f32 {
+    let items_width: f32 = items
+        .iter()
+        .map(|(_, icon, label)| {
+            let icon_width = icon.map_or(0.0, |icon| {
+                text_width(ui, icon, egui::FontId::proportional(15.0))
+            });
+            let label_width = if labels || icon.is_none() {
+                text_width(ui, label, egui::FontId::proportional(14.0))
+            } else {
+                0.0
+            };
+            let gap = if icon_width > 0.0 && label_width > 0.0 {
+                ui.spacing().icon_spacing
+            } else {
+                0.0
+            };
+            icon_width + gap + label_width + 2.0 * ui.spacing().button_padding.x + 2.0
+        })
+        .sum();
+    items_width + 2.0 * (items.len().saturating_sub(1)) as f32 + 8.0
+}
+
+pub fn text_width(ui: &Ui, text: &str, font: egui::FontId) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font, Color32::WHITE)
+        .size()
+        .x
+}
+
+/// Sets a dialog's width, narrower when the window is small.
+pub fn dialog_width(ui: &mut Ui, width: f32) {
+    let room = ui.ctx().content_rect().width() - 80.0;
+    ui.set_width(width.min(room).max(280.0));
 }
 
 fn hover_tint(ui: &Ui, response: &Response, palette: &Palette) {
@@ -106,6 +192,18 @@ pub fn segmented<T: PartialEq + Copy>(
     value: &mut T,
     items: &[(T, Option<&str>, &str)],
     height: f32,
+) -> bool {
+    segmented_with_labels(ui, value, items, height, true)
+}
+
+/// [`segmented`], with only the icons shown when `labels` is false; the
+/// labels then show as tooltips.
+pub fn segmented_with_labels<T: PartialEq + Copy>(
+    ui: &mut Ui,
+    value: &mut T,
+    items: &[(T, Option<&str>, &str)],
+    height: f32,
+    labels: bool,
 ) -> bool {
     let palette = theme::palette(ui);
     let mut changed = false;
@@ -132,6 +230,9 @@ pub fn segmented<T: PartialEq + Copy>(
                     };
                     let text = RichText::new(label).color(color);
                     let mut button = match icon {
+                        Some(icon) if !labels => {
+                            Button::new(RichText::new(icon).size(15.0).color(color))
+                        }
                         Some(icon) => {
                             Button::new((RichText::new(icon).size(15.0).color(color), text))
                         }
@@ -144,7 +245,10 @@ pub fn segmented<T: PartialEq + Copy>(
                     } else {
                         button.frame_when_inactive(false)
                     };
-                    let response = ui.add(button);
+                    let mut response = ui.add(button);
+                    if !labels {
+                        response = response.on_hover_text(label);
+                    }
                     let enabled = ui.is_enabled();
                     response
                         .widget_info(|| WidgetInfo::selected(Role::Tab, enabled, selected, label));

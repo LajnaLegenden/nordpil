@@ -103,42 +103,39 @@ pub fn show(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Opti
     view_action.or(action)
 }
 
+/// Narrower than this, the query buttons move under the filter.
+const MIN_FILTER_WIDTH: f32 = 320.0;
+
 fn query_bar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
-    let palette = theme::palette(ui);
     let mut action = None;
-    ui.horizontal(|ui| {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let height = kit::QUERY_HEIGHT;
-            if kit::button(ui, Tone::Primary, Some(icons::SEARCH), "Find", height).clicked() {
-                action = Some(TabAction::Run);
-            }
-            if kit::button(ui, Tone::Ghost, None, "Reset", height).clicked() {
-                action = Some(TabAction::Reset);
-            }
-            let history = kit::button(ui, Tone::Secondary, Some(icons::HISTORY), "History", height);
-            egui::Popup::menu(&history).show(|ui| {
-                if let Some(chosen) = history_menu(ui, &tab.history) {
-                    action = Some(chosen);
-                    ui.close();
+    let spacing = ui.spacing().item_spacing.x;
+    let buttons = kit::button_width(ui, Tone::Secondary, Some(icons::SLIDERS), "Options")
+        + kit::button_width(ui, Tone::Secondary, Some(icons::HISTORY), "History")
+        + kit::button_width(ui, Tone::Ghost, None, "Reset")
+        + kit::button_width(ui, Tone::Primary, Some(icons::SEARCH), "Find")
+        + 4.0 * spacing;
+    if ui.available_width() - buttons >= MIN_FILTER_WIDTH {
+        ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                query_buttons(ui, tab, &mut action);
+                if filter_field(ui, tab) {
+                    action = Some(TabAction::Run);
                 }
             });
-            let options = kit::button(ui, Tone::Secondary, Some(icons::SLIDERS), "Options", height);
-            if tab.show_options {
-                ui.painter().rect_stroke(
-                    options.rect,
-                    CornerRadius::same(10),
-                    Stroke::new(1.0, palette.accent),
-                    StrokeKind::Inside,
-                );
-            }
-            if options.clicked() {
-                tab.show_options = !tab.show_options;
-            }
+        });
+    } else {
+        ui.horizontal(|ui| {
             if filter_field(ui, tab) {
                 action = Some(TabAction::Run);
             }
         });
-    });
+        ui.add_space(8.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), kit::QUERY_HEIGHT),
+            Layout::right_to_left(Align::Center),
+            |ui| query_buttons(ui, tab, &mut action),
+        );
+    }
     if tab.show_options {
         ui.add_space(10.0);
         kit::card(ui).inner_margin(Margin::same(14)).show(ui, |ui| {
@@ -149,6 +146,37 @@ fn query_bar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
         });
     }
     action
+}
+
+/// Find, Reset, History and Options, laid out right to left.
+fn query_buttons(ui: &mut egui::Ui, tab: &mut CollectionTab, action: &mut Option<TabAction>) {
+    let palette = theme::palette(ui);
+    let height = kit::QUERY_HEIGHT;
+    if kit::button(ui, Tone::Primary, Some(icons::SEARCH), "Find", height).clicked() {
+        *action = Some(TabAction::Run);
+    }
+    if kit::button(ui, Tone::Ghost, None, "Reset", height).clicked() {
+        *action = Some(TabAction::Reset);
+    }
+    let history = kit::button(ui, Tone::Secondary, Some(icons::HISTORY), "History", height);
+    egui::Popup::menu(&history).show(|ui| {
+        if let Some(chosen) = history_menu(ui, &tab.history) {
+            *action = Some(chosen);
+            ui.close();
+        }
+    });
+    let options = kit::button(ui, Tone::Secondary, Some(icons::SLIDERS), "Options", height);
+    if tab.show_options {
+        ui.painter().rect_stroke(
+            options.rect,
+            CornerRadius::same(10),
+            Stroke::new(1.0, palette.accent),
+            StrokeKind::Inside,
+        );
+    }
+    if options.clicked() {
+        tab.show_options = !tab.show_options;
+    }
 }
 
 /// The filter in its 40 px field: label, editor and the Ctrl+L hint.
@@ -364,88 +392,171 @@ fn query_summary(query: &QueryInputs) -> String {
     parts.join("  ")
 }
 
+const VIEWS: [(View, Option<&str>, &str); 3] = [
+    (View::List, Some(icons::LIST), "List"),
+    (View::Json, Some(icons::BRACES), "JSON"),
+    (View::Table, Some(icons::TABLE), "Table"),
+];
+
+/// How much of the toolbar fits on one row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fit {
+    OneRow,
+    /// Paging moves to a second row.
+    TwoRows,
+    /// Two rows, and the actions show only their icons.
+    Icons,
+    /// Two rows, and the view switch also shows only icons.
+    Narrow,
+}
+
+/// The view switch, the actions, then paging on the right; wraps onto a
+/// second row and drops labels when the window is narrow.
 fn toolbar(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Option<TabAction> {
-    let palette = theme::palette(ui);
     let mut action = None;
     let height = kit::TOOLBAR_HEIGHT;
+    let actions = toolbar_actions(read_only);
+    let spacing = ui.spacing().item_spacing.x;
+    let labelled: f32 = actions
+        .iter()
+        .map(|(_, icon, label)| kit::button_width(ui, Tone::Ghost, Some(icon), label) + spacing)
+        .sum();
+    let icons_only = actions.len() as f32 * (height + spacing);
+    let switch = |labels| kit::segmented_width(ui, &VIEWS, labels) + 9.0 + 3.0 * spacing;
+    let paging = paging_width(ui, tab);
+    let available = ui.available_width();
+    let fit = if available >= switch(true) + labelled + paging + 24.0 {
+        Fit::OneRow
+    } else if available >= switch(true) + labelled {
+        Fit::TwoRows
+    } else if available >= switch(true) + icons_only {
+        Fit::Icons
+    } else {
+        Fit::Narrow
+    };
+
     ui.horizontal(|ui| {
-        kit::segmented(
-            ui,
-            &mut tab.view,
-            &[
-                (View::List, Some(icons::LIST), "List"),
-                (View::Json, Some(icons::BRACES), "JSON"),
-                (View::Table, Some(icons::TABLE), "Table"),
-            ],
-            height + 2.0,
-        );
+        kit::segmented_with_labels(ui, &mut tab.view, &VIEWS, height + 2.0, fit != Fit::Narrow);
         kit::divider(ui, 22.0);
-        if !read_only {
-            if kit::button(ui, Tone::Ghost, Some(icons::PLUS), "Insert", height).clicked() {
-                action = Some(TabAction::Insert);
-            }
-            if kit::button(ui, Tone::Ghost, Some(icons::UPLOAD), "Import", height).clicked() {
-                action = Some(TabAction::Import);
-            }
-        }
-        if kit::button(ui, Tone::Ghost, Some(icons::DOWNLOAD), "Export", height).clicked() {
-            action = Some(TabAction::Export);
-        }
-        if !read_only {
-            let bulk = kit::button(ui, Tone::Ghost, Some(icons::ZAP), "Bulk", height);
-            egui::Popup::menu(&bulk).show(|ui| {
-                if ui.button("Update matching…").clicked() {
-                    action = Some(TabAction::UpdateMany);
+        for (kind, icon, label) in actions {
+            let response = if matches!(fit, Fit::OneRow | Fit::TwoRows) {
+                kit::button(ui, Tone::Ghost, Some(icon), label, height)
+            } else {
+                kit::icon_button(ui, icon, label, height)
+            };
+            match kind {
+                ToolbarAction::Bulk => {
+                    egui::Popup::menu(&response).show(|ui| {
+                        if ui.button("Update matching…").clicked() {
+                            action = Some(TabAction::UpdateMany);
+                        }
+                        if ui.button("Delete matching…").clicked() {
+                            action = Some(TabAction::DeleteMany);
+                        }
+                    });
                 }
-                if ui.button("Delete matching…").clicked() {
-                    action = Some(TabAction::DeleteMany);
+                _ if response.clicked() => {
+                    action = Some(match kind {
+                        ToolbarAction::Insert => TabAction::Insert,
+                        ToolbarAction::Import => TabAction::Import,
+                        _ => TabAction::Export,
+                    });
                 }
-            });
+                _ => {}
+            }
         }
         if tab.is_loading() {
             ui.spinner();
         }
-
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            ui.add_enabled_ui(tab.has_next_page(), |ui| {
-                if page_button(ui, icons::CHEVRON_RIGHT, "Next page").clicked() {
-                    action = Some(TabAction::Page(tab.page + 1));
-                }
+        if fit == Fit::OneRow {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                action = paging_controls(ui, tab).or(action.take());
             });
-            ui.add_enabled_ui(tab.page > 0, |ui| {
-                if page_button(ui, icons::CHEVRON_LEFT, "Previous page").clicked() {
-                    action = Some(TabAction::Page(tab.page - 1));
-                }
-            });
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(range_text(tab))
-                    .size(13.0)
-                    .color(palette.muted),
-            );
-            ui.add_space(8.0);
+        }
+    });
+    if fit != Fit::OneRow {
+        ui.add_space(6.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), height),
+            Layout::right_to_left(Align::Center),
+            |ui| {
+                action = paging_controls(ui, tab).or(action.take());
+            },
+        );
+    }
+    action
+}
 
-            let before = tab.page_size;
-            let combo = egui::ComboBox::from_id_salt(("page_size", tab.id))
-                .width(56.0)
-                .selected_text(tab.page_size.to_string())
-                .show_ui(ui, |ui| {
-                    for size in PAGE_SIZES {
-                        ui.selectable_value(&mut tab.page_size, size, size.to_string());
-                    }
-                });
-            let label = ui.label(RichText::new("Per page").size(13.0).color(palette.subtle));
-            combo.response.labelled_by(label.id);
-            if tab.page_size != before {
-                action = Some(TabAction::Page(0));
-            }
-            if kit::icon_button(ui, icons::REFRESH, "Refresh", height).clicked() {
-                action = Some(TabAction::Refresh);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolbarAction {
+    Insert,
+    Import,
+    Export,
+    Bulk,
+}
+
+fn toolbar_actions(read_only: bool) -> Vec<(ToolbarAction, &'static str, &'static str)> {
+    let all = [
+        (ToolbarAction::Insert, icons::PLUS, "Insert"),
+        (ToolbarAction::Import, icons::UPLOAD, "Import"),
+        (ToolbarAction::Export, icons::DOWNLOAD, "Export"),
+        (ToolbarAction::Bulk, icons::ZAP, "Bulk"),
+    ];
+    all.into_iter()
+        .filter(|(kind, _, _)| !read_only || *kind == ToolbarAction::Export)
+        .collect()
+}
+
+/// Refresh, page size, the range and the page buttons, laid out right to
+/// left.
+fn paging_controls(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
+    let palette = theme::palette(ui);
+    let mut action = None;
+    ui.spacing_mut().item_spacing.x = 4.0;
+    ui.add_enabled_ui(tab.has_next_page(), |ui| {
+        if page_button(ui, icons::CHEVRON_RIGHT, "Next page").clicked() {
+            action = Some(TabAction::Page(tab.page + 1));
+        }
+    });
+    ui.add_enabled_ui(tab.page > 0, |ui| {
+        if page_button(ui, icons::CHEVRON_LEFT, "Previous page").clicked() {
+            action = Some(TabAction::Page(tab.page - 1));
+        }
+    });
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(range_text(tab))
+            .size(13.0)
+            .color(palette.muted),
+    );
+    ui.add_space(8.0);
+
+    let before = tab.page_size;
+    let combo = egui::ComboBox::from_id_salt(("page_size", tab.id))
+        .width(56.0)
+        .selected_text(tab.page_size.to_string())
+        .show_ui(ui, |ui| {
+            for size in PAGE_SIZES {
+                ui.selectable_value(&mut tab.page_size, size, size.to_string());
             }
         });
-    });
+    let label = ui.label(RichText::new("Per page").size(13.0).color(palette.subtle));
+    combo.response.labelled_by(label.id);
+    if tab.page_size != before {
+        action = Some(TabAction::Page(0));
+    }
+    if kit::icon_button(ui, icons::REFRESH, "Refresh", kit::TOOLBAR_HEIGHT).clicked() {
+        action = Some(TabAction::Refresh);
+    }
     action
+}
+
+/// About the width [`paging_controls`] takes.
+fn paging_width(ui: &egui::Ui, tab: &CollectionTab) -> f32 {
+    let range = kit::text_width(ui, &range_text(tab), egui::FontId::proportional(13.0));
+    let per_page = kit::text_width(ui, "Per page", egui::FontId::proportional(13.0));
+    // Page buttons, the page size box, refresh, and the gaps between them.
+    32.0 * 2.0 + range + per_page + 100.0 + kit::TOOLBAR_HEIGHT + 6.0 + 8.0 + 4.0 * 6.0
 }
 
 /// A bordered square button for paging.

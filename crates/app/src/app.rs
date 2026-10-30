@@ -1883,6 +1883,14 @@ mod screenshots {
         harness.ctx.set_theme(egui::Theme::Dark);
         harness.run();
 
+        for (name, width) in [("narrow", 940.0), ("narrowest", 700.0)] {
+            harness.set_size(egui::vec2(width, 760.0));
+            harness.run();
+            save(&mut harness, name);
+        }
+        harness.set_size(egui::vec2(1440.0, 900.0));
+        harness.run();
+
         harness
             .get_by_role_and_label(Role::Button, "History")
             .click();

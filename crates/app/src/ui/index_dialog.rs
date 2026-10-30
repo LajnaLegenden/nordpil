@@ -84,7 +84,7 @@ impl IndexDialog {
         // One id per kind, so a dialog never reuses another's size and position.
         let kind = matches!(self.kind, Kind::Create(_));
         let modal = kit::modal(ctx, egui::Id::unique(("index_dialog", kind))).show(ctx, |ui| {
-            ui.set_width(560.0);
+            kit::dialog_width(ui, 560.0);
             let (confirm, enabled) = match &mut self.kind {
                 Kind::Create(form) => {
                     kit::dialog_title(ui, "Create index", None);

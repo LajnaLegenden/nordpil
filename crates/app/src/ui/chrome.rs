@@ -223,10 +223,19 @@ pub fn tab_bar(
                     if response.middle_clicked() {
                         event = Some(TabEvent::Close(index));
                     }
-                    let close =
+                    let close_rect =
                         Rect::from_center_size(pos2(tab.right() - 17.0, y), vec2(22.0, 22.0));
-                    let mut close_ui = ui.new_child(egui::UiBuilder::new().max_rect(close));
-                    if kit::icon_button(&mut close_ui, icons::X, "Close tab", 22.0).clicked() {
+                    let close = ui
+                        .interact(
+                            close_rect,
+                            ui.scope_id().with(("close_tab", index)),
+                            Sense::click(),
+                        )
+                        .on_hover_text("Close tab")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    kit::paint_icon_button(ui, &close, icons::X, 22.0, None);
+                    close.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Close tab"));
+                    if close.clicked() {
                         event = Some(TabEvent::Close(index));
                     }
                 }
@@ -235,7 +244,8 @@ pub fn tab_bar(
     event
 }
 
-/// Breadcrumb, collection name and count, and the Documents/Indexes switch.
+/// Breadcrumb, collection name and count, and the Documents/Indexes switch,
+/// which moves under the name when the window is narrow.
 pub fn collection_header(
     ui: &mut Ui,
     connection: &str,
@@ -245,7 +255,18 @@ pub fn collection_header(
     panel: &mut Panel,
 ) {
     let palette = theme::palette(ui);
-    ui.horizontal(|ui| {
+    let panels = [
+        (Panel::Documents, Some(icons::FILE_TEXT), "Documents"),
+        (Panel::Indexes, Some(icons::KEY), "Indexes"),
+    ];
+    let title_width = kit::text_width(ui, collection, FontId::new(21.0, theme::semibold()))
+        + count.as_deref().map_or(0.0, |count| {
+            kit::text_width(ui, count, FontId::proportional(13.0)) + 10.0
+        });
+    let switch_width = kit::segmented_width(ui, &panels, true);
+    let stacked = ui.available_width() < title_width + switch_width + 32.0;
+
+    let title = |ui: &mut Ui| {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.horizontal(|ui| {
@@ -257,24 +278,25 @@ pub fn collection_header(
             });
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
-                ui.heading(collection);
-                if let Some(count) = count {
+                ui.add(egui::Label::new(RichText::new(collection).heading()).truncate());
+                if let Some(count) = &count {
                     ui.label(RichText::new(count).size(13.0).color(palette.subtle));
                 }
             });
         });
-        ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
-            kit::segmented(
-                ui,
-                panel,
-                &[
-                    (Panel::Documents, Some(icons::FILE_TEXT), "Documents"),
-                    (Panel::Indexes, Some(icons::KEY), "Indexes"),
-                ],
-                38.0,
-            );
+    };
+    if stacked {
+        title(ui);
+        ui.add_space(8.0);
+        kit::segmented(ui, panel, &panels, 38.0);
+    } else {
+        ui.horizontal(|ui| {
+            title(ui);
+            ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
+                kit::segmented(ui, panel, &panels, 38.0);
+            });
         });
-    });
+    }
 }
 
 /// Shown when no collection is open. Returns true when "New connection"

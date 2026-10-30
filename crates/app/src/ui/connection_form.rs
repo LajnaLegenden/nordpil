@@ -175,7 +175,7 @@ impl ConnectionForm {
     pub fn show(&mut self, ctx: &egui::Context, keyring_available: bool) -> FormResult {
         let mut result = FormResult::Open;
         let modal = kit::modal(ctx, egui::Id::unique("connection_form")).show(ctx, |ui| {
-            ui.set_width(600.0);
+            kit::dialog_width(ui, 600.0);
             kit::dialog_title(
                 ui,
                 if self.is_new {

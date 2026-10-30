@@ -111,7 +111,7 @@ impl TransferDialog {
         let is_export = matches!(self.kind, Kind::Export { .. });
         let modal =
             kit::modal(ctx, egui::Id::unique(("transfer_dialog", is_export))).show(ctx, |ui| {
-                ui.set_width(600.0);
+                kit::dialog_width(ui, 600.0);
                 let namespace =
                     format!("{}.{}", self.namespace.database, self.namespace.collection);
                 kit::dialog_title(

@@ -51,7 +51,7 @@ impl Dialog {
             Self::CreateCollection(_) => "create_collection",
         };
         let modal = kit::modal(ctx, egui::Id::unique(("dialog", kind))).show(ctx, |ui| {
-            ui.set_width(440.0);
+            kit::dialog_width(ui, 440.0);
             open = match self {
                 Self::Password(prompt) => prompt.show(ui, actions),
                 Self::DeleteConnection { id, name } => delete_connection(ui, *id, name, actions),

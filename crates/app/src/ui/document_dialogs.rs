@@ -80,7 +80,7 @@ impl DocumentDialog {
         // One id per kind, so a dialog never reuses another's size and position.
         let modal_id = egui::Id::unique(("document_dialog", self.title()));
         let modal = kit::modal(ctx, modal_id).show(ctx, |ui| {
-            ui.set_width(720.0);
+            kit::dialog_width(ui, 720.0);
             let busy = self.pending.is_some();
             let namespace = format!("{}.{}", self.namespace.database, self.namespace.collection);
             kit::dialog_title(ui, self.title(), Some(&namespace));

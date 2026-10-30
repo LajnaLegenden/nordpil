@@ -20,7 +20,7 @@ impl SettingsDialog {
         let before = *settings;
         let mut outcome = Outcome::Open;
         let modal = kit::modal(ctx, egui::Id::unique("settings_dialog")).show(ctx, |ui| {
-            ui.set_width(560.0);
+            kit::dialog_width(ui, 560.0);
             kit::dialog_title(ui, "Settings", None);
             let grid = egui::Grid::new("settings")
                 .num_columns(2)
