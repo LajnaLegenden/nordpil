@@ -15,6 +15,25 @@ const COUNT_TIME_LIMIT: Duration = Duration::from_secs(5);
 /// Server error code when `maxTimeMS` runs out.
 const MAX_TIME_EXPIRED: i32 = 50;
 
+/// Documents bigger than this, as text, are cut in the preview.
+pub const PREVIEW_BYTES: usize = 1 << 20;
+
+/// A found document plus its display text, prepared off the UI thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FoundDocument {
+    pub document: Document,
+    pub preview: nordpil_query::Preview,
+}
+
+impl FoundDocument {
+    pub fn new(document: Document) -> Self {
+        Self {
+            preview: nordpil_query::preview(&document, PREVIEW_BYTES),
+            document,
+        }
+    }
+}
+
 /// The collection a command works on.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Namespace {
@@ -41,7 +60,7 @@ impl Backend {
         &self,
         namespace: &Namespace,
         query: FindQuery,
-    ) -> Result<Vec<Document>, BackendError> {
+    ) -> Result<Vec<FoundDocument>, BackendError> {
         let client = self.session(namespace.connection)?.client;
         let mut options = FindOptions::default();
         options.projection = query.projection;
@@ -51,7 +70,7 @@ impl Backend {
         options.skip = (query.skip > 0).then_some(query.skip);
         options.limit = (query.limit > 0).then_some(query.limit);
         options.max_time = query.max_time;
-        let documents = client
+        let documents: Vec<Document> = client
             .database(&namespace.database)
             .collection::<Document>(&namespace.collection)
             .find(query.filter)
@@ -59,7 +78,8 @@ impl Backend {
             .await?
             .try_collect()
             .await?;
-        Ok(documents)
+        // Formatting a large page takes a while; keep it off the async workers.
+        crate::blocking(move || Ok(documents.into_iter().map(FoundDocument::new).collect())).await
     }
 
     /// `None` when counting took too long.

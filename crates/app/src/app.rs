@@ -201,6 +201,17 @@ impl NordpilApp {
                     document_dialogs::Kind::Insert,
                 ));
             }
+            TabAction::Edit(document) | TabAction::Clone(document)
+                if tab
+                    .results
+                    .as_ref()
+                    .and_then(|results| results.previews.get(document))
+                    .is_some_and(|preview| preview.full_len > nordpil_backend::PREVIEW_BYTES) =>
+            {
+                self.notify(BackendError::new(
+                    "This document is too large to edit here. Use a bulk update with a filter on its _id.",
+                ));
+            }
             TabAction::Edit(document)
             | TabAction::Clone(document)
             | TabAction::Delete(document) => {
@@ -1217,6 +1228,7 @@ mod screenshots {
                         "created": bson::DateTime::from_millis(1_700_000_000_000 + i64::from(n) * 86_400_000),
                     }
                 })
+                .map(nordpil_backend::FoundDocument::new)
                 .collect(),
         );
         let saved = |filter: &str, sort: &str, favorite: bool| nordpil_backend::SavedQuery {

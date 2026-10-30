@@ -42,6 +42,10 @@ pub enum TabAction {
 
 /// The table shows at most this many columns, so huge documents stay usable.
 const MAX_TABLE_COLUMNS: usize = 60;
+/// An expanded object or array in the list view shows this many entries.
+const MAX_CHILDREN: usize = 200;
+/// Nested values with more entries get no hover preview in the table.
+const MAX_HOVER_ENTRIES: usize = 50;
 
 /// `read_only` hides everything that writes.
 pub fn show(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Option<TabAction> {
@@ -442,8 +446,15 @@ fn field(ui: &mut egui::Ui, id: egui::Id, key: &str, value: &Bson) {
             label
         })
         .body(|ui| {
-            for (child_key, child) in children {
+            let total = children.len();
+            for (child_key, child) in children.into_iter().take(MAX_CHILDREN) {
                 field(ui, id.with(&child_key), &child_key, child);
+            }
+            if total > MAX_CHILDREN {
+                ui.weak(format!(
+                    "… {} more. Use the JSON view or a projection to see them.",
+                    total - MAX_CHILDREN
+                ));
             }
         });
     // Clicking the field name expands it too, not only the arrow.
@@ -492,9 +503,10 @@ fn json_view(
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
-            for (index, ((text, spans), document)) in
-                results.json.iter().zip(&results.documents).enumerate()
+            for (index, (preview, document)) in
+                results.previews.iter().zip(&results.documents).enumerate()
             {
+                let (text, spans) = (&preview.text, &preview.spans);
                 let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap: f32| {
                     let mut job = code_editor::layout_job(ui, buffer.as_str(), spans);
                     job.wrap.max_width = wrap;
@@ -507,8 +519,19 @@ fn json_view(
                         .layouter(&mut layouter),
                 );
                 document_menu(&response, document, index, read_only, action);
+                if preview.full_len > text.len() {
+                    ui.weak(format!(
+                        "Showing the first {} of {}.",
+                        human_size(text.len()),
+                        human_size(preview.full_len)
+                    ));
+                }
             }
         });
+}
+
+fn human_size(bytes: usize) -> String {
+    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
 }
 
 fn table_view(
@@ -584,12 +607,16 @@ fn column_names(documents: &[Document]) -> Vec<String> {
 fn table_cell(ui: &mut egui::Ui, value: &Bson) {
     match value {
         Bson::Document(document) => {
-            ui.weak(format!("{{ {} }}", plural(document.len(), "field")))
-                .on_hover_text(format_value(value, Style::Pretty(2)));
+            let label = ui.weak(format!("{{ {} }}", plural(document.len(), "field")));
+            if document.len() <= MAX_HOVER_ENTRIES {
+                label.on_hover_text(format_value(value, Style::Pretty(2)));
+            }
         }
         Bson::Array(items) => {
-            ui.weak(format!("[ {} ]", plural(items.len(), "item")))
-                .on_hover_text(format_value(value, Style::Pretty(2)));
+            let label = ui.weak(format!("[ {} ]", plural(items.len(), "item")));
+            if items.len() <= MAX_HOVER_ENTRIES {
+                label.on_hover_text(format_value(value, Style::Pretty(2)));
+            }
         }
         _ => {
             // The row's menu (copy/edit/delete) covers the cell.
@@ -645,7 +672,9 @@ mod tests {
                 collection: "c".to_owned(),
             },
         );
-        tab.set_documents(vec![doc! { "_id": 1, "address": { "city": "Oslo" } }]);
+        tab.set_documents(vec![nordpil_backend::FoundDocument::new(
+            doc! { "_id": 1, "address": { "city": "Oslo" } },
+        )]);
         let mut harness = Harness::new_ui_state(
             |ui, tab: &mut CollectionTab| {
                 let mut action = None;

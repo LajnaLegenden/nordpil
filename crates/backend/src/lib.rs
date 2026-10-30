@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 
 pub use bridge::{Bridge, Event, Handler, Outcome, RequestId};
 pub use databases::{CollectionInfo, CollectionKind, DatabaseInfo};
-pub use documents::{FindQuery, Namespace};
+pub use documents::{FindQuery, FoundDocument, Namespace, PREVIEW_BYTES};
 pub use error::{BackendError, ErrorKind};
 pub use fields::FieldInfo;
 pub use indexes::IndexInfo;
@@ -211,7 +211,7 @@ pub enum Response {
         result: Result<(), BackendError>,
     },
     /// Matched to its query through the request id.
-    Documents(Result<Vec<mongodb::bson::Document>, BackendError>),
+    Documents(Result<Vec<FoundDocument>, BackendError>),
     /// `None` when counting took too long.
     Count(Result<Option<u64>, BackendError>),
     Fields {

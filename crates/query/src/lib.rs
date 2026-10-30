@@ -20,6 +20,34 @@ pub use format::{Style, format_document, format_value};
 pub use highlight::{Highlight, highlight};
 pub use parser::ParseError;
 
+/// A document's pretty-printed, highlighted text for display, cut after
+/// `max_bytes` so huge documents stay quick to show.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Preview {
+    pub text: String,
+    pub spans: Vec<(std::ops::Range<usize>, Highlight)>,
+    /// Length of the whole text; more than `text.len()` when it was cut.
+    pub full_len: usize,
+}
+
+pub fn preview(document: &Document, max_bytes: usize) -> Preview {
+    let mut text = format_document(document, Style::Pretty(2));
+    let full_len = text.len();
+    if text.len() > max_bytes {
+        let mut cut = max_bytes;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+    }
+    let spans = highlight(&text);
+    Preview {
+        text,
+        spans,
+        full_len,
+    }
+}
+
 /// Parses one value. Empty input is an error.
 pub fn parse_value(text: &str) -> Result<Bson, Vec<ParseError>> {
     let parsed = parser::parse(text);

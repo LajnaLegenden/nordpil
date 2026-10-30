@@ -145,8 +145,13 @@ async fn finds_pages_and_counts_documents() {
     let Response::Documents(result) = send(&backend, find).await else {
         panic!("unexpected response");
     };
+    let documents: Vec<_> = result
+        .unwrap()
+        .into_iter()
+        .map(|found| found.document)
+        .collect();
     assert_eq!(
-        result.unwrap(),
+        documents,
         [doc! { "n": 24 }, doc! { "n": 22 }, doc! { "n": 20 }]
     );
 

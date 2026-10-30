@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use bson::{Bson, Document};
 use eframe::egui;
-use nordpil_backend::{FindQuery, IndexInfo, Namespace, RequestId, SavedQuery};
-use nordpil_query::{FieldHint, Style, format_document};
+use nordpil_backend::{FindQuery, FoundDocument, IndexInfo, Namespace, RequestId, SavedQuery};
+use nordpil_query::{FieldHint, Preview};
 
 use crate::connections::Selection;
-use crate::widgets::code_editor::{CodeEditor, Span};
+use crate::widgets::code_editor::CodeEditor;
 
 pub const PAGE_SIZES: [u64; 4] = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE: u64 = 20;
@@ -52,8 +52,8 @@ pub struct AppliedQuery {
 
 pub struct Results {
     pub documents: Vec<Document>,
-    /// Formatted documents with highlighting, for the JSON view.
-    pub json: Vec<(String, Vec<Span>)>,
+    /// Formatted, highlighted text for the JSON view, cut for huge documents.
+    pub previews: Vec<Preview>,
 }
 
 pub struct CollectionTab {
@@ -193,16 +193,15 @@ impl CollectionTab {
         }
     }
 
-    pub fn set_documents(&mut self, documents: Vec<Document>) {
-        let json = documents
-            .iter()
-            .map(|document| {
-                let text = format_document(document, Style::Pretty(2));
-                let spans = nordpil_query::highlight(&text);
-                (text, spans)
-            })
-            .collect();
-        self.results = Some(Results { documents, json });
+    pub fn set_documents(&mut self, found: Vec<FoundDocument>) {
+        let (documents, previews) = found
+            .into_iter()
+            .map(|found| (found.document, found.preview))
+            .unzip();
+        self.results = Some(Results {
+            documents,
+            previews,
+        });
     }
 }
 

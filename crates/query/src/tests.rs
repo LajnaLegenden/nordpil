@@ -157,3 +157,23 @@ proptest! {
         let _ = highlight(&text);
     }
 }
+
+#[test]
+fn preview_cuts_long_documents_on_a_char_boundary() {
+    let document = doc! { "text": "å".repeat(1000) };
+
+    let preview = preview(&document, 101);
+
+    assert!(preview.text.len() <= 101);
+    assert!(preview.text.is_char_boundary(preview.text.len()));
+    assert_eq!(
+        preview.full_len,
+        format_document(&document, Style::Pretty(2)).len()
+    );
+    assert!(
+        preview
+            .spans
+            .iter()
+            .all(|(span, _)| span.end <= preview.text.len())
+    );
+}
