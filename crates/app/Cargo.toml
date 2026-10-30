@@ -23,9 +23,12 @@ nordpil-query.workspace = true
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = "1"
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+nordpil-backend = { workspace = true, features = ["test-support"] }
 egui_kittest = "0.37"
+testcontainers-modules = { version = "0.15", features = ["mongo", "blocking"] }

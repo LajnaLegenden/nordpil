@@ -1,11 +1,16 @@
 //! nordpil: a lightweight, native MongoDB GUI.
 
 mod app;
+mod connections;
 mod logging;
 mod spike_language;
+mod ui;
 mod widgets;
 
 use eframe::egui;
+use nordpil_backend::Backend;
+use nordpil_backend::secrets::Keyring;
+use nordpil_backend::store::ConnectionStore;
 
 fn main() -> eframe::Result {
     let _log_guard = logging::init();
@@ -22,6 +27,11 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "nordpil",
         options,
-        Box::new(|cc| Ok(Box::new(app::NordpilApp::new(cc)?))),
+        Box::new(|cc| {
+            let store_path = ConnectionStore::default_path()
+                .ok_or_else(|| std::io::Error::other("Could not find a home directory."))?;
+            let backend = Backend::new(ConnectionStore::new(store_path), Keyring);
+            Ok(Box::new(app::NordpilApp::new(&cc.egui_ctx, backend)?))
+        }),
     )
 }
