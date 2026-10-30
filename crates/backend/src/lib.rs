@@ -7,8 +7,10 @@ mod documents;
 mod error;
 mod fields;
 mod indexes;
+pub mod navigation;
 mod queries;
 pub mod secrets;
+pub mod settings;
 pub mod store;
 mod toml_file;
 pub mod transfer;
@@ -26,9 +28,11 @@ pub use error::{BackendError, ErrorKind};
 pub use fields::FieldInfo;
 pub use indexes::IndexInfo;
 use mongodb::Client;
+use navigation::{KnownDatabase, Navigation, NavigationStore, Recent};
 use queries::QueryStore;
 pub use queries::{QueryText, SavedQuery};
 use secrets::SecretStore;
+use settings::Settings;
 use store::{ConnectionStore, SavedConnection};
 pub use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -167,6 +171,19 @@ pub enum Command {
     },
     Export(Box<transfer::ExportJob>),
     Import(Box<transfer::ImportJob>),
+    SaveSettings(Settings),
+    /// Recent collections and remembered collection names, for Ctrl+K.
+    LoadNavigation,
+    /// Replaces the recent collections, newest first.
+    SaveRecents(Vec<Recent>),
+    /// Lists the collections of every database. With `remember`, they are
+    /// kept on disk so Ctrl+K finds them before connecting.
+    IndexCollections {
+        connection: Uuid,
+        remember: bool,
+    },
+    /// Forgets one connection's remembered collection names, or all of them.
+    ForgetCollections(Option<Uuid>),
 }
 
 /// Results of [`Command`]s, with enough context to act on them.
@@ -244,6 +261,13 @@ pub enum Response {
         namespace: Namespace,
         result: Result<Vec<SavedQuery>, BackendError>,
     },
+    Navigation(Result<Navigation, BackendError>),
+    CollectionIndex {
+        connection: Uuid,
+        result: Result<Vec<KnownDatabase>, BackendError>,
+    },
+    /// After a command that only writes a file, such as saving settings.
+    Stored(Result<(), BackendError>),
 }
 
 /// An open connection.
@@ -257,17 +281,25 @@ struct Session {
 pub struct Backend {
     store: Arc<tokio::sync::Mutex<ConnectionStore>>,
     queries: Arc<tokio::sync::Mutex<QueryStore>>,
+    navigation: Arc<tokio::sync::Mutex<NavigationStore>>,
+    settings_path: std::path::PathBuf,
     secrets: Arc<dyn SecretStore>,
     sessions: Mutex<HashMap<Uuid, Session>>,
 }
 
 impl Backend {
-    /// Saved queries live in `queries.toml` next to the connections file.
+    /// Saved queries, settings and navigation files live next to the
+    /// connections file.
     pub fn new(store: ConnectionStore, secrets: impl SecretStore) -> Self {
         let queries = QueryStore::new(store.path().with_file_name("queries.toml"));
+        let dir = store.path().parent().unwrap_or(std::path::Path::new("."));
+        let navigation = NavigationStore::new(dir);
+        let settings_path = store.path().with_file_name("config.toml");
         Self {
             store: Arc::new(tokio::sync::Mutex::new(store)),
             queries: Arc::new(tokio::sync::Mutex::new(queries)),
+            navigation: Arc::new(tokio::sync::Mutex::new(navigation)),
+            settings_path,
             secrets: Arc::new(secrets),
             sessions: Mutex::default(),
         }
@@ -498,6 +530,19 @@ impl Handler for Backend {
                     result: self.import(*job).await,
                     namespace,
                 }
+            }
+            Command::SaveSettings(settings) => Response::Stored(self.save_settings(settings).await),
+            Command::LoadNavigation => Response::Navigation(self.load_navigation().await),
+            Command::SaveRecents(recents) => Response::Stored(self.save_recents(recents).await),
+            Command::IndexCollections {
+                connection,
+                remember,
+            } => Response::CollectionIndex {
+                connection,
+                result: self.index_collections(connection, remember).await,
+            },
+            Command::ForgetCollections(connection) => {
+                Response::Stored(self.forget_collections(connection).await)
             }
         }
     }

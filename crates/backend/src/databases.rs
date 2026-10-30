@@ -4,6 +4,7 @@ use futures_util::TryStreamExt as _;
 use mongodb::Client;
 use mongodb::bson::Document;
 use mongodb::results::CollectionType;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{Backend, BackendError};
@@ -15,17 +16,21 @@ pub struct DatabaseInfo {
     pub empty: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CollectionKind {
+    #[default]
     Collection,
     View,
     Timeseries,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionInfo {
     pub name: String,
+    #[serde(default)]
     pub kind: CollectionKind,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub capped: bool,
 }
 

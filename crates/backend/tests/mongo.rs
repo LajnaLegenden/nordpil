@@ -381,3 +381,48 @@ async fn exports_and_imports_every_format() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn indexes_and_remembers_collection_names() {
+    let (_mongo, backend, id, _) = connected_backend(false).await;
+    for (database, collection) in [("shop", "orders"), ("shop", "users"), ("logs", "events")] {
+        let create = Command::CreateCollection {
+            connection: id,
+            database: database.to_owned(),
+            collection: collection.to_owned(),
+        };
+        assert!(matches!(
+            send(&backend, create).await,
+            Response::CollectionCreated { result: Ok(()), .. }
+        ));
+    }
+
+    let index = Command::IndexCollections {
+        connection: id,
+        remember: true,
+    };
+    let Response::CollectionIndex { result, .. } = send(&backend, index).await else {
+        panic!("unexpected response");
+    };
+    let names = |databases: &[nordpil_backend::navigation::KnownDatabase], name: &str| {
+        databases
+            .iter()
+            .find(|known| known.database == name)
+            .map(|known| {
+                known
+                    .collections
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect::<Vec<_>>()
+            })
+    };
+    let found = result.unwrap();
+    assert_eq!(names(&found, "shop").unwrap(), ["orders", "users"]);
+    assert_eq!(names(&found, "logs").unwrap(), ["events"]);
+
+    let Response::Navigation(navigation) = send(&backend, Command::LoadNavigation).await else {
+        panic!("unexpected response");
+    };
+    assert_eq!(navigation.unwrap().databases, found);
+}
