@@ -318,13 +318,21 @@ fn list_view(ui: &mut egui::Ui, tab: &CollectionTab) {
         .show(ui, |ui| {
             for (index, document) in results.documents.iter().enumerate() {
                 let id = egui::Id::unique(("document", tab.id, tab.page, index));
-                let frame = egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    for (key, value) in document {
-                        field(ui, id.with(key), key, value);
-                    }
-                });
-                let response = ui.interact(frame.response.rect, id, Sense::click());
+                // The scope's click area is registered before the fields, so
+                // the expand arrows inside stay clickable.
+                let response = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id_salt(id).sense(Sense::click()),
+                        |ui| {
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                for (key, value) in document {
+                                    field(ui, id.with(key), key, value);
+                                }
+                            });
+                        },
+                    )
+                    .response;
                 document_menu(&response, document);
                 ui.add_space(4.0);
             }
@@ -369,21 +377,33 @@ fn field(ui: &mut egui::Ui, id: egui::Id, key: &str, value: &Bson) {
         });
         return;
     };
-    CollapsingState::load_with_default_open(ui.ctx(), id, false)
+    let (_, header, _) = CollapsingState::load_with_default_open(ui.ctx(), id, false)
         .show_header(ui, |ui| {
-            key_label(ui, key);
+            let label = ui.add(Label::new(key_text(ui, key)).sense(Sense::click()));
             ui.weak(summary);
+            label
         })
         .body(|ui| {
             for (child_key, child) in children {
                 field(ui, id.with(&child_key), &child_key, child);
             }
         });
+    // Clicking the field name expands it too, not only the arrow.
+    if header.inner.clicked()
+        && let Some(mut state) = CollapsingState::load(ui.ctx(), id)
+    {
+        state.set_open(!state.is_open());
+        state.store(ui.ctx());
+    }
 }
 
 fn key_label(ui: &mut egui::Ui, key: &str) {
+    ui.label(key_text(ui, key));
+}
+
+fn key_text(ui: &egui::Ui, key: &str) -> RichText {
     let color = code_editor::color(Highlight::Key, ui.visuals());
-    ui.label(RichText::new(format!("{key}:")).monospace().color(color));
+    RichText::new(format!("{key}:")).monospace().color(color)
 }
 
 fn value_label(ui: &mut egui::Ui, value: &Bson) -> egui::Response {
@@ -539,6 +559,50 @@ mod tests {
     fn columns_start_with_id_then_first_seen_order() {
         let documents = [doc! { "b": 1, "_id": 1 }, doc! { "a": 1, "b": 2 }];
         assert_eq!(column_names(&documents), ["_id", "b", "a"]);
+    }
+
+    #[test]
+    fn nested_fields_expand_on_click() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable as _;
+
+        let mut tab = CollectionTab::new(
+            1,
+            crate::connections::Selection {
+                connection: uuid::Uuid::nil(),
+                database: "db".to_owned(),
+                collection: "c".to_owned(),
+            },
+        );
+        tab.set_documents(vec![doc! { "_id": 1, "address": { "city": "Oslo" } }]);
+        let mut harness = Harness::new_ui_state(
+            |ui, tab: &mut CollectionTab| {
+                list_view(ui, tab);
+            },
+            tab,
+        );
+        harness.run();
+        assert!(harness.query_by_label("city:").is_none());
+
+        // Click the expand arrow just left of the field name, like a user would.
+        let label = harness.get_by_label("address:").rect();
+        let arrow = egui::pos2(label.left() - 8.0, label.center().y);
+        harness.hover_at(arrow);
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: arrow,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        harness.run();
+        assert!(harness.query_by_label("city:").is_some());
+
+        // The field name toggles too.
+        harness.get_by_label("address:").click();
+        harness.run();
+        assert!(harness.query_by_label("city:").is_none());
     }
 
     #[test]
