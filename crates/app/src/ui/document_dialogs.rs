@@ -69,7 +69,9 @@ impl DocumentDialog {
 
     pub fn show(&mut self, ctx: &egui::Context, fields: &[FieldHint]) -> Outcome {
         let mut outcome = Outcome::Open;
-        let modal = egui::Modal::new(egui::Id::unique("document_dialog_modal")).show(ctx, |ui| {
+        // One id per kind, so a dialog never reuses another's size and position.
+        let modal_id = egui::Id::unique(("document_dialog", self.title()));
+        let modal = egui::Modal::new(modal_id).show(ctx, |ui| {
             ui.set_width(640.0);
             let busy = self.pending.is_some();
             ui.heading(self.title());

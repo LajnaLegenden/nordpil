@@ -80,7 +80,9 @@ impl IndexDialog {
     pub fn show(&mut self, ctx: &egui::Context, fields: &[FieldHint]) -> Outcome {
         let mut outcome = Outcome::Open;
         let busy = self.pending.is_some();
-        let modal = egui::Modal::new(egui::Id::unique("index_dialog_modal")).show(ctx, |ui| {
+        // One id per kind, so a dialog never reuses another's size and position.
+        let kind = matches!(self.kind, Kind::Create(_));
+        let modal = egui::Modal::new(egui::Id::unique(("index_dialog", kind))).show(ctx, |ui| {
             ui.set_width(520.0);
             let (confirm, enabled) = match &mut self.kind {
                 Kind::Create(form) => {

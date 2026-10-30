@@ -41,7 +41,14 @@ impl Dialog {
     /// Returns false once the dialog is done.
     pub fn show(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) -> bool {
         let mut open = true;
-        let modal = egui::Modal::new(egui::Id::unique("dialog")).show(ctx, |ui| {
+        // One id per kind, so a dialog never reuses another's size and position.
+        let kind = match self {
+            Self::Password(_) => "password",
+            Self::DeleteConnection { .. } => "delete_connection",
+            Self::Drop(_) => "drop",
+            Self::CreateCollection(_) => "create_collection",
+        };
+        let modal = egui::Modal::new(egui::Id::unique(("dialog", kind))).show(ctx, |ui| {
             ui.set_width(400.0);
             open = match self {
                 Self::Password(prompt) => prompt.show(ui, actions),
