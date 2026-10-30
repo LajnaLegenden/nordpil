@@ -1,4 +1,8 @@
-use eframe::egui;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use eframe::egui::{self, Frame, Key, Margin, Modifiers, RichText, Stroke};
+use nordpil_backend::navigation::{KnownDatabase, Recent};
+use nordpil_backend::settings::{GotoScope, Settings};
 use nordpil_backend::store::SavedConnection;
 use nordpil_backend::{
     Backend, BackendError, Bridge, Command, DatabaseInfo, ErrorKind, Outcome, Password, RequestId,
@@ -12,13 +16,19 @@ use crate::ui::connection_form::{ConnectionForm, FormResult};
 use crate::ui::dialogs::{CreateCollectionDialog, Dialog, DropDialog, PasswordPrompt};
 use crate::ui::document_dialogs::{self, DocumentDialog};
 use crate::ui::documents::TabAction;
+use crate::ui::goto::{self, GotoPalette};
 use crate::ui::index_dialog::{self, IndexDialog};
 use crate::ui::indexes::{self, IndexAction};
+use crate::ui::settings_dialog::{self, SettingsDialog};
 use crate::ui::transfer_dialog::{self, TransferDialog};
-use crate::ui::{Action, documents, sidebar};
+use crate::ui::{Action, chrome, documents, sidebar};
+use crate::widgets::kit;
+use crate::{icons, theme};
 
 /// Older notifications are dropped beyond this many.
 const MAX_NOTIFICATIONS: usize = 5;
+/// Recently opened collections kept for Ctrl+K.
+const MAX_RECENTS: usize = 50;
 
 pub struct NordpilApp {
     backend: Bridge<Backend>,
@@ -35,16 +45,33 @@ pub struct NordpilApp {
     index_dialog: Option<IndexDialog>,
     transfer_dialog: Option<TransferDialog>,
     notifications: Vec<BackendError>,
+    settings: Settings,
+    settings_dialog: Option<SettingsDialog>,
+    goto: Option<GotoPalette>,
+    /// Newest first.
+    recents: Vec<Recent>,
+    /// Collection names remembered for saved connections, for Ctrl+K.
+    known: Vec<KnownDatabase>,
+    /// Opened once its connection, being connected, is open.
+    pending_open: Option<Selection>,
 }
 
 impl NordpilApp {
-    /// `ctx` is repainted whenever a backend result arrives.
+    /// `ctx` is repainted whenever a backend result arrives, and gets the
+    /// theme and the saved settings.
     pub fn new(ctx: &egui::Context, backend: Backend) -> std::io::Result<Self> {
+        let (settings, settings_error) = match backend.load_settings() {
+            Ok(settings) => (settings, None),
+            Err(error) => (Settings::default(), Some(error)),
+        };
+        theme::install(ctx);
+        theme::apply_settings(ctx, &settings);
         let ctx = ctx.clone();
         let mut backend = Bridge::new(backend, move || ctx.request_repaint())?;
         backend.send(Command::LoadConnections);
+        backend.send(Command::LoadNavigation);
 
-        Ok(Self {
+        let mut app = Self {
             backend,
             connections: Vec::new(),
             keyring_available: false,
@@ -58,7 +85,17 @@ impl NordpilApp {
             index_dialog: None,
             transfer_dialog: None,
             notifications: Vec::new(),
-        })
+            settings,
+            settings_dialog: None,
+            goto: None,
+            recents: Vec::new(),
+            known: Vec::new(),
+            pending_open: None,
+        };
+        if let Some(error) = settings_error {
+            app.notify(error);
+        }
+        Ok(app)
     }
 
     fn entry(&self, id: Uuid) -> Option<&ConnectionEntry> {
@@ -109,6 +146,7 @@ impl NordpilApp {
     }
 
     fn open_tab(&mut self, target: Selection) {
+        self.record_recent(&target);
         if let Some(index) = self.tabs.iter().position(|tab| tab.target == target) {
             self.active_tab = Some(index);
             return;
@@ -121,6 +159,140 @@ impl NordpilApp {
         let index = self.tabs.len() - 1;
         self.active_tab = Some(index);
         self.tab_action(index, TabAction::Run);
+    }
+
+    /// Moves the collection to the top of the recents and saves them.
+    fn record_recent(&mut self, target: &Selection) {
+        let opened_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+            });
+        self.recents.retain(|recent| {
+            !(recent.connection == target.connection
+                && recent.database == target.database
+                && recent.collection == target.collection)
+        });
+        self.recents.insert(
+            0,
+            Recent {
+                connection: target.connection,
+                database: target.database.clone(),
+                collection: target.collection.clone(),
+                opened_at,
+            },
+        );
+        self.recents.truncate(MAX_RECENTS);
+        self.backend
+            .send(Command::SaveRecents(self.recents.clone()));
+    }
+
+    /// Opens a collection from Ctrl+K, connecting first if needed.
+    fn go_to(&mut self, target: Selection) {
+        match self.entry(target.connection).map(|entry| &entry.state) {
+            Some(ConnectionState::Connected(_)) => self.open_tab(target),
+            Some(ConnectionState::Connecting(_)) => self.pending_open = Some(target),
+            Some(_) => {
+                let connection = target.connection;
+                self.pending_open = Some(target);
+                self.connect(connection, None, false);
+            }
+            None => {}
+        }
+    }
+
+    /// What Ctrl+K can open: the collections of open connections, and with
+    /// [`GotoScope::AllSaved`], the remembered and recent ones of the rest.
+    fn goto_candidates(&self) -> Vec<goto::Candidate> {
+        let all_saved = self.settings.goto_scope == GotoScope::AllSaved;
+        let mut candidates = Vec::new();
+        for entry in &self.connections {
+            let id = entry.saved.id;
+            let color = entry
+                .saved
+                .color
+                .map_or(theme::of(&egui::Visuals::dark()).subtle, sidebar::color32);
+            let mut push = |database: &str, collection: &str, kind, connected| {
+                let target = Selection {
+                    connection: id,
+                    database: database.to_owned(),
+                    collection: collection.to_owned(),
+                };
+                if candidates
+                    .iter()
+                    .any(|c: &goto::Candidate| c.target == target)
+                {
+                    return;
+                }
+                candidates.push(goto::Candidate {
+                    open: self.tabs.iter().any(|tab| tab.target == target),
+                    target,
+                    connection_name: entry.saved.name.clone(),
+                    color,
+                    kind,
+                    connected,
+                });
+            };
+            match &entry.state {
+                ConnectionState::Connected(databases) => {
+                    for database in databases {
+                        if let Collections::Loaded(collections) = &database.collections {
+                            for collection in collections {
+                                push(&database.info.name, &collection.name, collection.kind, true);
+                            }
+                        }
+                    }
+                }
+                _ if all_saved => {
+                    for known in self.known.iter().filter(|known| known.connection == id) {
+                        for collection in &known.collections {
+                            push(&known.database, &collection.name, collection.kind, false);
+                        }
+                    }
+                }
+                _ => continue,
+            }
+            let connected = matches!(entry.state, ConnectionState::Connected(_));
+            for recent in self.recents.iter().filter(|recent| recent.connection == id) {
+                push(
+                    &recent.database,
+                    &recent.collection,
+                    nordpil_backend::CollectionKind::Collection,
+                    connected,
+                );
+            }
+        }
+        candidates
+    }
+
+    fn set_settings(&mut self, ctx: &egui::Context, settings: Settings) {
+        let scope_changed = settings.goto_scope != self.settings.goto_scope;
+        self.settings = settings;
+        theme::apply_settings(ctx, &settings);
+        self.backend.send(Command::SaveSettings(settings));
+        if !scope_changed {
+            return;
+        }
+        match settings.goto_scope {
+            GotoScope::OpenOnly => {
+                self.known.clear();
+                self.backend.send(Command::ForgetCollections(None));
+            }
+            GotoScope::AllSaved => {
+                let connected: Vec<Uuid> = self
+                    .connections
+                    .iter()
+                    .filter(|entry| matches!(entry.state, ConnectionState::Connected(_)))
+                    .map(|entry| entry.saved.id)
+                    .collect();
+                for connection in connected {
+                    self.backend.send(Command::IndexCollections {
+                        connection,
+                        remember: true,
+                    });
+                }
+            }
+        }
     }
 
     fn close_tab(&mut self, index: usize) {
@@ -314,6 +486,11 @@ impl NordpilApp {
                 Ok(()) => {
                     self.connections.retain(|entry| entry.saved.id != id);
                     self.deselect_if(|s| s.connection == id);
+                    self.recents.retain(|recent| recent.connection != id);
+                    self.known.retain(|known| known.connection != id);
+                    self.backend
+                        .send(Command::SaveRecents(self.recents.clone()));
+                    self.backend.send(Command::ForgetCollections(Some(id)));
                 }
                 Err(error) => self.notify(error),
             },
@@ -501,6 +678,25 @@ impl NordpilApp {
                 // A failed count shouldn't hide the documents; show the total as unknown.
                 tab.count = Some(result.unwrap_or(None));
             }
+            Response::Navigation(result) => match result {
+                Ok(navigation) => {
+                    self.recents = navigation.recents;
+                    if self.settings.goto_scope == GotoScope::AllSaved {
+                        self.known = navigation.databases;
+                    }
+                }
+                Err(error) => self.notify(error),
+            },
+            Response::CollectionIndex { connection, result } => match result {
+                Ok(databases) => self.collections_indexed(connection, databases),
+                // Ctrl+K then just lacks these collections; not worth an error.
+                Err(error) => tracing::warn!(%error, "could not list all collections"),
+            },
+            Response::Stored(result) => {
+                if let Err(error) = result {
+                    self.notify(error);
+                }
+            }
             Response::DatabaseDropped {
                 connection,
                 database,
@@ -540,11 +736,21 @@ impl NordpilApp {
 
     fn connected(&mut self, id: Uuid, result: Result<Vec<DatabaseInfo>, BackendError>) {
         let keyring_available = self.keyring_available;
+        let remember = self.settings.goto_scope == GotoScope::AllSaved;
         let Some(entry) = self.entry_mut(id) else {
             return;
         };
         match result {
-            Ok(databases) => entry.set_databases(databases),
+            Ok(databases) => {
+                entry.set_databases(databases);
+                self.backend.send(Command::IndexCollections {
+                    connection: id,
+                    remember,
+                });
+                if let Some(target) = self.pending_open.take_if(|target| target.connection == id) {
+                    self.open_tab(target);
+                }
+            }
             Err(error)
                 if matches!(
                     error.kind,
@@ -563,8 +769,33 @@ impl NordpilApp {
             }
             Err(error) => {
                 entry.state = ConnectionState::Failed(error.clone());
+                if self
+                    .pending_open
+                    .as_ref()
+                    .is_some_and(|target| target.connection == id)
+                {
+                    self.pending_open = None;
+                }
                 self.notify(error);
             }
+        }
+    }
+
+    /// Fills in the sidebar's unloaded databases and, with
+    /// [`GotoScope::AllSaved`], remembers the names for Ctrl+K.
+    fn collections_indexed(&mut self, connection: Uuid, databases: Vec<KnownDatabase>) {
+        if let Some(entry) = self.entry_mut(connection) {
+            for known in &databases {
+                if let Some(node) = entry.database_mut(&known.database)
+                    && matches!(node.collections, Collections::NotLoaded)
+                {
+                    node.collections = Collections::Loaded(known.collections.clone());
+                }
+            }
+        }
+        if self.settings.goto_scope == GotoScope::AllSaved {
+            self.known.retain(|known| known.connection != connection);
+            self.known.extend(databases);
         }
     }
 
@@ -846,90 +1077,209 @@ impl NordpilApp {
         if self.notifications.is_empty() {
             return;
         }
-        egui::Panel::bottom("notifications").show(ui, |ui| {
-            let mut dismissed = None;
-            for (index, error) in self.notifications.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    if ui.small_button("Dismiss").clicked() {
-                        dismissed = Some(index);
-                    }
-                    let label = ui.colored_label(ui.visuals().error_fg_color, &error.message);
-                    if let Some(detail) = &error.detail {
-                        label.on_hover_text(detail);
-                    }
-                });
-            }
-            if let Some(index) = dismissed {
-                self.notifications.remove(index);
-            }
-        });
+        let palette = theme::palette(ui);
+        egui::Panel::bottom("notifications")
+            .show_separator_line(false)
+            .frame(
+                Frame::new()
+                    .fill(palette.main)
+                    .inner_margin(Margin::symmetric(16, 10)),
+            )
+            .show(ui, |ui| {
+                let mut dismissed = None;
+                for (index, error) in self.notifications.iter().enumerate() {
+                    Frame::new()
+                        .fill(palette.danger_soft)
+                        .stroke(Stroke::new(1.0, palette.danger.gamma_multiply(0.35)))
+                        .corner_radius(10)
+                        .inner_margin(Margin::symmetric(12, 6))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(icons::CIRCLE_ALERT)
+                                        .size(16.0)
+                                        .color(palette.danger),
+                                );
+                                let label =
+                                    ui.label(RichText::new(&error.message).color(palette.text));
+                                if let Some(detail) = &error.detail {
+                                    label.on_hover_text(detail);
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if kit::icon_button(ui, icons::X, "Dismiss", 26.0).clicked()
+                                        {
+                                            dismissed = Some(index);
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                }
+                if let Some(index) = dismissed {
+                    self.notifications.remove(index);
+                }
+            });
     }
 
-    fn show_main(&mut self, ui: &mut egui::Ui) {
+    fn show_main(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let palette = theme::palette(ui);
         if self.tabs.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.weak(if self.connections.is_empty() {
-                    "Add a connection to get started."
-                } else {
-                    "Select a collection."
-                });
-            });
+            if chrome::welcome(ui, !self.connections.is_empty()) {
+                actions.push(Action::NewConnection);
+            }
             return;
         }
 
-        let mut close = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("tab_bar")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (index, tab) in self.tabs.iter().enumerate() {
-                        let active = self.active_tab == Some(index);
-                        let response = ui.selectable_label(active, tab.title());
-                        if response.clicked() {
-                            self.active_tab = Some(index);
-                        }
-                        if response.middle_clicked() {
-                            close = Some(index);
-                        }
-                        if ui.small_button("×").on_hover_text("Close tab").clicked() {
-                            close = Some(index);
-                        }
-                        ui.add_space(6.0);
-                    }
-                });
-            });
-        ui.separator();
-        if let Some(index) = close {
-            self.close_tab(index);
-            return;
+        let titles: Vec<(String, String)> = self
+            .tabs
+            .iter()
+            .map(|tab| (tab.target.database.clone(), tab.target.collection.clone()))
+            .collect();
+        let bar = ui
+            .scope(|ui| {
+                ui.set_height(chrome::TAB_BAR_HEIGHT);
+                let rect = ui.max_rect();
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.right(), rect.top() + chrome::TAB_BAR_HEIGHT),
+                    ),
+                    0.0,
+                    palette.side,
+                );
+                ui.painter().hline(
+                    rect.x_range(),
+                    rect.top() + chrome::TAB_BAR_HEIGHT - 0.5,
+                    Stroke::new(1.0, palette.line),
+                );
+                chrome::tab_bar(ui, &titles, self.active_tab)
+            })
+            .inner;
+        match bar {
+            Some(chrome::TabEvent::Select(index)) => self.active_tab = Some(index),
+            Some(chrome::TabEvent::Close(index)) => {
+                self.close_tab(index);
+                return;
+            }
+            None => {}
         }
 
         let Some(index) = self.active_tab else {
             return;
         };
-        let read_only = self
-            .entry(self.tabs[index].target.connection)
-            .is_none_or(|entry| entry.saved.read_only);
-        let tab = &mut self.tabs[index];
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut tab.panel, Panel::Documents, "Documents");
-            ui.selectable_value(&mut tab.panel, Panel::Indexes, "Indexes");
+        let entry = self.entry(self.tabs[index].target.connection);
+        let read_only = entry.is_none_or(|entry| entry.saved.read_only);
+        let connection_name = entry
+            .map(|entry| entry.saved.name.clone())
+            .unwrap_or_default();
+        let count = match self.tabs[index].count {
+            Some(Some(count)) => Some(format!("{} documents", documents::thousands(count))),
+            _ => None,
+        };
+        Frame::new()
+            .inner_margin(Margin {
+                left: 24,
+                right: 24,
+                top: 18,
+                bottom: 0,
+            })
+            .show(ui, |ui| {
+                let tab = &mut self.tabs[index];
+                let target = tab.target.clone();
+                chrome::collection_header(
+                    ui,
+                    &connection_name,
+                    &target.database,
+                    &target.collection,
+                    count,
+                    &mut tab.panel,
+                );
+                ui.add_space(14.0);
+                match self.tabs[index].panel {
+                    Panel::Documents => {
+                        if let Some(action) = documents::show(ui, &mut self.tabs[index], read_only)
+                        {
+                            self.tab_action(index, action);
+                        }
+                    }
+                    Panel::Indexes => {
+                        let tab = &self.tabs[index];
+                        if tab.indexes.is_none() && tab.indexes_request.is_none() {
+                            let namespace = tab.namespace();
+                            self.load_indexes(&namespace);
+                        }
+                        if let Some(action) = indexes::show(ui, &self.tabs[index], read_only) {
+                            self.index_action(index, action);
+                        }
+                    }
+                }
+            });
+    }
+
+    /// Ctrl+K opens "Go to collection"; Ctrl+L focuses the filter.
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        let (goto, filter) = ctx.input_mut(|input| {
+            (
+                input.consume_key(Modifiers::COMMAND, Key::K),
+                input.consume_key(Modifiers::COMMAND, Key::L),
+            )
         });
-        match tab.panel {
-            Panel::Documents => {
-                if let Some(action) = documents::show(ui, tab, read_only) {
-                    self.tab_action(index, action);
-                }
+        let dialog_open = self.form.is_some()
+            || self.dialog.is_some()
+            || self.document_dialog.is_some()
+            || self.index_dialog.is_some()
+            || self.transfer_dialog.is_some()
+            || self.settings_dialog.is_some();
+        if goto && !dialog_open {
+            self.goto = match self.goto {
+                Some(_) => None,
+                None => Some(GotoPalette::new()),
+            };
+        }
+        if filter
+            && !dialog_open
+            && self.goto.is_none()
+            && let Some(index) = self.active_tab
+        {
+            let tab = &mut self.tabs[index];
+            tab.panel = Panel::Documents;
+            tab.editors
+                .filter
+                .focus_and_select_all(ctx, &tab.inputs.filter);
+        }
+    }
+
+    fn show_goto(&mut self, ctx: &egui::Context) {
+        if self.goto.is_none() {
+            return;
+        }
+        let candidates = self.goto_candidates();
+        let searches_closed = self.settings.goto_scope == GotoScope::AllSaved;
+        let Some(goto) = self.goto.as_mut() else {
+            return;
+        };
+        match goto.show(ctx, &candidates, &self.recents, searches_closed) {
+            goto::Outcome::Open => {}
+            goto::Outcome::Close => self.goto = None,
+            goto::Outcome::Pick(target) => {
+                self.goto = None;
+                self.go_to(target);
             }
-            Panel::Indexes => {
-                if tab.indexes.is_none() && tab.indexes_request.is_none() {
-                    let namespace = tab.namespace();
-                    self.load_indexes(&namespace);
-                }
-                if let Some(action) = indexes::show(ui, &self.tabs[index], read_only) {
-                    self.index_action(index, action);
-                }
-            }
+        }
+    }
+
+    fn show_settings(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.settings_dialog else {
+            return;
+        };
+        let mut settings = self.settings;
+        match dialog.show(ctx, &mut settings) {
+            settings_dialog::Outcome::Open => {}
+            settings_dialog::Outcome::Close => self.settings_dialog = None,
+            settings_dialog::Outcome::Changed => self.set_settings(ctx, settings),
         }
     }
 
@@ -946,16 +1296,52 @@ impl NordpilApp {
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let mut actions = Vec::new();
+        let ctx = ui.ctx().clone();
+        self.shortcuts(&ctx);
+        let palette = theme::palette(ui);
+
+        let top = egui::Panel::top("top_bar")
+            .exact_size(chrome::TOP_BAR_HEIGHT)
+            .show_separator_line(false)
+            .frame(
+                Frame::new()
+                    .fill(palette.app)
+                    .inner_margin(Margin::symmetric(10, 0)),
+            )
+            .show(ui, chrome::top_bar);
+        let rect = top.response.rect;
+        ui.painter().hline(
+            rect.x_range(),
+            rect.bottom() - 0.5,
+            Stroke::new(1.0, palette.line),
+        );
+        if top.inner.goto && self.goto.is_none() {
+            self.goto = Some(GotoPalette::new());
+        }
+        if top.inner.settings {
+            self.settings_dialog = Some(SettingsDialog);
+        }
+
         egui::Panel::left("sidebar")
             .resizable(true)
-            .default_size(260.0)
+            .default_size(272.0)
+            .size_range(200.0..=480.0)
+            .show_separator_line(false)
+            .frame(Frame::new().fill(palette.side))
             .show(ui, |ui| {
+                let rect = ui.max_rect();
+                ui.painter().vline(
+                    rect.right() + 0.5,
+                    rect.y_range(),
+                    Stroke::new(1.0, palette.line),
+                );
                 sidebar::show(ui, &self.connections, self.selection(), &mut actions);
             });
         self.show_notifications(ui);
-        egui::CentralPanel::default().show(ui, |ui| self.show_main(ui));
+        egui::CentralPanel::no_frame()
+            .frame(Frame::new().fill(palette.main))
+            .show(ui, |ui| self.show_main(ui, &mut actions));
 
-        let ctx = ui.ctx().clone();
         self.show_form(&ctx);
         self.show_document_dialog(&ctx);
         self.show_index_dialog(&ctx);
@@ -963,8 +1349,18 @@ impl NordpilApp {
         if let Some(dialog) = &mut self.dialog
             && !dialog.show(&ctx, &mut actions)
         {
+            // A password prompt closed without connecting cancels Ctrl+K's pick.
+            let cancelled_password = matches!(dialog, Dialog::Password(_))
+                && !actions
+                    .iter()
+                    .any(|action| matches!(action, Action::ConnectWithPassword { .. }));
+            if cancelled_password {
+                self.pending_open = None;
+            }
             self.dialog = None;
         }
+        self.show_settings(&ctx);
+        self.show_goto(&ctx);
 
         for action in actions {
             self.apply(action);
@@ -1004,6 +1400,7 @@ mod tests {
         let app = NordpilApp::new(&egui::Context::default(), backend).unwrap();
         Harness::builder()
             .with_size(egui::vec2(1000.0, 700.0))
+            .with_context_setup(theme::install)
             .build_ui_state(
                 |ui, app: &mut NordpilApp| {
                     app.process_events();
@@ -1137,6 +1534,79 @@ mod tests {
         assert_eq!(tab.count, Some(Some(0)));
         assert!(harness.query_by_label("No documents match.").is_some());
     }
+
+    #[test]
+    #[ignore = "needs Docker"]
+    fn goto_connects_and_opens_a_remembered_collection() {
+        let mongo = Mongo::default().with_tag("8.0").start().unwrap();
+        let port = mongo.get_host_port_ipv4(27017).unwrap();
+        let mut harness = harness();
+        harness.run();
+
+        harness
+            .get_by_role_and_label(Role::Button, "New connection")
+            .click();
+        harness.run();
+        let uri = format!("mongodb://127.0.0.1:{port}/?directConnection=true");
+        type_into(&mut harness, "Connection string", &uri);
+        harness
+            .get_by_role_and_label(Role::Button, "Save and connect")
+            .click();
+        run_until(&mut harness, |app| {
+            matches!(
+                app.connections.first().map(|e| &e.state),
+                Some(ConnectionState::Connected(_))
+            )
+        });
+        let connection = harness.state().connections[0].saved.id;
+        harness.state_mut().apply(Action::CreateCollection {
+            connection,
+            database: None,
+        });
+        harness.run();
+        type_into(&mut harness, "Database", "shop");
+        type_into(&mut harness, "Collection", "orders");
+        harness
+            .get_by_role_and_label(Role::Button, "Create")
+            .click();
+        run_until(&mut harness, |app| {
+            matches!(&app.connections[0].state, ConnectionState::Connected(dbs)
+                if dbs.iter().any(|db| db.info.name == "shop"))
+        });
+        // Connecting lists every collection, so Ctrl+K knows them once closed.
+        harness.state_mut().apply(Action::Disconnect(connection));
+        run_until(&mut harness, |app| {
+            matches!(app.connections[0].state, ConnectionState::Disconnected)
+        });
+        harness.state_mut().connect(connection, None, false);
+        run_until(&mut harness, |app| {
+            app.known.iter().any(|known| known.database == "shop")
+        });
+        harness.state_mut().apply(Action::Disconnect(connection));
+        run_until(&mut harness, |app| {
+            matches!(app.connections[0].state, ConnectionState::Disconnected)
+        });
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::K);
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::TextInput, "Go to collection")
+            .type_text("ord");
+        harness.run();
+        harness.key_press(Key::Enter);
+        run_until(&mut harness, |app| {
+            app.tabs.first().is_some_and(|tab| tab.results.is_some())
+        });
+
+        let app = harness.state();
+        assert!(app.goto.is_none());
+        assert_eq!(app.tabs[0].target.collection, "orders");
+        assert!(matches!(
+            app.connections[0].state,
+            ConnectionState::Connected(_)
+        ));
+        assert_eq!(app.recents[0].collection, "orders");
+    }
 }
 
 #[cfg(all(test, feature = "screenshots"))]
@@ -1150,6 +1620,7 @@ mod screenshots {
 
     use super::*;
     use crate::connections::DatabaseNode;
+    use crate::ui::goto::GotoPalette;
 
     fn database(name: &str, collections: &[(&str, CollectionKind)]) -> DatabaseNode {
         DatabaseNode {
@@ -1271,6 +1742,38 @@ mod screenshots {
         .into();
         app.tabs.push(tab);
         app.active_tab = Some(0);
+
+        let recent = |connection, database: &str, collection: &str| Recent {
+            connection,
+            database: database.to_owned(),
+            collection: collection.to_owned(),
+            opened_at: 0,
+        };
+        let (local, production) = (app.connections[0].saved.id, app.connections[1].saved.id);
+        app.recents = vec![
+            recent(local, "shop", "orders"),
+            recent(local, "shop", "customers"),
+            recent(local, "shop", "metrics"),
+            recent(production, "shop", "orders"),
+            recent(production, "auth", "users"),
+        ];
+        let known = |database: &str, names: &[&str]| KnownDatabase {
+            connection: production,
+            database: database.to_owned(),
+            collections: names
+                .iter()
+                .map(|name| CollectionInfo {
+                    name: (*name).to_owned(),
+                    kind: CollectionKind::Collection,
+                    capped: false,
+                })
+                .collect(),
+        };
+        app.known = vec![
+            known("shop", &["orders", "users"]),
+            known("analytics", &["order_events"]),
+            known("archive", &["records"]),
+        ];
         app
     }
 
@@ -1285,7 +1788,8 @@ mod screenshots {
     #[ignore = "renders with wgpu; run with `just screenshots`"]
     fn screenshot_main_window() {
         let mut harness = Harness::builder()
-            .with_size(egui::vec2(1100.0, 650.0))
+            .with_size(egui::vec2(1440.0, 900.0))
+            .with_context_setup(theme::install)
             .wgpu()
             .build_ui_state(
                 |ui, app: &mut NordpilApp| {
@@ -1296,7 +1800,9 @@ mod screenshots {
             );
         harness.run();
         save(&mut harness, "main-collapsed");
-        harness.get_by_label("shop").click();
+        harness
+            .get_by_role_and_label(Role::TreeItem, "shop")
+            .click();
         harness.run();
         save(&mut harness, "main");
 
@@ -1319,6 +1825,62 @@ mod screenshots {
         harness.run();
         save(&mut harness, "autocomplete");
         harness.key_press(egui::Key::Escape);
+        harness.run();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness
+            .get_by_role_and_label(Role::TextInput, "Filter")
+            .type_text("{ status: '");
+        harness.run();
+        save(&mut harness, "autocomplete-values");
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        harness.state_mut().tabs[0].view = crate::tabs::View::List;
+        harness.state_mut().tabs[0].show_options = false;
+        harness.state_mut().tabs[0].inputs.filter =
+            "{ status: 'shipped', total: { $gt: 100 } }".to_owned();
+
+        harness.state_mut().goto = Some(GotoPalette::new());
+        harness.run();
+        save(&mut harness, "goto-recent");
+        harness
+            .get_by_role_and_label(Role::TextInput, "Go to collection")
+            .type_text("ord");
+        harness.run();
+        save(&mut harness, "goto-search");
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        assert!(harness.state().goto.is_none());
+
+        harness.state_mut().settings_dialog = Some(SettingsDialog);
+        harness.run();
+        save(&mut harness, "settings");
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+
+        harness.ctx.set_theme(egui::Theme::Light);
+        harness.run();
+        save(&mut harness, "main-light");
+        harness.state_mut().tabs[0].view = crate::tabs::View::Table;
+        harness.run();
+        save(&mut harness, "table-light");
+        harness.state_mut().tabs[0].view = crate::tabs::View::List;
+        harness.state_mut().goto = Some(GotoPalette::new());
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::TextInput, "Go to collection")
+            .type_text("ord");
+        harness.run();
+        save(&mut harness, "goto-light");
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        harness.state_mut().tab_action(0, TabAction::Edit(0));
+        harness.run();
+        save(&mut harness, "edit-document-light");
+        harness
+            .get_by_role_and_label(Role::Button, "Cancel")
+            .click();
+        harness.run();
+        harness.ctx.set_theme(egui::Theme::Dark);
         harness.run();
 
         harness

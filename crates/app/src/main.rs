@@ -2,9 +2,11 @@
 
 mod app;
 mod connections;
+mod icons;
 mod logging;
 mod query_language;
 mod tabs;
+mod theme;
 mod ui;
 mod widgets;
 

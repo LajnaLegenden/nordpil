@@ -1,12 +1,13 @@
 //! Creating an index, and confirming a drop.
 
 use bson::{Bson, Document};
-use eframe::egui::{self, Button, RichText, TextEdit};
+use eframe::egui::{self, TextEdit};
 use nordpil_backend::{Command, Namespace, RequestId};
 use nordpil_query::{FieldHint, Mode};
 
 use crate::query_language::QueryLanguage;
 use crate::widgets::code_editor::CodeEditor;
+use crate::widgets::kit::{self, Tone};
 
 pub enum Kind {
     Create(Box<CreateForm>),
@@ -82,16 +83,16 @@ impl IndexDialog {
         let busy = self.pending.is_some();
         // One id per kind, so a dialog never reuses another's size and position.
         let kind = matches!(self.kind, Kind::Create(_));
-        let modal = egui::Modal::new(egui::Id::unique(("index_dialog", kind))).show(ctx, |ui| {
-            ui.set_width(520.0);
+        let modal = kit::modal(ctx, egui::Id::unique(("index_dialog", kind))).show(ctx, |ui| {
+            ui.set_width(560.0);
             let (confirm, enabled) = match &mut self.kind {
                 Kind::Create(form) => {
-                    ui.heading("Create index");
+                    kit::dialog_title(ui, "Create index", None);
                     ui.add_enabled_ui(!busy, |ui| form.show(ui, fields));
                     ("Create", true)
                 }
                 Kind::Drop { name, typed } => {
-                    ui.heading("Drop index");
+                    kit::dialog_title(ui, "Drop index", None);
                     ui.label(format!(
                         "Queries that use {name} will get slower. Rebuilding it later can take a while."
                     ));
@@ -103,15 +104,20 @@ impl IndexDialog {
                 }
             };
             if let Some(error) = &self.error {
-                ui.colored_label(ui.visuals().error_fg_color, error);
+                super::dialogs::error_label(ui, error);
             }
-            ui.separator();
-            ui.horizontal(|ui| {
-                let mut text = RichText::new(confirm);
-                if matches!(self.kind, Kind::Drop { .. }) {
-                    text = text.color(ui.visuals().error_fg_color);
-                }
-                if ui.add_enabled(enabled && !busy, Button::new(text)).clicked() {
+            kit::dialog_footer(ui, |ui| {
+                let tone = if matches!(self.kind, Kind::Drop { .. }) {
+                    Tone::Danger
+                } else {
+                    Tone::Primary
+                };
+                let confirm = ui
+                    .add_enabled_ui(enabled && !busy, |ui| {
+                        kit::button(ui, tone, None, confirm, kit::DIALOG_HEIGHT)
+                    })
+                    .inner;
+                if confirm.clicked() {
                     match self.command() {
                         Ok(command) => {
                             self.error = None;
@@ -120,7 +126,12 @@ impl IndexDialog {
                         Err(error) => self.error = Some(error),
                     }
                 }
-                if ui.add_enabled(!busy, Button::new("Cancel")).clicked() {
+                let cancel = ui
+                    .add_enabled_ui(!busy, |ui| {
+                        kit::button(ui, Tone::Secondary, None, "Cancel", kit::DIALOG_HEIGHT)
+                    })
+                    .inner;
+                if cancel.clicked() {
                     outcome = Outcome::Cancel;
                 }
                 if busy {
@@ -160,7 +171,7 @@ impl CreateForm {
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
                 let label = ui.label("Keys");
-                let language = QueryLanguage::new(Mode::Fields, fields);
+                let language = QueryLanguage::new(Mode::Fields, fields, &[]);
                 self.keys_editor
                     .show(ui, &mut self.keys, &language)
                     .response
@@ -194,7 +205,7 @@ impl CreateForm {
                 ui.end_row();
 
                 let label = ui.label("Partial filter");
-                let language = QueryLanguage::new(Mode::Filter, fields);
+                let language = QueryLanguage::new(Mode::Filter, fields, &[]);
                 self.partial_editor
                     .show(ui, &mut self.partial_filter, &language)
                     .response
@@ -202,7 +213,7 @@ impl CreateForm {
                 ui.end_row();
 
                 let label = ui.label("Collation");
-                let language = QueryLanguage::new(Mode::Collation, fields);
+                let language = QueryLanguage::new(Mode::Collation, fields, &[]);
                 self.collation_editor
                     .show(ui, &mut self.collation, &language)
                     .response

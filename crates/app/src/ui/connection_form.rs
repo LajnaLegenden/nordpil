@@ -1,13 +1,19 @@
 //! The new/edit connection dialog. The connection string and the fields
 //! below it edit the same connection and stay in sync.
 
-use eframe::egui::{self, Role, Sense, Stroke, StrokeKind, TextEdit, TextStyle, WidgetInfo};
+use eframe::egui::{
+    self, CornerRadius, Frame, Margin, RichText, Role, Sense, Stroke, TextEdit, TextStyle,
+    WidgetInfo,
+};
 use nordpil_backend::store::{ConnectionColor, SavedConnection};
 use nordpil_backend::uri::ConnectionUri;
 use nordpil_backend::{Password, PasswordChange};
 use uuid::Uuid;
 
 use super::sidebar::color32;
+use crate::icons;
+use crate::theme;
+use crate::widgets::kit::{self, Tone};
 
 pub enum FormResult {
     Open,
@@ -168,44 +174,59 @@ impl ConnectionForm {
 
     pub fn show(&mut self, ctx: &egui::Context, keyring_available: bool) -> FormResult {
         let mut result = FormResult::Open;
-        let modal = egui::Modal::new(egui::Id::unique("connection_form")).show(ctx, |ui| {
-            ui.set_width(520.0);
-            ui.heading(if self.is_new {
-                "New connection"
-            } else {
-                "Edit connection"
-            });
-            ui.add_space(8.0);
+        let modal = kit::modal(ctx, egui::Id::unique("connection_form")).show(ctx, |ui| {
+            ui.set_width(600.0);
+            kit::dialog_title(
+                ui,
+                if self.is_new {
+                    "New connection"
+                } else {
+                    "Edit connection"
+                },
+                None,
+            );
             ui.add_enabled_ui(!self.saving, |ui| {
                 self.main_fields(ui);
-                egui::CollapsingHeader::new("Connection details")
-                    .default_open(true)
-                    .show(ui, |ui| self.detail_fields(ui, keyring_available));
+                ui.add_space(12.0);
+                self.details_box(ui, keyring_available);
+                ui.add_space(14.0);
                 self.appearance(ui);
             });
 
             if let Some(error) = &self.error {
-                ui.colored_label(ui.visuals().error_fg_color, error);
+                super::dialogs::error_label(ui, error);
             }
-            ui.separator();
-            ui.horizontal(|ui| {
-                let valid = self.uri_error.is_none();
-                if ui
-                    .add_enabled(valid && !self.saving, egui::Button::new("Save and connect"))
-                    .clicked()
-                {
+            kit::dialog_footer(ui, |ui| {
+                let valid = self.uri_error.is_none() && !self.saving;
+                let height = kit::DIALOG_HEIGHT;
+                let connect = ui
+                    .add_enabled_ui(valid, |ui| {
+                        kit::button(
+                            ui,
+                            Tone::Primary,
+                            Some(icons::PLUG),
+                            "Save and connect",
+                            height,
+                        )
+                    })
+                    .inner;
+                if connect.clicked() {
                     result = self.save(true);
                 }
-                if ui
-                    .add_enabled(valid && !self.saving, egui::Button::new("Save"))
-                    .clicked()
-                {
+                let save = ui
+                    .add_enabled_ui(valid, |ui| {
+                        kit::button(ui, Tone::Secondary, None, "Save", height)
+                    })
+                    .inner;
+                if save.clicked() {
                     result = self.save(false);
                 }
-                if ui
-                    .add_enabled(!self.saving, egui::Button::new("Cancel"))
-                    .clicked()
-                {
+                let cancel = ui
+                    .add_enabled_ui(!self.saving, |ui| {
+                        kit::button(ui, Tone::Ghost, None, "Cancel", height)
+                    })
+                    .inner;
+                if cancel.clicked() {
                     result = FormResult::Cancelled;
                 }
                 if self.saving {
@@ -219,10 +240,56 @@ impl ConnectionForm {
         result
     }
 
+    /// The connection details, collapsible, in a bordered box.
+    fn details_box(&mut self, ui: &mut egui::Ui, keyring_available: bool) {
+        let palette = theme::palette(ui);
+        let id = ui.make_persistent_id("connection_details");
+        let mut state =
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
+        Frame::new()
+            .fill(palette.main)
+            .stroke(Stroke::new(1.0, palette.line))
+            .corner_radius(CornerRadius::same(12))
+            .inner_margin(Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let open = state.is_open();
+                let header = ui.add(
+                    egui::Button::new((
+                        RichText::new(if open {
+                            icons::CHEVRON_DOWN
+                        } else {
+                            icons::CHEVRON_RIGHT
+                        })
+                        .size(14.0)
+                        .color(palette.subtle),
+                        RichText::new("Connection details").family(theme::medium()),
+                        egui::Atom::grow(),
+                        RichText::new("Kept in sync with the connection string")
+                            .size(12.0)
+                            .color(palette.subtle),
+                    ))
+                    .frame(false)
+                    .min_size(egui::vec2(ui.available_width(), 26.0)),
+                );
+                header
+                    .widget_info(|| WidgetInfo::labeled(Role::Button, true, "Connection details"));
+                if header.clicked() {
+                    state.set_open(!open);
+                    state.store(ui.ctx());
+                }
+                if open {
+                    ui.add_space(6.0);
+                    self.detail_fields(ui, keyring_available);
+                }
+            });
+    }
+
     fn main_fields(&mut self, ui: &mut egui::Ui) {
         egui::Grid::new("connection_form_main")
             .num_columns(2)
-            .spacing([12.0, 8.0])
+            .spacing([16.0, 10.0])
+            .min_col_width(140.0)
             .show(ui, |ui| {
                 let label = ui.label("Name");
                 ui.add(
@@ -255,7 +322,8 @@ impl ConnectionForm {
         let mut changed = false;
         egui::Grid::new("connection_form_details")
             .num_columns(2)
-            .spacing([12.0, 8.0])
+            .spacing([16.0, 10.0])
+            .min_col_width(126.0)
             .show(ui, |ui| {
                 ui.label("");
                 let mut srv = self.fields.srv;
@@ -310,22 +378,36 @@ impl ConnectionForm {
     }
 
     fn appearance(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
+        let palette = theme::palette(ui);
         ui.horizontal(|ui| {
-            ui.label("Color");
-            if ui.selectable_label(self.color.is_none(), "None").clicked() {
+            ui.allocate_ui_with_layout(
+                egui::vec2(156.0, 28.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_width(156.0);
+                    ui.label("Color");
+                },
+            );
+            let none = ui.add(
+                egui::Button::selectable(self.color.is_none(), RichText::new("None").size(12.5))
+                    .corner_radius(CornerRadius::same(255))
+                    .min_size(egui::vec2(0.0, 28.0)),
+            );
+            if none.clicked() {
                 self.color = None;
             }
             for color in ConnectionColor::ALL {
                 let selected = self.color == Some(color);
                 let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(18.0, 18.0), Sense::click());
-                ui.painter()
-                    .rect_filled(rect.shrink(2.0), 3.0, color32(color));
+                    ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::click());
+                let center = rect.center();
+                ui.painter().circle_filled(center, 10.0, color32(color));
                 if selected {
-                    let stroke = Stroke::new(2.0, ui.visuals().strong_text_color());
                     ui.painter()
-                        .rect_stroke(rect, 3.0, stroke, StrokeKind::Inside);
+                        .circle_stroke(center, 13.0, Stroke::new(2.0, color32(color)));
+                } else if response.hovered() {
+                    ui.painter()
+                        .circle_stroke(center, 13.0, Stroke::new(1.0, palette.line_strong));
                 }
                 response.widget_info(|| {
                     WidgetInfo::selected(Role::RadioButton, true, selected, format!("{color:?}"))
@@ -335,10 +417,14 @@ impl ConnectionForm {
                 }
             }
         });
-        ui.checkbox(
-            &mut self.read_only,
-            "Read-only: block inserts, updates, deletes and drops",
-        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(164.0);
+            ui.checkbox(
+                &mut self.read_only,
+                "Read-only: block inserts, updates, deletes and drops",
+            );
+        });
     }
 
     fn save(&mut self, connect: bool) -> FormResult {

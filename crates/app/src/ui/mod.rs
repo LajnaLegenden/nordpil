@@ -1,12 +1,15 @@
 //! Panels and dialogs. They don't change app state directly; they return
 //! [`Action`]s that [`crate::app::NordpilApp`] applies after drawing.
 
+pub mod chrome;
 pub mod connection_form;
 pub mod dialogs;
 pub mod document_dialogs;
 pub mod documents;
+pub mod goto;
 pub mod index_dialog;
 pub mod indexes;
+pub mod settings_dialog;
 pub mod sidebar;
 pub mod transfer_dialog;
 

@@ -1,10 +1,12 @@
 //! Small modal dialogs: password prompt, confirmations, create collection.
 
-use eframe::egui::{self, Button, Key, RichText, TextEdit};
+use eframe::egui::{self, Key, RichText, TextEdit};
 use nordpil_backend::Password;
 use uuid::Uuid;
 
 use super::Action;
+use crate::theme;
+use crate::widgets::kit::{self, Tone};
 
 pub enum Dialog {
     Password(PasswordPrompt),
@@ -48,8 +50,8 @@ impl Dialog {
             Self::Drop(_) => "drop",
             Self::CreateCollection(_) => "create_collection",
         };
-        let modal = egui::Modal::new(egui::Id::unique(("dialog", kind))).show(ctx, |ui| {
-            ui.set_width(400.0);
+        let modal = kit::modal(ctx, egui::Id::unique(("dialog", kind))).show(ctx, |ui| {
+            ui.set_width(440.0);
             open = match self {
                 Self::Password(prompt) => prompt.show(ui, actions),
                 Self::DeleteConnection { id, name } => delete_connection(ui, *id, name, actions),
@@ -63,9 +65,9 @@ impl Dialog {
 
 impl PasswordPrompt {
     fn show(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) -> bool {
-        ui.heading(format!("Connect to {}", self.name));
+        kit::dialog_title(ui, &format!("Connect to {}", self.name), None);
         if let Some(error) = &self.error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+            error_label(ui, error);
         }
         let label = ui.label("Password");
         let field = ui
@@ -82,8 +84,10 @@ impl PasswordPrompt {
         let submitted = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
 
         let mut open = true;
-        ui.horizontal(|ui| {
-            if ui.button("Connect").clicked() || submitted {
+        kit::dialog_footer(ui, |ui| {
+            if kit::button(ui, Tone::Primary, None, "Connect", kit::DIALOG_HEIGHT).clicked()
+                || submitted
+            {
                 actions.push(Action::ConnectWithPassword {
                     id: self.id,
                     password: Password::new(&self.password),
@@ -91,7 +95,7 @@ impl PasswordPrompt {
                 });
                 open = false;
             }
-            if ui.button("Cancel").clicked() {
+            if kit::button(ui, Tone::Secondary, None, "Cancel", kit::DIALOG_HEIGHT).clicked() {
                 open = false;
             }
         });
@@ -100,19 +104,26 @@ impl PasswordPrompt {
 }
 
 fn delete_connection(ui: &mut egui::Ui, id: Uuid, name: &str, actions: &mut Vec<Action>) -> bool {
-    ui.heading("Delete connection");
+    kit::dialog_title(ui, "Delete connection", None);
     ui.label(format!(
         "Delete the saved connection \"{name}\"? Its saved password is removed too. \
          No data on the server is touched."
     ));
     let mut open = true;
-    ui.horizontal(|ui| {
-        let delete = RichText::new("Delete").color(ui.visuals().error_fg_color);
-        if ui.button(delete).clicked() {
+    kit::dialog_footer(ui, |ui| {
+        if kit::button(
+            ui,
+            Tone::Danger,
+            Some(crate::icons::TRASH),
+            "Delete",
+            kit::DIALOG_HEIGHT,
+        )
+        .clicked()
+        {
             actions.push(Action::DeleteConnectionConfirmed(id));
             open = false;
         }
-        if ui.button("Cancel").clicked() {
+        if kit::button(ui, Tone::Secondary, None, "Cancel", kit::DIALOG_HEIGHT).clicked() {
             open = false;
         }
     });
@@ -127,14 +138,14 @@ impl DropDialog {
     fn show(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) -> bool {
         match &self.collection {
             Some(collection) => {
-                ui.heading("Drop collection");
+                kit::dialog_title(ui, "Drop collection", None);
                 ui.label(format!(
                     "This permanently deletes {}.{collection} with all its documents and indexes.",
                     self.database
                 ));
             }
             None => {
-                ui.heading("Drop database");
+                kit::dialog_title(ui, "Drop database", None);
                 ui.label(format!(
                     "This permanently deletes the database {} with all its collections.",
                     self.database
@@ -149,9 +160,19 @@ impl DropDialog {
 
         let confirmed = self.typed == self.target();
         let mut open = true;
-        ui.horizontal(|ui| {
-            let text = RichText::new("Drop").color(ui.visuals().error_fg_color);
-            if ui.add_enabled(confirmed, Button::new(text)).clicked() {
+        kit::dialog_footer(ui, |ui| {
+            let drop = ui
+                .add_enabled_ui(confirmed, |ui| {
+                    kit::button(
+                        ui,
+                        Tone::Danger,
+                        Some(crate::icons::TRASH),
+                        "Drop",
+                        kit::DIALOG_HEIGHT,
+                    )
+                })
+                .inner;
+            if drop.clicked() {
                 actions.push(Action::DropConfirmed {
                     connection: self.connection,
                     database: self.database.clone(),
@@ -159,7 +180,7 @@ impl DropDialog {
                 });
                 open = false;
             }
-            if ui.button("Cancel").clicked() {
+            if kit::button(ui, Tone::Secondary, None, "Cancel", kit::DIALOG_HEIGHT).clicked() {
                 open = false;
             }
         });
@@ -169,11 +190,15 @@ impl DropDialog {
 
 impl CreateCollectionDialog {
     fn show(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) -> bool {
-        ui.heading(if self.database_fixed {
-            "Create collection"
-        } else {
-            "Create database"
-        });
+        kit::dialog_title(
+            ui,
+            if self.database_fixed {
+                "Create collection"
+            } else {
+                "Create database"
+            },
+            None,
+        );
         egui::Grid::new("create_collection")
             .num_columns(2)
             .spacing([12.0, 8.0])
@@ -205,8 +230,13 @@ impl CreateCollectionDialog {
 
         let valid = !self.database.trim().is_empty() && !self.collection.trim().is_empty();
         let mut open = true;
-        ui.horizontal(|ui| {
-            if ui.add_enabled(valid, Button::new("Create")).clicked() {
+        kit::dialog_footer(ui, |ui| {
+            let create = ui
+                .add_enabled_ui(valid, |ui| {
+                    kit::button(ui, Tone::Primary, None, "Create", kit::DIALOG_HEIGHT)
+                })
+                .inner;
+            if create.clicked() {
                 actions.push(Action::CreateCollectionConfirmed {
                     connection: self.connection,
                     database: self.database.trim().to_owned(),
@@ -214,12 +244,19 @@ impl CreateCollectionDialog {
                 });
                 open = false;
             }
-            if ui.button("Cancel").clicked() {
+            if kit::button(ui, Tone::Secondary, None, "Cancel", kit::DIALOG_HEIGHT).clicked() {
                 open = false;
             }
         });
         open
     }
+}
+
+pub fn error_label(ui: &mut egui::Ui, error: &str) {
+    let palette = theme::palette(ui);
+    ui.label(
+        RichText::new(format!("{}  {error}", crate::icons::CIRCLE_ALERT)).color(palette.danger),
+    );
 }
 
 /// Focuses the first text field of a dialog when it opens.

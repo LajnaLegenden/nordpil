@@ -2,12 +2,14 @@
 //! update or delete of everything matching the filter.
 
 use bson::{Bson, Document};
-use eframe::egui::{self, Button, RichText};
+use eframe::egui::{self, RichText};
 use nordpil_backend::{Command, Namespace, RequestId};
 use nordpil_query::{FieldHint, Mode, Style, format_document, format_value};
 
 use crate::query_language::QueryLanguage;
+use crate::theme;
 use crate::widgets::code_editor::CodeEditor;
+use crate::widgets::kit::{self, Tone};
 
 pub enum Kind {
     Insert,
@@ -47,7 +49,13 @@ impl DocumentDialog {
         };
         let multiline = !matches!(kind, Kind::UpdateMany { .. });
         Self {
-            editor: CodeEditor::new(egui::Id::unique("document_dialog"), multiline).rows(18),
+            editor: if multiline {
+                CodeEditor::new(egui::Id::unique("document_dialog"), true)
+                    .rows(18)
+                    .line_numbers()
+            } else {
+                CodeEditor::new(egui::Id::unique("document_dialog"), false)
+            },
             namespace,
             kind,
             text,
@@ -71,32 +79,29 @@ impl DocumentDialog {
         let mut outcome = Outcome::Open;
         // One id per kind, so a dialog never reuses another's size and position.
         let modal_id = egui::Id::unique(("document_dialog", self.title()));
-        let modal = egui::Modal::new(modal_id).show(ctx, |ui| {
-            ui.set_width(640.0);
+        let modal = kit::modal(ctx, modal_id).show(ctx, |ui| {
+            ui.set_width(720.0);
             let busy = self.pending.is_some();
-            ui.heading(self.title());
-            ui.weak(format!(
-                "{}.{}",
-                self.namespace.database, self.namespace.collection
-            ));
-            ui.add_space(6.0);
+            let namespace = format!("{}.{}", self.namespace.database, self.namespace.collection);
+            kit::dialog_title(ui, self.title(), Some(&namespace));
 
             let submitted = ui.add_enabled_ui(!busy, |ui| self.body(ui, fields)).inner;
             if let Some(error) = &self.error {
-                ui.colored_label(ui.visuals().error_fg_color, error);
+                super::dialogs::error_label(ui, error);
             }
-            ui.separator();
-            ui.horizontal(|ui| {
+            kit::dialog_footer(ui, |ui| {
                 let (label, enabled) = self.confirm_button();
-                let mut text = RichText::new(label);
-                if self.is_destructive() {
-                    text = text.color(ui.visuals().error_fg_color);
-                }
-                if ui
-                    .add_enabled(enabled && !busy, Button::new(text))
-                    .clicked()
-                    || submitted
-                {
+                let tone = if self.is_destructive() {
+                    Tone::Danger
+                } else {
+                    Tone::Primary
+                };
+                let confirm = ui
+                    .add_enabled_ui(enabled && !busy, |ui| {
+                        kit::button(ui, tone, None, &label, kit::DIALOG_HEIGHT)
+                    })
+                    .inner;
+                if confirm.clicked() || submitted {
                     match self.command() {
                         Ok(command) => {
                             self.error = None;
@@ -105,12 +110,29 @@ impl DocumentDialog {
                         Err(error) => self.error = Some(error),
                     }
                 }
-                if ui.add_enabled(!busy, Button::new("Cancel")).clicked() {
+                let cancel = ui
+                    .add_enabled_ui(!busy, |ui| {
+                        kit::button(ui, Tone::Secondary, None, "Cancel", kit::DIALOG_HEIGHT)
+                    })
+                    .inner;
+                if cancel.clicked() {
                     outcome = Outcome::Cancel;
                 }
                 if busy {
                     ui.spinner();
                 }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    if let Some(hint) = self.hint() {
+                        ui.label(
+                            RichText::new(hint)
+                                .size(13.0)
+                                .color(theme::palette(ui).subtle),
+                        );
+                        if matches!(self.kind, Kind::Insert | Kind::Edit { .. }) {
+                            kit::keys(ui, &["Ctrl", "Enter"]);
+                        }
+                    }
+                });
             });
         });
         if modal.should_close() && self.pending.is_none() {
@@ -129,6 +151,15 @@ impl DocumentDialog {
         }
     }
 
+    /// Shown left of the buttons.
+    fn hint(&self) -> Option<&'static str> {
+        match self.kind {
+            Kind::Insert => Some("One document, or an array of documents."),
+            Kind::Edit { .. } => Some("Only changed fields are saved."),
+            _ => None,
+        }
+    }
+
     fn is_destructive(&self) -> bool {
         matches!(self.kind, Kind::Delete { .. } | Kind::DeleteMany { .. })
     }
@@ -136,14 +167,8 @@ impl DocumentDialog {
     /// Returns true when the editor asked to submit (Ctrl/Cmd+Enter).
     fn body(&mut self, ui: &mut egui::Ui, fields: &[FieldHint]) -> bool {
         match &self.kind {
-            Kind::Insert => {
-                ui.label("One document, or an array of documents. Ctrl+Enter inserts.");
-                self.editor_field(ui, "Documents", fields)
-            }
-            Kind::Edit { .. } => {
-                ui.label("Only changed fields are saved. Ctrl+Enter saves.");
-                self.editor_field(ui, "Document", fields)
-            }
+            Kind::Insert => self.editor_field(ui, "Documents", fields),
+            Kind::Edit { .. } => self.editor_field(ui, "Document", fields),
             Kind::Delete { id } => {
                 ui.label(format!(
                     "Delete the document with _id {}? This can't be undone.",
@@ -165,7 +190,11 @@ impl DocumentDialog {
                 if filter.is_empty() {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
-                        "The filter is empty, so this affects every document in the collection.",
+                        format!(
+                            "{}  The filter is empty, so this affects every document in the \
+                             collection.",
+                            crate::icons::TRIANGLE_ALERT
+                        ),
                     );
                 }
                 if matches!(self.kind, Kind::UpdateMany { .. }) {
@@ -179,8 +208,8 @@ impl DocumentDialog {
     }
 
     fn editor_field(&mut self, ui: &mut egui::Ui, label: &str, fields: &[FieldHint]) -> bool {
-        let label = ui.label(label);
-        let language = QueryLanguage::new(Mode::Document, fields);
+        let label = ui.label(RichText::new(label).size(13.0).weak());
+        let language = QueryLanguage::new(Mode::Document, fields, &[]);
         let output = egui::ScrollArea::vertical()
             .max_height(420.0)
             .show(ui, |ui| self.editor.show(ui, &mut self.text, &language))

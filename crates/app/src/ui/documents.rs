@@ -3,15 +3,21 @@
 
 use bson::{Bson, Document};
 use eframe::egui::collapsing_header::CollapsingState;
-use eframe::egui::{self, Align, Label, Layout, RichText, Sense, TextEdit};
+use eframe::egui::{
+    self, Align, CornerRadius, Frame, Label, Layout, Margin, RichText, Sense, Stroke, StrokeKind,
+    TextEdit,
+};
 use egui_extras::{Column, TableBuilder};
 use nordpil_backend::SavedQuery;
 use nordpil_query::{Highlight, Mode, Style, format_document, format_value};
 use uuid::Uuid;
 
+use crate::icons;
 use crate::query_language::QueryLanguage;
 use crate::tabs::{CollectionTab, PAGE_SIZES, QueryInputs, View};
+use crate::theme;
 use crate::widgets::code_editor::{self, CodeEditor};
+use crate::widgets::kit::{self, Tone};
 
 pub enum TabAction {
     /// Run the query from the inputs, from the first page.
@@ -49,16 +55,17 @@ const MAX_HOVER_ENTRIES: usize = 50;
 
 /// `read_only` hides everything that writes.
 pub fn show(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Option<TabAction> {
+    let palette = theme::palette(ui);
     let mut action = query_bar(ui, tab);
     for error in &tab.input_errors {
-        ui.colored_label(ui.visuals().error_fg_color, error);
+        ui.label(RichText::new(format!("{}  {error}", icons::CIRCLE_ALERT)).color(palette.danger));
     }
-    ui.add_space(4.0);
+    ui.add_space(10.0);
     action = toolbar(ui, tab, read_only).or(action);
-    ui.separator();
+    ui.add_space(10.0);
 
     if let Some(error) = &tab.error {
-        ui.colored_label(ui.visuals().error_fg_color, error);
+        ui.label(RichText::new(format!("{}  {error}", icons::CIRCLE_ALERT)).color(palette.danger));
         return action;
     }
     let Some(results) = &tab.results else {
@@ -68,10 +75,22 @@ pub fn show(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Opti
         return action;
     };
     if results.documents.is_empty() {
-        ui.weak(if tab.page == 0 {
-            "No documents match."
-        } else {
-            "No more documents."
+        ui.add_space(24.0);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                RichText::new(icons::FILE_TEXT)
+                    .size(28.0)
+                    .color(palette.subtle),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(if tab.page == 0 {
+                    "No documents match."
+                } else {
+                    "No more documents."
+                })
+                .color(palette.muted),
+            );
         });
         return action;
     }
@@ -85,92 +104,180 @@ pub fn show(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Opti
 }
 
 fn query_bar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
+    let palette = theme::palette(ui);
     let mut action = None;
     ui.horizontal(|ui| {
-        let label = ui.label("Filter");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("Find").clicked() {
+            let height = kit::QUERY_HEIGHT;
+            if kit::button(ui, Tone::Primary, Some(icons::SEARCH), "Find", height).clicked() {
                 action = Some(TabAction::Run);
             }
-            if ui.button("Reset").clicked() {
+            if kit::button(ui, Tone::Ghost, None, "Reset", height).clicked() {
                 action = Some(TabAction::Reset);
             }
-            ui.toggle_value(&mut tab.show_options, "Options");
-            ui.menu_button("History", |ui| {
+            let history = kit::button(ui, Tone::Secondary, Some(icons::HISTORY), "History", height);
+            egui::Popup::menu(&history).show(|ui| {
                 if let Some(chosen) = history_menu(ui, &tab.history) {
                     action = Some(chosen);
                     ui.close();
                 }
             });
-            let language = QueryLanguage::new(Mode::Filter, &tab.fields);
-            let output = tab
-                .editors
-                .filter
-                .show(ui, &mut tab.inputs.filter, &language);
-            output.response.labelled_by(label.id);
-            if output.submitted {
+            let options = kit::button(ui, Tone::Secondary, Some(icons::SLIDERS), "Options", height);
+            if tab.show_options {
+                ui.painter().rect_stroke(
+                    options.rect,
+                    CornerRadius::same(10),
+                    Stroke::new(1.0, palette.accent),
+                    StrokeKind::Inside,
+                );
+            }
+            if options.clicked() {
+                tab.show_options = !tab.show_options;
+            }
+            if filter_field(ui, tab) {
                 action = Some(TabAction::Run);
             }
         });
     });
     if tab.show_options {
-        egui::Grid::new(("query_options", tab.id))
-            .num_columns(2)
-            .spacing([12.0, 6.0])
-            .show(ui, |ui| {
-                let editors = &mut tab.editors;
-                let inputs = &mut tab.inputs;
-                let rows: [(&str, &mut CodeEditor, &mut String, Mode); 4] = [
-                    (
-                        "Project",
-                        &mut editors.project,
-                        &mut inputs.project,
-                        Mode::Fields,
-                    ),
-                    ("Sort", &mut editors.sort, &mut inputs.sort, Mode::Fields),
-                    (
-                        "Collation",
-                        &mut editors.collation,
-                        &mut inputs.collation,
-                        Mode::Collation,
-                    ),
-                    ("Hint", &mut editors.hint, &mut inputs.hint, Mode::Fields),
-                ];
-                for (name, editor, text, mode) in rows {
-                    let label = ui.label(name);
-                    let output = editor.show(ui, text, &QueryLanguage::new(mode, &tab.fields));
-                    output.response.labelled_by(label.id);
-                    if output.submitted {
-                        action = Some(TabAction::Run);
-                    }
-                    ui.end_row();
-                }
-
-                ui.label("");
-                ui.horizontal(|ui| {
-                    for (name, text, hint) in [
-                        ("Skip", &mut tab.inputs.skip, "0"),
-                        ("Limit", &mut tab.inputs.limit, "none"),
-                        ("Max time (ms)", &mut tab.inputs.max_time_ms, "60000"),
-                    ] {
-                        let label = ui.label(name);
-                        let response = ui
-                            .add(
-                                TextEdit::singleline(text)
-                                    .hint_text(hint)
-                                    .desired_width(70.0),
-                            )
-                            .labelled_by(label.id);
-                        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            action = Some(TabAction::Run);
-                        }
-                        ui.add_space(8.0);
-                    }
-                });
-                ui.end_row();
-            });
+        ui.add_space(10.0);
+        kit::card(ui).inner_margin(Margin::same(14)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if query_options(ui, tab) {
+                action = Some(TabAction::Run);
+            }
+        });
     }
     action
+}
+
+/// The filter in its 40 px field: label, editor and the Ctrl+L hint.
+/// Returns true when Enter submitted it.
+fn filter_field(ui: &mut egui::Ui, tab: &mut CollectionTab) -> bool {
+    let palette = theme::palette(ui);
+    let focused = ui.memory(|m| m.has_focus(tab.editors.filter.id()));
+    let mut submitted = false;
+    let frame = Frame::new()
+        .fill(palette.surface)
+        .stroke(Stroke::new(
+            1.0,
+            if focused {
+                palette.accent
+            } else {
+                palette.line_strong
+            },
+        ))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin {
+            left: 12,
+            right: 8,
+            top: 0,
+            bottom: 0,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.set_height(kit::QUERY_HEIGHT - 2.0);
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(
+                    RichText::new(icons::FUNNEL)
+                        .size(15.0)
+                        .color(palette.subtle),
+                );
+                let label = ui.label(
+                    RichText::new("Filter")
+                        .size(12.5)
+                        .family(theme::medium())
+                        .color(palette.subtle),
+                );
+                kit::divider(ui, 18.0);
+                let keys_width = if focused { 0.0 } else { 64.0 };
+                let editor_width = (ui.available_width() - keys_width).max(80.0);
+                ui.allocate_ui(egui::vec2(editor_width, kit::QUERY_HEIGHT - 2.0), |ui| {
+                    ui.set_width(editor_width);
+                    let language = QueryLanguage::new(Mode::Filter, &tab.fields, &tab.values);
+                    let output = tab
+                        .editors
+                        .filter
+                        .show(ui, &mut tab.inputs.filter, &language);
+                    output.response.labelled_by(label.id);
+                    submitted = output.submitted;
+                });
+                if !focused {
+                    kit::keys(ui, &["Ctrl", "L"]);
+                }
+            });
+        })
+        .response;
+    if focused {
+        ui.painter().rect_stroke(
+            frame.rect.expand(1.0),
+            CornerRadius::same(11),
+            Stroke::new(3.0, palette.focus),
+            StrokeKind::Outside,
+        );
+    }
+    submitted
+}
+
+/// Project, sort, collation, hint, skip, limit and max time. Returns true
+/// when one of them was submitted with Enter.
+fn query_options(ui: &mut egui::Ui, tab: &mut CollectionTab) -> bool {
+    let mut submitted = false;
+    egui::Grid::new(("query_options", tab.id))
+        .num_columns(2)
+        .spacing([14.0, 8.0])
+        .show(ui, |ui| {
+            let editors = &mut tab.editors;
+            let inputs = &mut tab.inputs;
+            let rows: [(&str, &mut CodeEditor, &mut String, Mode); 4] = [
+                (
+                    "Project",
+                    &mut editors.project,
+                    &mut inputs.project,
+                    Mode::Fields,
+                ),
+                ("Sort", &mut editors.sort, &mut inputs.sort, Mode::Fields),
+                (
+                    "Collation",
+                    &mut editors.collation,
+                    &mut inputs.collation,
+                    Mode::Collation,
+                ),
+                ("Hint", &mut editors.hint, &mut inputs.hint, Mode::Fields),
+            ];
+            for (name, editor, text, mode) in rows {
+                let label = ui.label(RichText::new(name).weak());
+                let output = editor.show(ui, text, &QueryLanguage::new(mode, &tab.fields, &[]));
+                output.response.labelled_by(label.id);
+                submitted |= output.submitted;
+                ui.end_row();
+            }
+
+            ui.label("");
+            ui.horizontal(|ui| {
+                for (name, text, hint) in [
+                    ("Skip", &mut tab.inputs.skip, "0"),
+                    ("Limit", &mut tab.inputs.limit, "none"),
+                    ("Max time (ms)", &mut tab.inputs.max_time_ms, "60000"),
+                ] {
+                    let label = ui.label(RichText::new(name).weak());
+                    let response = ui
+                        .add(
+                            TextEdit::singleline(text)
+                                .hint_text(hint)
+                                .desired_width(80.0),
+                        )
+                        .labelled_by(label.id);
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        submitted = true;
+                    }
+                    ui.add_space(10.0);
+                }
+            });
+            ui.end_row();
+        });
+    submitted
 }
 
 fn history_menu(ui: &mut egui::Ui, history: &[SavedQuery]) -> Option<TabAction> {
@@ -191,20 +298,35 @@ fn history_menu(ui: &mut egui::Ui, history: &[SavedQuery]) -> Option<TabAction> 
             if heading.is_some() {
                 ui.separator();
             }
-            ui.weak(section);
+            kit::section_label(ui, section);
             heading = Some(section);
         }
         ui.horizontal(|ui| {
-            let star = if saved.favorite { "Unstar" } else { "Star" };
-            if ui.small_button(star).clicked() {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let palette = theme::palette(ui);
+            let (star, color) = if saved.favorite {
+                ("Remove from favorites", palette.warn)
+            } else {
+                ("Add to favorites", palette.subtle)
+            };
+            let response = ui
+                .add(
+                    egui::Button::new(RichText::new(icons::STAR).size(14.0).color(color))
+                        .frame_when_inactive(false)
+                        .min_size(egui::vec2(26.0, 26.0)),
+                )
+                .on_hover_text(star);
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, star));
+            if response.clicked() {
                 action = Some(TabAction::SetFavorite {
                     id: saved.id,
                     favorite: !saved.favorite,
                 });
             }
-            if ui.small_button("Delete").clicked() {
+            if kit::icon_button(ui, icons::TRASH, "Delete query", 26.0).clicked() {
                 action = Some(TabAction::DeleteQuery(saved.id));
             }
+            ui.add_space(4.0);
             let summary = query_summary(&saved.query);
             let response = ui.add(
                 egui::Button::new(RichText::new(&summary).monospace())
@@ -243,27 +365,35 @@ fn query_summary(query: &QueryInputs) -> String {
 }
 
 fn toolbar(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Option<TabAction> {
+    let palette = theme::palette(ui);
     let mut action = None;
+    let height = kit::TOOLBAR_HEIGHT;
     ui.horizontal(|ui| {
-        for (view, name) in [
-            (View::List, "List"),
-            (View::Json, "JSON"),
-            (View::Table, "Table"),
-        ] {
-            ui.selectable_value(&mut tab.view, view, name);
+        kit::segmented(
+            ui,
+            &mut tab.view,
+            &[
+                (View::List, Some(icons::LIST), "List"),
+                (View::Json, Some(icons::BRACES), "JSON"),
+                (View::Table, Some(icons::TABLE), "Table"),
+            ],
+            height + 2.0,
+        );
+        kit::divider(ui, 22.0);
+        if !read_only {
+            if kit::button(ui, Tone::Ghost, Some(icons::PLUS), "Insert", height).clicked() {
+                action = Some(TabAction::Insert);
+            }
+            if kit::button(ui, Tone::Ghost, Some(icons::UPLOAD), "Import", height).clicked() {
+                action = Some(TabAction::Import);
+            }
         }
-        ui.separator();
-        if ui.button("Export").clicked() {
+        if kit::button(ui, Tone::Ghost, Some(icons::DOWNLOAD), "Export", height).clicked() {
             action = Some(TabAction::Export);
         }
         if !read_only {
-            if ui.button("Import").clicked() {
-                action = Some(TabAction::Import);
-            }
-            if ui.button("Insert").clicked() {
-                action = Some(TabAction::Insert);
-            }
-            ui.menu_button("Bulk", |ui| {
+            let bulk = kit::button(ui, Tone::Ghost, Some(icons::ZAP), "Bulk", height);
+            egui::Popup::menu(&bulk).show(|ui| {
                 if ui.button("Update matching…").clicked() {
                     action = Some(TabAction::UpdateMany);
                 }
@@ -277,19 +407,24 @@ fn toolbar(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Optio
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui
-                .add_enabled(tab.has_next_page(), egui::Button::new("Next"))
-                .clicked()
-            {
-                action = Some(TabAction::Page(tab.page + 1));
-            }
-            if ui
-                .add_enabled(tab.page > 0, egui::Button::new("Previous"))
-                .clicked()
-            {
-                action = Some(TabAction::Page(tab.page - 1));
-            }
-            ui.label(range_text(tab));
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.add_enabled_ui(tab.has_next_page(), |ui| {
+                if page_button(ui, icons::CHEVRON_RIGHT, "Next page").clicked() {
+                    action = Some(TabAction::Page(tab.page + 1));
+                }
+            });
+            ui.add_enabled_ui(tab.page > 0, |ui| {
+                if page_button(ui, icons::CHEVRON_LEFT, "Previous page").clicked() {
+                    action = Some(TabAction::Page(tab.page - 1));
+                }
+            });
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(range_text(tab))
+                    .size(13.0)
+                    .color(palette.muted),
+            );
+            ui.add_space(8.0);
 
             let before = tab.page_size;
             let combo = egui::ComboBox::from_id_salt(("page_size", tab.id))
@@ -300,17 +435,30 @@ fn toolbar(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Optio
                         ui.selectable_value(&mut tab.page_size, size, size.to_string());
                     }
                 });
-            let label = ui.label("Per page");
+            let label = ui.label(RichText::new("Per page").size(13.0).color(palette.subtle));
             combo.response.labelled_by(label.id);
             if tab.page_size != before {
                 action = Some(TabAction::Page(0));
             }
-            if ui.button("Refresh").clicked() {
+            if kit::icon_button(ui, icons::REFRESH, "Refresh", height).clicked() {
                 action = Some(TabAction::Refresh);
             }
         });
     });
     action
+}
+
+/// A bordered square button for paging.
+fn page_button(ui: &mut egui::Ui, icon: &str, label: &str) -> egui::Response {
+    let palette = theme::palette(ui);
+    let response = kit::icon_button(ui, icon, label, 32.0);
+    ui.painter().rect_stroke(
+        response.rect,
+        CornerRadius::same(8),
+        Stroke::new(1.0, palette.line),
+        StrokeKind::Inside,
+    );
+    response
 }
 
 /// E.g. "21–40 of 1,234".
@@ -332,7 +480,7 @@ fn range_text(tab: &CollectionTab) -> String {
     )
 }
 
-fn thousands(n: u64) -> String {
+pub fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (index, c) in digits.chars().enumerate() {
@@ -353,6 +501,7 @@ fn list_view(
     let Some(results) = &tab.results else {
         return;
     };
+    let palette = theme::palette(ui);
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
@@ -364,20 +513,75 @@ fn list_view(
                     .scope_builder(
                         egui::UiBuilder::new().id_salt(id).sense(Sense::click()),
                         |ui| {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                for (key, value) in document {
-                                    field(ui, id.with(key), key, value);
-                                }
-                            });
+                            kit::card(ui)
+                                .inner_margin(Margin::symmetric(16, 12))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.spacing_mut().item_spacing.y = 4.0;
+                                    ui.spacing_mut().interact_size.y = 20.0;
+                                    for (key, value) in document {
+                                        field(ui, id.with(key), key, value);
+                                    }
+                                });
                         },
                     )
                     .response;
+                if ui.rect_contains_pointer(response.rect) {
+                    ui.painter().rect_stroke(
+                        response.rect,
+                        CornerRadius::same(12),
+                        Stroke::new(1.0, palette.line_strong),
+                        StrokeKind::Inside,
+                    );
+                    if !read_only {
+                        card_actions(ui, response.rect, index, action);
+                    }
+                }
                 if response.double_clicked() && !read_only {
                     *action = Some(TabAction::Edit(index));
                 }
                 document_menu(&response, document, index, read_only, action);
-                ui.add_space(4.0);
+                ui.add_space(10.0);
+            }
+        });
+}
+
+/// Edit, clone and delete buttons over a hovered card's top right corner.
+fn card_actions(ui: &mut egui::Ui, card: egui::Rect, index: usize, action: &mut Option<TabAction>) {
+    let palette = theme::palette(ui);
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(card.right() - 112.0, card.top() + 10.0),
+        egui::vec2(102.0, 36.0),
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    Frame::new()
+        .fill(palette.raised)
+        .stroke(Stroke::new(1.0, palette.line))
+        .corner_radius(CornerRadius::same(9))
+        .inner_margin(Margin::same(3))
+        .show(&mut child, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if kit::icon_button(ui, icons::PENCIL, "Edit", 28.0).clicked() {
+                *action = Some(TabAction::Edit(index));
+            }
+            if kit::icon_button(ui, icons::COPY, "Clone", 28.0).clicked() {
+                *action = Some(TabAction::Clone(index));
+            }
+            let delete = ui
+                .add(
+                    egui::Button::new(RichText::new(icons::TRASH).size(14.0).color(palette.danger))
+                        .frame_when_inactive(false)
+                        .min_size(egui::vec2(28.0, 28.0))
+                        .corner_radius(CornerRadius::same(8)),
+                )
+                .on_hover_text("Delete");
+            delete.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Delete"));
+            if delete.clicked() {
+                *action = Some(TabAction::Delete(index));
             }
         });
 }
@@ -412,13 +616,14 @@ fn document_menu(
 
 /// One field of the list view; documents and arrays expand.
 fn field(ui: &mut egui::Ui, id: egui::Id, key: &str, value: &Bson) {
+    let palette = theme::palette(ui);
     let children: Option<(String, Vec<(String, &Bson)>)> = match value {
         Bson::Document(document) => Some((
-            format!("{{ {} }}", plural(document.len(), "field")),
+            format!("{{{}}}", plural(document.len(), "field")),
             document.iter().map(|(k, v)| (k.clone(), v)).collect(),
         )),
         Bson::Array(items) => Some((
-            format!("[ {} ]", plural(items.len(), "item")),
+            format!("[{}]", plural(items.len(), "item")),
             items
                 .iter()
                 .enumerate()
@@ -429,7 +634,10 @@ fn field(ui: &mut egui::Ui, id: egui::Id, key: &str, value: &Bson) {
     };
     let Some((summary, children)) = children else {
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(18.0);
             key_label(ui, key);
+            ui.add_space(6.0);
             let response = value_label(ui, value);
             response.context_menu(|ui| {
                 if ui.button("Copy value").clicked() {
@@ -439,30 +647,72 @@ fn field(ui: &mut egui::Ui, id: egui::Id, key: &str, value: &Bson) {
         });
         return;
     };
-    let (_, header, _) = CollapsingState::load_with_default_open(ui.ctx(), id, false)
-        .show_header(ui, |ui| {
-            let label = ui.add(Label::new(key_text(ui, key)).sense(Sense::click()));
-            ui.weak(summary);
-            label
-        })
-        .body(|ui| {
-            let total = children.len();
-            for (child_key, child) in children.into_iter().take(MAX_CHILDREN) {
-                field(ui, id.with(&child_key), &child_key, child);
-            }
-            if total > MAX_CHILDREN {
-                ui.weak(format!(
-                    "… {} more. Use the JSON view or a projection to see them.",
-                    total - MAX_CHILDREN
-                ));
-            }
-        });
-    // Clicking the field name expands it too, not only the arrow.
-    if header.inner.clicked()
-        && let Some(mut state) = CollapsingState::load(ui.ctx(), id)
-    {
-        state.set_open(!state.is_open());
+    let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    let open = state.is_open();
+    let header = ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let chevron = ui
+            .add(
+                Label::new(
+                    RichText::new(if open {
+                        icons::CHEVRON_DOWN
+                    } else {
+                        icons::CHEVRON_RIGHT
+                    })
+                    .size(13.0)
+                    .color(palette.subtle),
+                )
+                .sense(Sense::click()),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let chevron_width = chevron.rect.width();
+        ui.add_space(18.0 - chevron_width);
+        let label = ui.add(Label::new(key_text(ui, key)).sense(Sense::click()));
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(summary)
+                .monospace()
+                .italics()
+                .color(palette.subtle),
+        );
+        chevron.clicked() || label.clicked()
+    });
+    if header.inner {
+        state.set_open(!open);
         state.store(ui.ctx());
+    }
+    if open {
+        ui.horizontal(|ui| {
+            ui.add_space(6.0);
+            let top = ui.cursor().top();
+            let body = ui
+                .vertical(|ui| {
+                    let total = children.len();
+                    ui.add_space(0.0);
+                    egui::Frame::new()
+                        .inner_margin(Margin {
+                            left: 12,
+                            ..Margin::ZERO
+                        })
+                        .show(ui, |ui| {
+                            for (child_key, child) in children.into_iter().take(MAX_CHILDREN) {
+                                field(ui, id.with(&child_key), &child_key, child);
+                            }
+                            if total > MAX_CHILDREN {
+                                ui.weak(format!(
+                                    "… {} more. Use the JSON view or a projection to see them.",
+                                    total - MAX_CHILDREN
+                                ));
+                            }
+                        });
+                })
+                .response;
+            ui.painter().vline(
+                body.rect.left(),
+                egui::Rangef::new(top, body.rect.bottom()),
+                Stroke::new(1.0, palette.line),
+            );
+        });
     }
 }
 
@@ -475,9 +725,13 @@ fn key_text(ui: &egui::Ui, key: &str) -> RichText {
     RichText::new(format!("{key}:")).monospace().color(color)
 }
 
+/// Mono text at the list view's size.
+fn mono(text: impl Into<String>) -> RichText {
+    RichText::new(text).monospace()
+}
+
 fn value_label(ui: &mut egui::Ui, value: &Bson) -> egui::Response {
-    let text = RichText::new(format_value(value, Style::Compact))
-        .monospace()
+    let text = mono(format_value(value, Style::Compact))
         .color(code_editor::color(value_highlight(value), ui.visuals()));
     ui.add(Label::new(text).truncate().sense(Sense::click()))
         .on_hover_text(nordpil_query::type_name(value))
@@ -512,12 +766,18 @@ fn json_view(
                     job.wrap.max_width = wrap;
                     ui.fonts_mut(|fonts| fonts.layout_job(job))
                 };
-                let response = ui.add(
-                    TextEdit::multiline(&mut text.as_str())
-                        .id_salt(("json", tab.id, tab.page, index))
-                        .desired_width(f32::INFINITY)
-                        .layouter(&mut layouter),
-                );
+                let response = kit::card(ui)
+                    .inner_margin(Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.add(
+                            TextEdit::multiline(&mut text.as_str())
+                                .id_salt(("json", tab.id, tab.page, index))
+                                .frame(Frame::new())
+                                .desired_width(f32::INFINITY)
+                                .layouter(&mut layouter),
+                        )
+                    })
+                    .inner;
                 document_menu(&response, document, index, read_only, action);
                 if preview.full_len > text.len() {
                     ui.weak(format!(
@@ -526,6 +786,7 @@ fn json_view(
                         human_size(preview.full_len)
                     ));
                 }
+                ui.add_space(10.0);
             }
         });
 }
@@ -543,46 +804,82 @@ fn table_view(
     let Some(results) = &tab.results else {
         return;
     };
+    let palette = theme::palette(ui);
     let columns = column_names(&results.documents);
-    let row_height = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
-    egui::ScrollArea::horizontal()
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            TableBuilder::new(ui)
-                .id_salt(("table", tab.id))
-                .striped(true)
-                .resizable(true)
-                .cell_layout(Layout::left_to_right(Align::Center))
-                .columns(
-                    Column::initial(160.0).at_least(40.0).clip(true),
-                    columns.len(),
-                )
-                .header(row_height + 2.0, |mut header| {
-                    for name in &columns {
-                        header.col(|ui| {
-                            ui.strong(name.as_str());
-                        });
-                    }
-                })
-                .body(|body| {
-                    body.rows(row_height, results.documents.len(), |mut row| {
-                        let index = row.index();
-                        let document = &results.documents[index];
-                        for name in &columns {
-                            let (_, response) = row.col(|ui| {
-                                if let Some(value) = document.get(name) {
-                                    table_cell(ui, value);
-                                }
+    let types: Vec<&str> = columns
+        .iter()
+        .map(|name| column_type(&results.documents, name))
+        .collect();
+    kit::card(ui).inner_margin(Margin::ZERO).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        egui::ScrollArea::horizontal()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                kit::table_header_band(ui, 46.0);
+                TableBuilder::new(ui)
+                    .id_salt(("table", tab.id))
+                    .striped(false)
+                    .resizable(true)
+                    .sense(Sense::click())
+                    .cell_layout(Layout::left_to_right(Align::Center))
+                    .columns(
+                        Column::initial(170.0).at_least(48.0).clip(true),
+                        columns.len(),
+                    )
+                    .header(46.0, |mut header| {
+                        for (name, kind) in columns.iter().zip(&types) {
+                            header.col(|ui| {
+                                ui.add_space(10.0);
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 0.0;
+                                    ui.label(
+                                        RichText::new(name.as_str())
+                                            .family(theme::semibold())
+                                            .size(13.0)
+                                            .color(palette.text),
+                                    );
+                                    ui.label(mono(*kind).size(11.0).color(palette.subtle));
+                                });
                             });
-                            let response = response.interact(Sense::click());
+                        }
+                    })
+                    .body(|body| {
+                        body.rows(38.0, results.documents.len(), |mut row| {
+                            let index = row.index();
+                            let document = &results.documents[index];
+                            for name in &columns {
+                                row.col(|ui| {
+                                    ui.add_space(10.0);
+                                    if let Some(value) = document.get(name) {
+                                        table_cell(ui, value);
+                                    }
+                                    let rect = ui.max_rect();
+                                    ui.painter().hline(
+                                        rect.x_range(),
+                                        rect.bottom(),
+                                        Stroke::new(1.0, palette.line),
+                                    );
+                                });
+                            }
+                            let response = row.response();
                             if response.double_clicked() && !read_only {
                                 *action = Some(TabAction::Edit(index));
                             }
                             document_menu(&response, document, index, read_only, action);
-                        }
+                        });
                     });
-                });
-        });
+            });
+    });
+}
+
+/// The type of a column's first non-null value, e.g. `String`.
+fn column_type(documents: &[Document], name: &str) -> &'static str {
+    documents
+        .iter()
+        .filter_map(|document| document.get(name))
+        .find(|value| !matches!(value, Bson::Null))
+        .map_or("Null", nordpil_query::type_name)
 }
 
 /// `_id` first, then other fields in the order they first appear.
@@ -605,15 +902,17 @@ fn column_names(documents: &[Document]) -> Vec<String> {
 }
 
 fn table_cell(ui: &mut egui::Ui, value: &Bson) {
+    let subtle = theme::palette(ui).subtle;
+    let summary = |text: String| mono(text).italics().color(subtle);
     match value {
         Bson::Document(document) => {
-            let label = ui.weak(format!("{{ {} }}", plural(document.len(), "field")));
+            let label = ui.label(summary(format!("{{{}}}", plural(document.len(), "field"))));
             if document.len() <= MAX_HOVER_ENTRIES {
                 label.on_hover_text(format_value(value, Style::Pretty(2)));
             }
         }
         Bson::Array(items) => {
-            let label = ui.weak(format!("[ {} ]", plural(items.len(), "item")));
+            let label = ui.label(summary(format!("[{}]", plural(items.len(), "item"))));
             if items.len() <= MAX_HOVER_ENTRIES {
                 label.on_hover_text(format_value(value, Style::Pretty(2)));
             }
@@ -675,13 +974,15 @@ mod tests {
         tab.set_documents(vec![nordpil_backend::FoundDocument::new(
             doc! { "_id": 1, "address": { "city": "Oslo" } },
         )]);
-        let mut harness = Harness::new_ui_state(
-            |ui, tab: &mut CollectionTab| {
-                let mut action = None;
-                list_view(ui, tab, false, &mut action);
-            },
-            tab,
-        );
+        let mut harness = Harness::builder()
+            .with_context_setup(theme::install)
+            .build_ui_state(
+                |ui, tab: &mut CollectionTab| {
+                    let mut action = None;
+                    list_view(ui, tab, false, &mut action);
+                },
+                tab,
+            );
         harness.run();
         assert!(harness.query_by_label("city:").is_none());
 

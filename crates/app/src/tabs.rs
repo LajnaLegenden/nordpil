@@ -5,7 +5,7 @@ use std::time::Duration;
 use bson::{Bson, Document};
 use eframe::egui;
 use nordpil_backend::{FindQuery, FoundDocument, IndexInfo, Namespace, RequestId, SavedQuery};
-use nordpil_query::{FieldHint, Preview};
+use nordpil_query::{FieldHint, Preview, ValueHint};
 
 use crate::connections::Selection;
 use crate::widgets::code_editor::CodeEditor;
@@ -79,6 +79,8 @@ pub struct CollectionTab {
     pub history: Vec<SavedQuery>,
     /// Field paths sampled from the collection, for autocomplete.
     pub fields: Vec<FieldHint>,
+    /// Values in the current results, for autocomplete.
+    pub values: Vec<ValueHint>,
     pub panel: Panel,
     /// `None` until loaded.
     pub indexes: Option<Result<Vec<IndexInfo>, String>>,
@@ -95,7 +97,7 @@ impl CollectionTab {
             target,
             inputs: QueryInputs::default(),
             editors: QueryEditors {
-                filter: editor("filter", "{ field: 'value' }"),
+                filter: editor("filter", "{ field: 'value' }").frameless(),
                 project: editor("project", "{ field: 1 }"),
                 sort: editor("sort", "{ field: -1 }"),
                 collation: editor("collation", "{ locale: 'en' }"),
@@ -114,6 +116,7 @@ impl CollectionTab {
             input_errors: Vec::new(),
             history: Vec::new(),
             fields: Vec::new(),
+            values: Vec::new(),
             panel: Panel::Documents,
             indexes: None,
             indexes_request: None,
@@ -126,10 +129,6 @@ impl CollectionTab {
             database: self.target.database.clone(),
             collection: self.target.collection.clone(),
         }
-    }
-
-    pub fn title(&self) -> String {
-        format!("{}.{}", self.target.database, self.target.collection)
     }
 
     /// Fills in a saved query, opening the options when it uses any.
@@ -194,10 +193,11 @@ impl CollectionTab {
     }
 
     pub fn set_documents(&mut self, found: Vec<FoundDocument>) {
-        let (documents, previews) = found
+        let (documents, previews): (Vec<Document>, Vec<Preview>) = found
             .into_iter()
             .map(|found| (found.document, found.preview))
             .unzip();
+        self.values = nordpil_query::value_hints(&documents);
         self.results = Some(Results {
             documents,
             previews,

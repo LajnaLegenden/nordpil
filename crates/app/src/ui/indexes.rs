@@ -1,12 +1,16 @@
 //! A collection's indexes: keys, properties, size and usage, with actions.
 
 use bson::{Bson, Document};
-use eframe::egui::{self, Align, Layout};
+use eframe::egui::{self, Align, Layout, Margin, RichText, Stroke};
 use egui_extras::{Column, TableBuilder};
 use nordpil_backend::IndexInfo;
-use nordpil_query::{Style, format_document, format_value};
+use nordpil_query::{Highlight, Style, format_document, format_value};
 
+use crate::icons;
 use crate::tabs::CollectionTab;
+use crate::theme;
+use crate::widgets::code_editor;
+use crate::widgets::kit::{self, Tone};
 
 pub enum IndexAction {
     Refresh,
@@ -20,102 +24,205 @@ pub enum IndexAction {
 }
 
 pub fn show(ui: &mut egui::Ui, tab: &CollectionTab, read_only: bool) -> Option<IndexAction> {
+    let palette = theme::palette(ui);
     let mut action = None;
     ui.horizontal(|ui| {
-        if !read_only && ui.button("Create index").clicked() {
+        if !read_only
+            && kit::button(ui, Tone::Primary, Some(icons::PLUS), "Create index", 36.0).clicked()
+        {
             action = Some(IndexAction::Create);
-        }
-        if ui.button("Refresh").clicked() {
-            action = Some(IndexAction::Refresh);
         }
         if tab.indexes_request.is_some() {
             ui.spinner();
         }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if kit::icon_button(ui, icons::REFRESH, "Refresh", kit::TOOLBAR_HEIGHT).clicked() {
+                action = Some(IndexAction::Refresh);
+            }
+            if let Some(Ok(indexes)) = &tab.indexes {
+                let total: u64 = indexes.iter().filter_map(|index| index.size).sum();
+                let count = match indexes.len() {
+                    1 => "1 index".to_owned(),
+                    n => format!("{n} indexes"),
+                };
+                ui.label(
+                    RichText::new(format!("{count} · {}", human_bytes(total)))
+                        .size(13.0)
+                        .color(palette.subtle),
+                );
+            }
+        });
     });
-    ui.separator();
+    ui.add_space(12.0);
 
     let indexes = match &tab.indexes {
         None => return action,
         Some(Err(error)) => {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+            ui.label(
+                RichText::new(format!("{}  {error}", icons::CIRCLE_ALERT)).color(palette.danger),
+            );
             return action;
         }
         Some(Ok(indexes)) => indexes,
     };
-    let row_height = ui.text_style_height(&egui::TextStyle::Body) + 8.0;
-    egui::ScrollArea::horizontal().show(ui, |ui| {
-        TableBuilder::new(ui)
-            .id_salt(("indexes", tab.id))
-            .striped(true)
-            .resizable(true)
-            .cell_layout(Layout::left_to_right(Align::Center))
-            .column(Column::initial(150.0).at_least(80.0).clip(true))
-            .column(Column::initial(200.0).at_least(80.0).clip(true))
-            .column(Column::initial(140.0).at_least(80.0).clip(true))
-            .column(Column::initial(70.0).at_least(50.0))
-            .column(Column::initial(90.0).at_least(60.0).clip(true))
-            .column(Column::remainder().at_least(110.0))
-            .header(row_height, |mut header| {
-                for name in ["Name", "Keys", "Properties", "Size", "Usage", ""] {
-                    header.col(|ui| {
-                        ui.strong(name);
-                    });
-                }
-            })
-            .body(|body| {
-                body.rows(row_height, indexes.len(), |mut row| {
-                    let index = &indexes[row.index()];
-                    row.col(|ui| {
-                        ui.label(&index.name);
-                    });
-                    row.col(|ui| {
-                        ui.monospace(format_document(&index.keys(), Style::Compact));
-                    });
-                    row.col(|ui| {
-                        let properties = properties(index);
-                        ui.label(properties.join(", "))
-                            .on_hover_text(format_document(&index.spec, Style::Pretty(2)));
-                    });
-                    row.col(|ui| {
-                        ui.label(index.size.map_or_else(|| "–".to_owned(), human_bytes));
-                    });
-                    row.col(|ui| {
-                        let label = ui.label(
-                            index
-                                .ops
-                                .map_or_else(|| "–".to_owned(), |ops| format!("{ops} uses")),
-                        );
-                        if let Some(since) = index.since {
-                            label.on_hover_text(format!(
-                                "Since {}",
-                                format_value(&Bson::DateTime(since), Style::Compact)
-                            ));
-                        }
-                    });
-                    row.col(|ui| {
-                        if read_only || index.is_id_index() {
-                            return;
-                        }
+    let key_color = code_editor::color(Highlight::Key, ui.visuals());
+    let number_color = code_editor::color(Highlight::Number, ui.visuals());
+    kit::card(ui).inner_margin(Margin::ZERO).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            kit::table_header_band(ui, 40.0);
+            TableBuilder::new(ui)
+                .id_salt(("indexes", tab.id))
+                .striped(false)
+                .resizable(true)
+                .cell_layout(Layout::left_to_right(Align::Center))
+                .column(Column::initial(200.0).at_least(80.0).clip(true))
+                .column(Column::initial(250.0).at_least(80.0).clip(true))
+                .column(Column::initial(190.0).at_least(80.0).clip(true))
+                .column(Column::initial(90.0).at_least(50.0))
+                .column(Column::initial(100.0).at_least(60.0).clip(true))
+                .column(Column::remainder().at_least(170.0))
+                .header(40.0, |mut header| {
+                    for name in ["Name", "Keys", "Properties", "Size", "Usage", ""] {
+                        header.col(|ui| {
+                            ui.add_space(10.0);
+                            ui.label(
+                                RichText::new(name)
+                                    .family(theme::semibold())
+                                    .size(13.0)
+                                    .color(palette.text),
+                            );
+                        });
+                    }
+                })
+                .body(|body| {
+                    body.rows(48.0, indexes.len(), |mut row| {
+                        let index = &indexes[row.index()];
                         let hidden = index.spec.get_bool("hidden").unwrap_or(false);
-                        let toggle = if hidden { "Unhide" } else { "Hide" };
-                        if ui
-                            .small_button(toggle)
-                            .on_hover_text(
-                                "Hidden indexes stay up to date but queries don't use them.",
-                            )
-                            .clicked()
-                        {
-                            action = Some(IndexAction::SetHidden {
-                                name: index.name.clone(),
-                                hidden: !hidden,
+                        let cell = |row: &mut egui_extras::TableRow<'_, '_>,
+                                        add: &mut dyn FnMut(&mut egui::Ui)| {
+                            row.col(|ui| {
+                                if hidden {
+                                    ui.multiply_opacity(0.62);
+                                }
+                                ui.add_space(10.0);
+                                add(ui);
+                                let rect = ui.max_rect();
+                                ui.painter().hline(
+                                    rect.x_range(),
+                                    rect.bottom(),
+                                    Stroke::new(1.0, palette.line),
+                                );
                             });
-                        }
-                        if ui.small_button("Drop").clicked() {
-                            action = Some(IndexAction::Drop(index.name.clone()));
-                        }
+                        };
+                        cell(&mut row, &mut |ui| {
+                            ui.label(RichText::new(icons::KEY).size(15.0).color(palette.subtle));
+                            ui.label(RichText::new(&index.name).family(theme::medium()));
+                        });
+                        cell(&mut row, &mut |ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            let keys = index.keys();
+                            ui.label(RichText::new("{ ").monospace().size(13.0).color(palette.subtle));
+                            for (position, (key, value)) in keys.iter().enumerate() {
+                                if position > 0 {
+                                    ui.label(
+                                        RichText::new(", ").monospace().size(13.0).color(palette.subtle),
+                                    );
+                                }
+                                let key = format_document(&bson::doc! { key: 1 }, Style::Compact);
+                                let key = key
+                                    .trim_start_matches("{ ")
+                                    .trim_end_matches(": 1 }")
+                                    .to_owned();
+                                ui.label(RichText::new(key).monospace().size(13.0).color(key_color));
+                                ui.label(RichText::new(": ").monospace().size(13.0).color(palette.subtle));
+                                ui.label(
+                                    RichText::new(format_value(value, Style::Compact))
+                                        .monospace()
+                                        .size(13.0)
+                                        .color(number_color),
+                                );
+                            }
+                            ui.label(RichText::new(" }").monospace().size(13.0).color(palette.subtle));
+                        });
+                        cell(&mut row, &mut |ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            let spec = format_document(&index.spec, Style::Pretty(2));
+                            let properties = properties(index);
+                            if properties.is_empty() {
+                                ui.label(RichText::new("–").color(palette.subtle));
+                            }
+                            for property in properties {
+                                kit::pill(ui, &property, property.starts_with("TTL"))
+                                    .on_hover_text(&spec);
+                            }
+                        });
+                        cell(&mut row, &mut |ui| {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add_space(10.0);
+                                ui.label(
+                                    RichText::new(index.size.map_or_else(|| "–".to_owned(), human_bytes))
+                                        .color(palette.muted),
+                                );
+                            });
+                        });
+                        cell(&mut row, &mut |ui| {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add_space(10.0);
+                                let label = ui.label(
+                                    RichText::new(index.ops.map_or_else(
+                                        || "–".to_owned(),
+                                        |ops| format!("{} uses", crate::ui::documents::thousands(u64::try_from(ops).unwrap_or(0))),
+                                    ))
+                                    .color(palette.muted),
+                                );
+                                if let Some(since) = index.since {
+                                    label.on_hover_text(format!(
+                                        "Since {}",
+                                        format_value(&Bson::DateTime(since), Style::Compact)
+                                    ));
+                                }
+                            });
+                        });
+                        row.col(|ui| {
+                            let rect = ui.max_rect();
+                            ui.painter().hline(
+                                rect.x_range(),
+                                rect.bottom(),
+                                Stroke::new(1.0, palette.line),
+                            );
+                            if read_only || index.is_id_index() {
+                                return;
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add_space(8.0);
+                                if kit::button(ui, Tone::Ghost, Some(icons::TRASH), "Drop", 30.0)
+                                    .clicked()
+                                {
+                                    action = Some(IndexAction::Drop(index.name.clone()));
+                                }
+                                let (toggle, icon) = if hidden {
+                                    ("Unhide", icons::EYE)
+                                } else {
+                                    ("Hide", icons::EYE_OFF)
+                                };
+                                if kit::button(ui, Tone::Ghost, Some(icon), toggle, 30.0)
+                                    .on_hover_text(
+                                        "Hidden indexes stay up to date but queries don't use them.",
+                                    )
+                                    .clicked()
+                                {
+                                    action = Some(IndexAction::SetHidden {
+                                        name: index.name.clone(),
+                                        hidden: !hidden,
+                                    });
+                                }
+                            });
+                        });
                     });
                 });
-            });
+        });
     });
     action
 }

@@ -10,6 +10,8 @@ use eframe::egui::{self, Button, TextEdit};
 use nordpil_backend::transfer::{ExportJob, Format, ImportJob, ImportSummary, JsonMode, Progress};
 use nordpil_backend::{BackendError, Command, FindQuery, Namespace, RequestId};
 
+use crate::widgets::kit::{self, Tone};
+
 pub enum Kind {
     Export {
         /// The tab's current query; `None` when no query has run yet.
@@ -108,18 +110,19 @@ impl TransferDialog {
         let mut outcome = Outcome::Open;
         let is_export = matches!(self.kind, Kind::Export { .. });
         let modal =
-            egui::Modal::new(egui::Id::unique(("transfer_dialog", is_export))).show(ctx, |ui| {
-                ui.set_width(560.0);
-                ui.heading(if is_export {
-                    "Export documents"
-                } else {
-                    "Import documents"
-                });
-                ui.weak(format!(
-                    "{}.{}",
-                    self.namespace.database, self.namespace.collection
-                ));
-                ui.add_space(6.0);
+            kit::modal(ctx, egui::Id::unique(("transfer_dialog", is_export))).show(ctx, |ui| {
+                ui.set_width(600.0);
+                let namespace =
+                    format!("{}.{}", self.namespace.database, self.namespace.collection);
+                kit::dialog_title(
+                    ui,
+                    if is_export {
+                        "Export documents"
+                    } else {
+                        "Import documents"
+                    },
+                    Some(&namespace),
+                );
 
                 let idle = self.running.is_none() && self.outcome.is_none();
                 ui.add_enabled_ui(idle, |ui| self.settings(ui, ctx));
@@ -132,31 +135,40 @@ impl TransferDialog {
                         ui.label(message);
                     }
                     Some(Err(message)) => {
-                        ui.colored_label(ui.visuals().error_fg_color, message);
+                        super::dialogs::error_label(ui, message);
                     }
                     None => {}
                 }
 
-                ui.separator();
-                ui.horizontal(|ui| match (&self.running, &self.outcome) {
+                let height = kit::DIALOG_HEIGHT;
+                kit::dialog_footer(ui, |ui| match (&self.running, &self.outcome) {
                     (Some((request, _)), _) => {
-                        if ui.button("Cancel").clicked() {
+                        if kit::button(ui, Tone::Secondary, None, "Cancel", height).clicked() {
                             outcome = Outcome::Cancel(*request);
                         }
                     }
                     (None, Some(_)) => {
-                        if ui.button("Close").clicked() {
+                        if kit::button(ui, Tone::Primary, None, "Close", height).clicked() {
                             outcome = Outcome::Close;
                         }
                     }
                     (None, None) => {
-                        let label = if is_export { "Export" } else { "Import" };
+                        let (label, icon) = if is_export {
+                            ("Export", crate::icons::DOWNLOAD)
+                        } else {
+                            ("Import", crate::icons::UPLOAD)
+                        };
                         let ready = !self.path.trim().is_empty();
-                        if ui.add_enabled(ready, Button::new(label)).clicked() {
+                        let confirm = ui
+                            .add_enabled_ui(ready, |ui| {
+                                kit::button(ui, Tone::Primary, Some(icon), label, height)
+                            })
+                            .inner;
+                        if confirm.clicked() {
                             let (command, progress) = self.command();
                             outcome = Outcome::Send(Box::new(command), progress);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if kit::button(ui, Tone::Secondary, None, "Cancel", height).clicked() {
                             outcome = Outcome::Close;
                         }
                     }
