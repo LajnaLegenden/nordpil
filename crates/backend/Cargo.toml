@@ -17,6 +17,7 @@ mongodb = { version = "3.9", default-features = false, features = [
     "dns-resolver",
     "rustls-tls",
 ] }
+nordpil-query.workspace = true
 percent-encoding = "2.3"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "sync"] }

@@ -5,6 +5,7 @@ mod connections;
 mod databases;
 mod documents;
 mod error;
+mod fields;
 mod queries;
 pub mod secrets;
 pub mod store;
@@ -19,6 +20,7 @@ pub use bridge::{Bridge, Event, Handler, Outcome, RequestId};
 pub use databases::{CollectionInfo, CollectionKind, DatabaseInfo};
 pub use documents::{FindQuery, Namespace};
 pub use error::{BackendError, ErrorKind};
+pub use fields::FieldInfo;
 use mongodb::Client;
 use queries::QueryStore;
 pub use queries::{QueryText, SavedQuery};
@@ -101,6 +103,8 @@ pub enum Command {
         filter: mongodb::bson::Document,
         hint: Option<mongodb::bson::Bson>,
     },
+    /// Samples documents to learn the field paths, for autocomplete.
+    SampleFields(Namespace),
     LoadQueries(Namespace),
     /// Adds a query to the collection's history, or moves it to the top.
     RecordQuery {
@@ -163,6 +167,10 @@ pub enum Response {
     Documents(Result<Vec<mongodb::bson::Document>, BackendError>),
     /// `None` when counting took too long.
     Count(Result<Option<u64>, BackendError>),
+    Fields {
+        namespace: Namespace,
+        result: Result<Vec<FieldInfo>, BackendError>,
+    },
     /// The collection's saved queries after a query command: favorites first,
     /// then most recent.
     Queries {
@@ -334,6 +342,10 @@ impl Handler for Backend {
                 filter,
                 hint,
             } => Response::Count(self.count(&namespace, filter, hint).await),
+            Command::SampleFields(namespace) => Response::Fields {
+                result: self.sample_fields(&namespace).await,
+                namespace,
+            },
             Command::LoadQueries(namespace) => Response::Queries {
                 result: self.load_queries(namespace.clone()).await,
                 namespace,

@@ -160,4 +160,15 @@ async fn finds_pages_and_counts_documents() {
         };
         assert_eq!(result.unwrap(), Some(expected));
     }
+
+    let Response::Fields { result, .. } = send(&backend, Command::SampleFields(namespace)).await
+    else {
+        panic!("unexpected response");
+    };
+    let paths: Vec<_> = result
+        .unwrap()
+        .into_iter()
+        .map(|field| field.path)
+        .collect();
+    assert_eq!(paths, ["_id", "n", "even"]);
 }
