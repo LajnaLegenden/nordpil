@@ -49,6 +49,8 @@ fn connection(
     let id = entry.saved.id;
     let ConnectionState::Connected(databases) = &entry.state else {
         ui.horizontal(|ui| {
+            // Line up with connected entries, which have an expand arrow here.
+            ui.add_space(ui.spacing().indent);
             color_dot(ui, entry.saved.color);
             let connecting = matches!(entry.state, ConnectionState::Connecting(_));
             let response = clickable_label(ui, &entry.saved.name);
