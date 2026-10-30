@@ -3176,9 +3176,11 @@ dependencies = [
  "egui_kittest",
  "nordpil-backend",
  "nordpil-query",
+ "testcontainers-modules",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -3190,6 +3192,7 @@ dependencies = [
  "futures-util",
  "keyring",
  "mongodb",
+ "nordpil-backend",
  "percent-encoding",
  "serde",
  "testcontainers-modules",

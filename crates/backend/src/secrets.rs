@@ -58,3 +58,29 @@ impl SecretStore for Keyring {
 fn keyring_error(error: keyring::Error) -> BackendError {
     BackendError::new("Could not access the system keyring.").with_detail(error)
 }
+
+/// Keeps passwords in memory, for tests.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
+pub struct MemorySecrets(std::sync::Mutex<std::collections::HashMap<Uuid, String>>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl SecretStore for MemorySecrets {
+    fn available(&self) -> bool {
+        true
+    }
+
+    fn get(&self, id: Uuid) -> Result<Option<String>, BackendError> {
+        Ok(self.0.lock().unwrap().get(&id).cloned())
+    }
+
+    fn set(&self, id: Uuid, password: &str) -> Result<(), BackendError> {
+        self.0.lock().unwrap().insert(id, password.to_owned());
+        Ok(())
+    }
+
+    fn delete(&self, id: Uuid) -> Result<(), BackendError> {
+        self.0.lock().unwrap().remove(&id);
+        Ok(())
+    }
+}

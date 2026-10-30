@@ -1,40 +1,14 @@
 //! Runs against a real mongod in Docker. Run with `just test-int`.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-
-use nordpil_backend::secrets::SecretStore;
+use nordpil_backend::secrets::MemorySecrets;
 use nordpil_backend::store::{ConnectionStore, SavedConnection};
 use nordpil_backend::{
-    Backend, BackendError, CancellationToken, Command, ErrorKind, Handler, PasswordChange, Response,
+    Backend, CancellationToken, Command, ErrorKind, Handler, PasswordChange, Response,
 };
 use testcontainers_modules::mongo::Mongo;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 use uuid::Uuid;
-
-#[derive(Default)]
-struct MemorySecrets(Mutex<HashMap<Uuid, String>>);
-
-impl SecretStore for MemorySecrets {
-    fn available(&self) -> bool {
-        true
-    }
-
-    fn get(&self, id: Uuid) -> Result<Option<String>, BackendError> {
-        Ok(self.0.lock().unwrap().get(&id).cloned())
-    }
-
-    fn set(&self, id: Uuid, password: &str) -> Result<(), BackendError> {
-        self.0.lock().unwrap().insert(id, password.to_owned());
-        Ok(())
-    }
-
-    fn delete(&self, id: Uuid) -> Result<(), BackendError> {
-        self.0.lock().unwrap().remove(&id);
-        Ok(())
-    }
-}
 
 async fn send(backend: &Backend, command: Command) -> Response {
     backend.handle(command, CancellationToken::new()).await

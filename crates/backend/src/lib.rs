@@ -279,32 +279,8 @@ impl Handler for Backend {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
-
-    #[derive(Default)]
-    struct MemorySecrets(Mutex<HashMap<Uuid, String>>);
-
-    impl SecretStore for MemorySecrets {
-        fn available(&self) -> bool {
-            true
-        }
-
-        fn get(&self, id: Uuid) -> Result<Option<String>, BackendError> {
-            Ok(self.0.lock().unwrap().get(&id).cloned())
-        }
-
-        fn set(&self, id: Uuid, password: &str) -> Result<(), BackendError> {
-            self.0.lock().unwrap().insert(id, password.to_owned());
-            Ok(())
-        }
-
-        fn delete(&self, id: Uuid) -> Result<(), BackendError> {
-            self.0.lock().unwrap().remove(&id);
-            Ok(())
-        }
-    }
+    use crate::secrets::MemorySecrets;
 
     fn backend() -> Backend {
         let dir = std::env::temp_dir().join(format!("nordpil-test-{}", Uuid::new_v4()));

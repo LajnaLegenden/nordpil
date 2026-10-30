@@ -25,8 +25,13 @@ toml = "1.1"
 tracing = "0.1.44"
 uuid = { version = "1", features = ["v4", "serde"] }
 
+[features]
+# Test helpers for other crates' tests, e.g. an in-memory secret store.
+test-support = []
+
 [lints]
 workspace = true
 
 [dev-dependencies]
+nordpil-backend = { path = ".", features = ["test-support"] }
 testcontainers-modules = { version = "0.15", features = ["mongo"] }
