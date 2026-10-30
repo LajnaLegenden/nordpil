@@ -158,7 +158,7 @@ impl GotoPalette {
                                 .frame(Frame::new())
                                 .hint_text("Go to collection…")
                                 .font(FontId::proportional(16.0))
-                                .vertical_align(Align::Center)
+                                .align(Align2::LEFT_CENTER)
                                 .min_size(vec2(0.0, 34.0))
                                 .desired_width(width),
                         );
