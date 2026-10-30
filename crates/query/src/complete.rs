@@ -11,6 +11,8 @@ pub enum Mode {
     /// Projection, sort and index key patterns: keys are field paths.
     Fields,
     Collation,
+    /// A whole document being written: only values are completed.
+    Document,
 }
 
 /// A field path seen in the collection, e.g. `address.city`.
