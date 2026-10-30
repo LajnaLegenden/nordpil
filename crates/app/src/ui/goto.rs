@@ -1,6 +1,7 @@
 //! Ctrl+K: go to any collection by typing part of its name. Recent
-//! collections come first; while typing, matches in the most recently used
-//! database and connection win ties.
+//! collections come first; while typing, ties go to the database of the
+//! active tab, then its connection, then open connections, then the most
+//! recently used database and connection.
 
 use std::collections::HashMap;
 
@@ -80,9 +81,10 @@ impl GotoPalette {
         ctx: &egui::Context,
         candidates: &[Candidate],
         recents: &[Recent],
+        current: Option<&Selection>,
         searches_closed: bool,
     ) -> Outcome {
-        let matches = rank(&self.query, candidates, recents);
+        let matches = rank(&self.query, candidates, recents, current);
         let (down, up, enter) = ctx.input_mut(|input| {
             (
                 input.count_and_consume_key(Modifiers::NONE, Key::ArrowDown),
@@ -394,8 +396,13 @@ fn footer(ui: &mut egui::Ui, searches_closed: bool) {
 }
 
 /// Candidates matching `query`, best first. With an empty query, the recent
-/// collections, newest first.
-pub fn rank(query: &str, candidates: &[Candidate], recents: &[Recent]) -> Vec<Match> {
+/// collections, newest first. `current` is the collection of the active tab.
+pub fn rank(
+    query: &str,
+    candidates: &[Candidate],
+    recents: &[Recent],
+    current: Option<&Selection>,
+) -> Vec<Match> {
     let key = |target: &Selection| {
         (
             target.connection,
@@ -419,6 +426,13 @@ pub fn rank(query: &str, candidates: &[Candidate], recents: &[Recent]) -> Vec<Ma
             .or_insert(position);
         connection_rank.entry(recent.connection).or_insert(position);
     }
+    // 0 in the active tab's database, 1 on its connection, 2 elsewhere.
+    let closeness = |target: &Selection| match current {
+        Some(current) if current.connection != target.connection => 2,
+        Some(current) if current.database != target.database => 1,
+        Some(_) => 0,
+        None => 2,
+    };
 
     let query = query.trim().to_lowercase();
     if query.is_empty() {
@@ -450,6 +464,8 @@ pub fn rank(query: &str, candidates: &[Candidate], recents: &[Recent]) -> Vec<Ma
             let target = &candidate.target;
             let sort_key = (
                 tier,
+                closeness(target),
+                !candidate.connected,
                 database_rank
                     .get(&(target.connection, target.database.clone()))
                     .copied()
@@ -546,7 +562,16 @@ mod tests {
     }
 
     fn names(query: &str, candidates: &[Candidate], recents: &[Recent]) -> Vec<String> {
-        rank(query, candidates, recents)
+        names_from(query, candidates, recents, None)
+    }
+
+    fn names_from(
+        query: &str,
+        candidates: &[Candidate],
+        recents: &[Recent],
+        current: Option<&Selection>,
+    ) -> Vec<String> {
+        rank(query, candidates, recents, current)
             .into_iter()
             .map(|found| {
                 let target = &candidates[found.index].target;
@@ -587,6 +612,35 @@ mod tests {
     }
 
     #[test]
+    fn ranks_active_database_then_its_connection_then_open_connections() {
+        let (local, staging, production) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let closed = Candidate {
+            connected: false,
+            ..candidate(local, "Local", "shop", "orders")
+        };
+        let candidates = [
+            closed,
+            candidate(production, "Production", "analytics", "old_orders"),
+            candidate(staging, "Staging", "shop", "orders"),
+            candidate(production, "Production", "shop", "orders"),
+            candidate(production, "Production", "analytics", "orders"),
+        ];
+        let recents = [recent(local, "shop", "orders")];
+        let current = candidates[1].target.clone();
+
+        assert_eq!(
+            names_from("orders", &candidates, &recents, Some(&current)),
+            [
+                "Production/analytics.orders",
+                "Production/shop.orders",
+                "Staging/shop.orders",
+                "Local/shop.orders",
+                "Production/analytics.old_orders",
+            ]
+        );
+    }
+
+    #[test]
     fn empty_query_lists_recents_newest_first() {
         let local = Uuid::new_v4();
         let candidates = [
@@ -615,7 +669,7 @@ mod tests {
 
         assert_eq!(names("cstm", &candidates, &[]), ["Local/shop.customers"]);
         assert_eq!(names("logs", &candidates, &[]), ["Local/logs.events"]);
-        let found = rank("cstm", &candidates, &[]);
+        let found = rank("cstm", &candidates, &[], None);
         assert_eq!(found[0].highlight, [0, 2, 3, 5]);
     }
 }

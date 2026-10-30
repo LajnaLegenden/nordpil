@@ -1259,10 +1259,17 @@ impl NordpilApp {
         }
         let candidates = self.goto_candidates();
         let searches_closed = self.settings.goto_scope == GotoScope::AllSaved;
+        let current = self.selection().cloned();
         let Some(goto) = self.goto.as_mut() else {
             return;
         };
-        match goto.show(ctx, &candidates, &self.recents, searches_closed) {
+        match goto.show(
+            ctx,
+            &candidates,
+            &self.recents,
+            current.as_ref(),
+            searches_closed,
+        ) {
             goto::Outcome::Open => {}
             goto::Outcome::Close => self.goto = None,
             goto::Outcome::Pick(target) => {
