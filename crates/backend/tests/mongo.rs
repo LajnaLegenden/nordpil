@@ -6,8 +6,7 @@ use std::sync::Mutex;
 use nordpil_backend::secrets::SecretStore;
 use nordpil_backend::store::{ConnectionStore, SavedConnection};
 use nordpil_backend::{
-    Backend, BackendError, CancellationToken, Command, ErrorKind, Handler, PasswordChange,
-    Response,
+    Backend, BackendError, CancellationToken, Command, ErrorKind, Handler, PasswordChange, Response,
 };
 use testcontainers_modules::mongo::Mongo;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;

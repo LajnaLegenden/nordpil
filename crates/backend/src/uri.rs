@@ -106,7 +106,11 @@ impl ConnectionUri {
         let database = (!path.is_empty()).then(|| decode(path)).transpose()?;
 
         let mut options = Vec::new();
-        for pair in query.unwrap_or("").split('&').filter(|pair| !pair.is_empty()) {
+        for pair in query
+            .unwrap_or("")
+            .split('&')
+            .filter(|pair| !pair.is_empty())
+        {
             let Some((key, value)) = pair.split_once('=') else {
                 return Err(UriError(format!("Option \"{pair}\" has no value.")));
             };
@@ -133,7 +137,10 @@ impl ConnectionUri {
 
     /// Sets an option, keeping its position if it exists. `None` removes it.
     pub fn set_option(&mut self, key: &str, value: Option<&str>) {
-        let position = self.options.iter().position(|(k, _)| k.eq_ignore_ascii_case(key));
+        let position = self
+            .options
+            .iter()
+            .position(|(k, _)| k.eq_ignore_ascii_case(key));
         match (position, value) {
             (Some(index), Some(value)) => self.options[index].1 = encode_option(value),
             (None, Some(value)) => self.options.push((key.to_owned(), encode_option(value))),
@@ -167,7 +174,11 @@ impl ConnectionUri {
 
 impl fmt::Display for ConnectionUri {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(if self.srv { "mongodb+srv://" } else { "mongodb://" })?;
+        f.write_str(if self.srv {
+            "mongodb+srv://"
+        } else {
+            "mongodb://"
+        })?;
         if let Some(username) = &self.username {
             write!(f, "{}", utf8_percent_encode(username, COMPONENT))?;
             if let Some(password) = &self.password {
@@ -236,7 +247,10 @@ mod tests {
     #[test]
     fn without_password_keeps_username() {
         let uri = ConnectionUri::parse("mongodb://user:secret@localhost/").unwrap();
-        assert_eq!(uri.without_password().to_string(), "mongodb://user@localhost");
+        assert_eq!(
+            uri.without_password().to_string(),
+            "mongodb://user@localhost"
+        );
     }
 
     #[test]
@@ -249,7 +263,10 @@ mod tests {
             "mongodb+srv://a.example.net:27017",
             "mongodb://localhost/?novalue",
         ] {
-            assert!(ConnectionUri::parse(text).is_err(), "{text} should be rejected");
+            assert!(
+                ConnectionUri::parse(text).is_err(),
+                "{text} should be rejected"
+            );
         }
     }
 

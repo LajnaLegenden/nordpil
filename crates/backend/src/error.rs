@@ -70,12 +70,14 @@ impl From<mongodb::error::Error> for BackendError {
             DriverErrorKind::DnsResolve { message, .. } => {
                 (ErrorKind::Other, format!("DNS lookup failed: {message}"))
             }
-            DriverErrorKind::InvalidArgument { message, .. } => {
-                (ErrorKind::Other, format!("Invalid connection string: {message}"))
-            }
-            DriverErrorKind::InvalidTlsConfig { message, .. } => {
-                (ErrorKind::Other, format!("TLS configuration error: {message}"))
-            }
+            DriverErrorKind::InvalidArgument { message, .. } => (
+                ErrorKind::Other,
+                format!("Invalid connection string: {message}"),
+            ),
+            DriverErrorKind::InvalidTlsConfig { message, .. } => (
+                ErrorKind::Other,
+                format!("TLS configuration error: {message}"),
+            ),
             DriverErrorKind::Command(command) if command.code == UNAUTHORIZED => (
                 ErrorKind::Other,
                 format!("Not authorized: {}", command.message),

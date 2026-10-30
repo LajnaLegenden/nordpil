@@ -115,11 +115,16 @@ impl Backend {
             credential.password = Some(password.expose().to_owned());
         }
         options.app_name.get_or_insert_with(|| "nordpil".to_owned());
-        options.server_selection_timeout.get_or_insert(DEFAULT_TIMEOUT);
+        options
+            .server_selection_timeout
+            .get_or_insert(DEFAULT_TIMEOUT);
         options.connect_timeout.get_or_insert(DEFAULT_TIMEOUT);
         let client = Client::with_options(options)?;
         // Forces server selection and authentication, so bad settings fail here.
-        client.database("admin").run_command(doc! { "ping": 1 }).await?;
+        client
+            .database("admin")
+            .run_command(doc! { "ping": 1 })
+            .await?;
         let databases = crate::databases::list(&client).await?;
 
         if typed

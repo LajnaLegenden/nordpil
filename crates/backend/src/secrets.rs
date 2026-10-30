@@ -42,7 +42,9 @@ impl SecretStore for Keyring {
     }
 
     fn set(&self, id: Uuid, password: &str) -> Result<(), BackendError> {
-        Self::entry(id)?.set_password(password).map_err(keyring_error)
+        Self::entry(id)?
+            .set_password(password)
+            .map_err(keyring_error)
     }
 
     fn delete(&self, id: Uuid) -> Result<(), BackendError> {

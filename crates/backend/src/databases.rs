@@ -92,7 +92,10 @@ impl Backend {
         require_name("database", database)?;
         require_name("collection", collection)?;
         let client = self.writable_session(connection)?.client;
-        client.database(database).create_collection(collection).await?;
+        client
+            .database(database)
+            .create_collection(collection)
+            .await?;
         Ok(())
     }
 

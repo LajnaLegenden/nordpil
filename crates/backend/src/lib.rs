@@ -259,7 +259,9 @@ impl Handler for Backend {
                 database,
                 collection,
             } => Response::CollectionDropped {
-                result: self.drop_collection(connection, &database, &collection).await,
+                result: self
+                    .drop_collection(connection, &database, &collection)
+                    .await,
                 connection,
                 database,
             },

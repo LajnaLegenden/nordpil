@@ -85,7 +85,8 @@ impl ConnectionStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(self.error("read", error)),
         };
-        let file: ConnectionsFile = toml::from_str(&text).map_err(|error| self.error("parse", error))?;
+        let file: ConnectionsFile =
+            toml::from_str(&text).map_err(|error| self.error("parse", error))?;
         if file.version > FILE_VERSION {
             return Err(BackendError::new(format!(
                 "{} was written by a newer version of nordpil.",
@@ -110,7 +111,9 @@ impl ConnectionStore {
         options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut out = options.open(&temp).map_err(|error| self.error("write", error))?;
+        let mut out = options
+            .open(&temp)
+            .map_err(|error| self.error("write", error))?;
         out.write_all(text.as_bytes())
             .and_then(|()| out.sync_all())
             .map_err(|error| self.error("write", error))?;
