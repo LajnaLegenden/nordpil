@@ -7,6 +7,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+crossbeam-channel = "0.5.17"
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time"] }
+tokio-util = "0.7.20"
+tracing = "0.1.44"
 
 [lints]
 workspace = true
