@@ -235,3 +235,55 @@ async fn inserts_edits_and_deletes_documents() {
     assert_eq!(written(send(&backend, delete_many).await), Ok(1));
     assert_eq!(orders.count_documents(doc! {}).await.unwrap(), 0);
 }
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn creates_hides_lists_and_drops_indexes() {
+    let (_mongo, backend, id, _) = connected_backend(false).await;
+    let namespace = Namespace {
+        connection: id,
+        database: "shop".to_owned(),
+        collection: "orders".to_owned(),
+    };
+    let changed = |response: Response| match response {
+        Response::IndexChanged { result, .. } => result,
+        _ => panic!("unexpected response"),
+    };
+    let list = || async {
+        let Response::Indexes { result, .. } =
+            send(&backend, Command::ListIndexes(namespace.clone())).await
+        else {
+            panic!("unexpected response");
+        };
+        result.unwrap()
+    };
+
+    let create = Command::CreateIndex {
+        namespace: namespace.clone(),
+        keys: doc! { "email": 1, "created": -1 },
+        options: doc! { "unique": true },
+    };
+    changed(send(&backend, create).await).unwrap();
+    let hide = Command::SetIndexHidden {
+        namespace: namespace.clone(),
+        name: "email_1_created_-1".to_owned(),
+        hidden: true,
+    };
+    changed(send(&backend, hide).await).unwrap();
+
+    let indexes = list().await;
+    let names: Vec<_> = indexes.iter().map(|index| index.name.as_str()).collect();
+    assert_eq!(names, ["_id_", "email_1_created_-1"]);
+    let created = &indexes[1];
+    assert_eq!(created.keys(), doc! { "email": 1, "created": -1 });
+    assert!(created.spec.get_bool("unique").unwrap());
+    assert!(created.spec.get_bool("hidden").unwrap());
+    assert!(created.size.is_some());
+
+    let drop = Command::DropIndex {
+        namespace: namespace.clone(),
+        name: "email_1_created_-1".to_owned(),
+    };
+    changed(send(&backend, drop).await).unwrap();
+    assert_eq!(list().await.len(), 1);
+}

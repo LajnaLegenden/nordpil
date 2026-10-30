@@ -6,6 +6,7 @@ mod databases;
 mod documents;
 mod error;
 mod fields;
+mod indexes;
 mod queries;
 pub mod secrets;
 pub mod store;
@@ -22,6 +23,7 @@ pub use databases::{CollectionInfo, CollectionKind, DatabaseInfo};
 pub use documents::{FindQuery, Namespace};
 pub use error::{BackendError, ErrorKind};
 pub use fields::FieldInfo;
+pub use indexes::IndexInfo;
 use mongodb::Client;
 use queries::QueryStore;
 pub use queries::{QueryText, SavedQuery};
@@ -146,6 +148,22 @@ pub enum Command {
         namespace: Namespace,
         filter: mongodb::bson::Document,
     },
+    ListIndexes(Namespace),
+    CreateIndex {
+        namespace: Namespace,
+        keys: mongodb::bson::Document,
+        /// Spec fields such as `unique` or `expireAfterSeconds`.
+        options: mongodb::bson::Document,
+    },
+    DropIndex {
+        namespace: Namespace,
+        name: String,
+    },
+    SetIndexHidden {
+        namespace: Namespace,
+        name: String,
+        hidden: bool,
+    },
 }
 
 /// Results of [`Command`]s, with enough context to act on them.
@@ -201,6 +219,15 @@ pub enum Response {
     Written {
         namespace: Namespace,
         result: Result<u64, BackendError>,
+    },
+    Indexes {
+        namespace: Namespace,
+        result: Result<Vec<IndexInfo>, BackendError>,
+    },
+    /// After creating, dropping or hiding an index.
+    IndexChanged {
+        namespace: Namespace,
+        result: Result<(), BackendError>,
     },
     /// The collection's saved queries after a query command: favorites first,
     /// then most recent.
@@ -429,6 +456,30 @@ impl Handler for Backend {
             },
             Command::DeleteMany { namespace, filter } => Response::Written {
                 result: self.delete_many(&namespace, filter).await,
+                namespace,
+            },
+            Command::ListIndexes(namespace) => Response::Indexes {
+                result: self.list_indexes(&namespace).await,
+                namespace,
+            },
+            Command::CreateIndex {
+                namespace,
+                keys,
+                options,
+            } => Response::IndexChanged {
+                result: self.create_index(&namespace, keys, options).await,
+                namespace,
+            },
+            Command::DropIndex { namespace, name } => Response::IndexChanged {
+                result: self.drop_index(&namespace, &name).await,
+                namespace,
+            },
+            Command::SetIndexHidden {
+                namespace,
+                name,
+                hidden,
+            } => Response::IndexChanged {
+                result: self.set_index_hidden(&namespace, &name, hidden).await,
                 namespace,
             },
         }
