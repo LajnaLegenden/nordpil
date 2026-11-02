@@ -82,6 +82,9 @@ impl Backend {
         if let Err(error) = self.forget_queries(id).await {
             tracing::warn!(%id, %error, detail = ?error.detail, "could not delete saved queries");
         }
+        if let Err(error) = self.forget_mappings(id).await {
+            tracing::warn!(%id, %error, detail = ?error.detail, "could not delete linked fields");
+        }
         Ok(())
     }
 

@@ -9,6 +9,7 @@ mod fields;
 mod indexes;
 pub mod navigation;
 mod queries;
+pub mod references;
 pub mod secrets;
 pub mod settings;
 pub mod store;
@@ -31,6 +32,7 @@ use mongodb::Client;
 use navigation::{KnownDatabase, Navigation, NavigationStore, Recent};
 use queries::QueryStore;
 pub use queries::{QueryText, SavedQuery};
+use references::{DatabaseMappings, ReferenceStore};
 use secrets::SecretStore;
 use settings::Settings;
 use store::{ConnectionStore, SavedConnection};
@@ -184,6 +186,10 @@ pub enum Command {
     },
     /// Forgets one connection's remembered collection names, or all of them.
     ForgetCollections(Option<Uuid>),
+    /// The fields users linked to collections, for every database.
+    LoadMappings,
+    /// Replaces every database's linked fields.
+    SaveMappings(Vec<DatabaseMappings>),
 }
 
 /// Results of [`Command`]s, with enough context to act on them.
@@ -262,6 +268,7 @@ pub enum Response {
         result: Result<Vec<SavedQuery>, BackendError>,
     },
     Navigation(Result<Navigation, BackendError>),
+    Mappings(Result<Vec<DatabaseMappings>, BackendError>),
     CollectionIndex {
         connection: Uuid,
         result: Result<Vec<KnownDatabase>, BackendError>,
@@ -282,23 +289,26 @@ pub struct Backend {
     store: Arc<tokio::sync::Mutex<ConnectionStore>>,
     queries: Arc<tokio::sync::Mutex<QueryStore>>,
     navigation: Arc<tokio::sync::Mutex<NavigationStore>>,
+    references: Arc<tokio::sync::Mutex<ReferenceStore>>,
     settings_path: std::path::PathBuf,
     secrets: Arc<dyn SecretStore>,
     sessions: Mutex<HashMap<Uuid, Session>>,
 }
 
 impl Backend {
-    /// Saved queries, settings and navigation files live next to the
+    /// Saved queries, settings, navigation and linked fields live next to the
     /// connections file.
     pub fn new(store: ConnectionStore, secrets: impl SecretStore) -> Self {
         let queries = QueryStore::new(store.path().with_file_name("queries.toml"));
         let dir = store.path().parent().unwrap_or(std::path::Path::new("."));
         let navigation = NavigationStore::new(dir);
+        let references = ReferenceStore::new(dir.join("references.toml"));
         let settings_path = store.path().with_file_name("config.toml");
         Self {
             store: Arc::new(tokio::sync::Mutex::new(store)),
             queries: Arc::new(tokio::sync::Mutex::new(queries)),
             navigation: Arc::new(tokio::sync::Mutex::new(navigation)),
+            references: Arc::new(tokio::sync::Mutex::new(references)),
             settings_path,
             secrets: Arc::new(secrets),
             sessions: Mutex::default(),
@@ -543,6 +553,10 @@ impl Handler for Backend {
             },
             Command::ForgetCollections(connection) => {
                 Response::Stored(self.forget_collections(connection).await)
+            }
+            Command::LoadMappings => Response::Mappings(self.load_mappings().await),
+            Command::SaveMappings(databases) => {
+                Response::Stored(self.save_mappings(databases).await)
             }
         }
     }
