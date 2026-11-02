@@ -118,12 +118,12 @@ impl Backend {
     }
 }
 
-fn collation(document: Document) -> Result<Collation, BackendError> {
+pub(crate) fn collation(document: Document) -> Result<Collation, BackendError> {
     mongodb::bson::deserialize_from_document(document)
         .map_err(|error| BackendError::new("Invalid collation.").with_detail(error))
 }
 
-fn to_hint(value: Bson) -> Result<Hint, BackendError> {
+pub(crate) fn to_hint(value: Bson) -> Result<Hint, BackendError> {
     match value {
         Bson::String(name) => Ok(Hint::Name(name)),
         Bson::Document(keys) => Ok(Hint::Keys(keys)),

@@ -850,6 +850,8 @@ impl NordpilApp {
                     self.notify(error);
                 }
             }
+            // The shell panel isn't wired up yet.
+            Response::ScriptFinished(_) | Response::Scripts { .. } => {}
             Response::DatabaseDropped {
                 connection,
                 database,

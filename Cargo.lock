@@ -3399,6 +3399,7 @@ dependencies = [
  "mongodb",
  "nordpil-backend",
  "nordpil-query",
+ "nordpil-shell",
  "percent-encoding",
  "serde",
  "serde_json",

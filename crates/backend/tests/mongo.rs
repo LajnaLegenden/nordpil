@@ -426,3 +426,118 @@ async fn indexes_and_remembers_collection_names() {
     };
     assert_eq!(navigation.unwrap().databases, found);
 }
+
+/// Runs a script, saying yes to its write, and returns its results.
+async fn run_script(
+    backend: &Backend,
+    namespace: Namespace,
+    script: &str,
+) -> (nordpil_shell::Outcome, Vec<nordpil_shell::Event>) {
+    let run = nordpil_backend::ScriptRun::new();
+    let answering = std::sync::Arc::clone(&run);
+    let answer = tokio::spawn(async move {
+        loop {
+            if answering.pending_write().is_some() {
+                answering.answer(true);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    });
+    let command = Command::RunScript {
+        namespace,
+        script: script.to_owned(),
+        run: std::sync::Arc::clone(&run),
+    };
+    let Response::ScriptFinished(outcome) = send(backend, command).await else {
+        panic!("unexpected response");
+    };
+    answer.abort();
+    (outcome.unwrap(), run.take_events())
+}
+
+fn results(events: Vec<nordpil_shell::Event>) -> Vec<nordpil_shell::ResultValue> {
+    events
+        .into_iter()
+        .filter_map(|event| match event {
+            nordpil_shell::Event::Result { value, .. } => Some(value),
+            nordpil_shell::Event::Output(_) => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker"]
+async fn runs_scripts_and_pages_their_results() {
+    use nordpil_shell::{Outcome, ResultValue};
+
+    let (_mongo, backend, id, _) = connected_backend(false).await;
+    let namespace = Namespace {
+        connection: id,
+        database: "shop".to_owned(),
+        collection: "items".to_owned(),
+    };
+
+    let (outcome, events) = run_script(
+        &backend,
+        namespace.clone(),
+        "db.items.insertMany([{ _id: 1, n: 'a' }, { _id: 2, n: 'b' }, { _id: 3, n: 'c' }])\n\
+         db.items.find({}, { n: 1 }).sort({ _id: -1 }).limit(2).toArray()\n\
+         db.items.aggregate([{ $match: { _id: { $gt: 1 } } }])\n\
+         db.items.countDocuments()",
+    )
+    .await;
+
+    assert_eq!(outcome, Outcome::Finished);
+    let results = results(events);
+    assert_eq!(
+        results[1],
+        ResultValue::Documents(vec![
+            doc! { "_id": 3, "n": "c" },
+            doc! { "_id": 2, "n": "b" }
+        ])
+    );
+    assert_eq!(
+        results[3],
+        ResultValue::Value(mongodb::bson::Bson::Int32(3))
+    );
+    let ResultValue::Cursor(query) = &results[2] else {
+        panic!("not a cursor: {:?}", results[2]);
+    };
+    let nordpil_shell::QueryKind::Aggregate { pipeline, options } = &query.kind else {
+        panic!("not an aggregation");
+    };
+
+    let page = Command::Aggregate {
+        namespace: namespace.clone(),
+        query: Box::new(nordpil_backend::AggregateQuery {
+            pipeline: pipeline.clone(),
+            options: options.clone(),
+            skip: 1,
+            limit: 1,
+        }),
+    };
+    let Response::Documents(found) = send(&backend, page).await else {
+        panic!("unexpected response");
+    };
+    let found: Vec<Document> = found.unwrap().into_iter().map(|f| f.document).collect();
+    assert_eq!(found, [doc! { "_id": 3, "n": "c" }]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker"]
+async fn scripts_on_read_only_connections_cannot_write() {
+    let (_mongo, backend, id, _) = connected_backend(true).await;
+    let namespace = Namespace {
+        connection: id,
+        database: "shop".to_owned(),
+        collection: "items".to_owned(),
+    };
+
+    let (outcome, _) = run_script(&backend, namespace, "db.items.insertOne({ a: 1 })").await;
+
+    let nordpil_shell::Outcome::Failed(error) = outcome else {
+        panic!("expected a failure, got {outcome:?}");
+    };
+    assert_eq!(error.message, "This connection is read-only.");
+    assert!(collection_names(&backend, id, "shop").await.is_empty());
+}

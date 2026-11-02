@@ -10,8 +10,10 @@ mod indexes;
 pub mod navigation;
 mod queries;
 pub mod references;
+mod scripts;
 pub mod secrets;
 pub mod settings;
+mod shell;
 pub mod store;
 mod toml_file;
 pub mod transfer;
@@ -33,8 +35,11 @@ use navigation::{KnownDatabase, Navigation, NavigationStore, Recent};
 use queries::QueryStore;
 pub use queries::{QueryText, SavedQuery};
 use references::{DatabaseMappings, ReferenceStore};
+use scripts::ScriptStore;
+pub use scripts::{SavedScript, Scripts};
 use secrets::SecretStore;
 use settings::Settings;
+pub use shell::{AggregateQuery, SCRIPT_MAX_TIME, ScriptRun};
 use store::{ConnectionStore, SavedConnection};
 pub use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -190,6 +195,38 @@ pub enum Command {
     LoadMappings,
     /// Replaces every database's linked fields.
     SaveMappings(Vec<DatabaseMappings>),
+    /// Runs a shell script with `db` set to the namespace's database.
+    /// Results arrive through `run` while it goes.
+    RunScript {
+        namespace: Namespace,
+        script: String,
+        run: Arc<ScriptRun>,
+    },
+    /// A page of an aggregation from a shell result.
+    Aggregate {
+        namespace: Namespace,
+        query: Box<AggregateQuery>,
+    },
+    LoadScripts(Namespace),
+    /// Adds a script to the collection's history, or moves it to the top.
+    RecordScript {
+        namespace: Namespace,
+        script: String,
+    },
+    SetScriptFavorite {
+        namespace: Namespace,
+        id: Uuid,
+        favorite: bool,
+    },
+    DeleteScript {
+        namespace: Namespace,
+        id: Uuid,
+    },
+    /// Keeps the shell editor's text; empty forgets it.
+    SaveDraft {
+        namespace: Namespace,
+        text: String,
+    },
 }
 
 /// Results of [`Command`]s, with enough context to act on them.
@@ -275,6 +312,12 @@ pub enum Response {
     },
     /// After a command that only writes a file, such as saving settings.
     Stored(Result<(), BackendError>),
+    ScriptFinished(Result<nordpil_shell::Outcome, BackendError>),
+    /// The collection's scripts after a script command.
+    Scripts {
+        namespace: Namespace,
+        result: Result<Scripts, BackendError>,
+    },
 }
 
 /// An open connection.
@@ -290,6 +333,7 @@ pub struct Backend {
     queries: Arc<tokio::sync::Mutex<QueryStore>>,
     navigation: Arc<tokio::sync::Mutex<NavigationStore>>,
     references: Arc<tokio::sync::Mutex<ReferenceStore>>,
+    scripts: Arc<tokio::sync::Mutex<ScriptStore>>,
     settings_path: std::path::PathBuf,
     secrets: Arc<dyn SecretStore>,
     sessions: Mutex<HashMap<Uuid, Session>>,
@@ -303,12 +347,14 @@ impl Backend {
         let dir = store.path().parent().unwrap_or(std::path::Path::new("."));
         let navigation = NavigationStore::new(dir);
         let references = ReferenceStore::new(dir.join("references.toml"));
+        let scripts = ScriptStore::new(dir.join("scripts.toml"));
         let settings_path = store.path().with_file_name("config.toml");
         Self {
             store: Arc::new(tokio::sync::Mutex::new(store)),
             queries: Arc::new(tokio::sync::Mutex::new(queries)),
             navigation: Arc::new(tokio::sync::Mutex::new(navigation)),
             references: Arc::new(tokio::sync::Mutex::new(references)),
+            scripts: Arc::new(tokio::sync::Mutex::new(scripts)),
             settings_path,
             secrets: Arc::new(secrets),
             sessions: Mutex::default(),
@@ -354,6 +400,14 @@ impl Backend {
         blocking(move || f(&queries)).await
     }
 
+    async fn with_scripts<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&ScriptStore) -> Result<T, BackendError> + Send + 'static,
+    ) -> Result<T, BackendError> {
+        let scripts = Arc::clone(&self.scripts).lock_owned().await;
+        blocking(move || f(&scripts)).await
+    }
+
     async fn with_secrets<T: Send + 'static>(
         &self,
         f: impl FnOnce(&dyn SecretStore) -> Result<T, BackendError> + Send + 'static,
@@ -375,7 +429,7 @@ impl Handler for Backend {
     type Command = Command;
     type Response = Response;
 
-    async fn handle(&self, command: Command, _cancel: CancellationToken) -> Response {
+    async fn handle(&self, command: Command, cancel: CancellationToken) -> Response {
         match command {
             Command::LoadConnections => Response::Connections {
                 result: self.with_store(ConnectionStore::load).await,
@@ -557,6 +611,39 @@ impl Handler for Backend {
             Command::LoadMappings => Response::Mappings(self.load_mappings().await),
             Command::SaveMappings(databases) => {
                 Response::Stored(self.save_mappings(databases).await)
+            }
+            Command::RunScript {
+                namespace,
+                script,
+                run,
+            } => Response::ScriptFinished(self.run_script(&namespace, script, run, cancel).await),
+            Command::Aggregate { namespace, query } => {
+                Response::Documents(self.aggregate(&namespace, *query).await)
+            }
+            Command::LoadScripts(namespace) => Response::Scripts {
+                result: self.load_scripts(namespace.clone()).await,
+                namespace,
+            },
+            Command::RecordScript { namespace, script } => Response::Scripts {
+                result: self.record_script(namespace.clone(), script).await,
+                namespace,
+            },
+            Command::SetScriptFavorite {
+                namespace,
+                id,
+                favorite,
+            } => Response::Scripts {
+                result: self
+                    .set_script_favorite(namespace.clone(), id, favorite)
+                    .await,
+                namespace,
+            },
+            Command::DeleteScript { namespace, id } => Response::Scripts {
+                result: self.delete_script(namespace.clone(), id).await,
+                namespace,
+            },
+            Command::SaveDraft { namespace, text } => {
+                Response::Stored(self.save_draft(namespace, text).await)
             }
         }
     }
