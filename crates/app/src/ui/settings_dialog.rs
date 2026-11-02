@@ -1,5 +1,5 @@
-//! Settings: theme, text size and what Ctrl+K searches. Changes apply at
-//! once and are saved to `config.toml`.
+//! Settings: theme, text size, what Ctrl+K searches and id lookups. Changes
+//! apply at once and are saved to `config.toml`.
 
 use eframe::egui::{self, CornerRadius, Frame, Margin, RichText, Stroke};
 use nordpil_backend::settings::{GotoScope, Settings, TextSize, Theme};
@@ -79,6 +79,30 @@ impl SettingsDialog {
                         "Open connections only",
                         "Lists collections from connections that are open now.",
                     );
+                });
+                ui.end_row();
+
+                described(ui, "Look up references", "Off by default");
+                ui.vertical(|ui| {
+                    ui.set_width(330.0);
+                    ui.checkbox(
+                        &mut settings.look_up_references,
+                        "Open referenced documents",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add_space(26.0);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(
+                                    "Right-click a field like userId to open the matching \
+                                     document in users, in a new tab.",
+                                )
+                                .size(13.0)
+                                .color(theme::palette(ui).muted),
+                            )
+                            .wrap(),
+                        );
+                    });
                 });
                 ui.end_row();
             });

@@ -129,13 +129,17 @@ impl NordpilApp {
 
     /// Closes the tabs whose collection matches, e.g. after a drop.
     fn deselect_if(&mut self, matches: impl Fn(&Selection) -> bool) {
+        self.close_tabs(|tab| matches(&tab.target));
+    }
+
+    fn close_tabs(&mut self, matches: impl Fn(&CollectionTab) -> bool) {
         let active_id = self.active_tab.map(|index| self.tabs[index].id);
-        for tab in self.tabs.iter().filter(|tab| matches(&tab.target)) {
+        for tab in self.tabs.iter().filter(|tab| matches(tab)) {
             for request in [tab.pending_find, tab.pending_count].into_iter().flatten() {
                 self.backend.cancel(request);
             }
         }
-        self.tabs.retain(|tab| !matches(&tab.target));
+        self.tabs.retain(|tab| !matches(tab));
         self.active_tab = active_id
             .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
             .or_else(|| self.tabs.len().checked_sub(1));
@@ -145,20 +149,66 @@ impl NordpilApp {
         self.active_tab.map(|index| &self.tabs[index].target)
     }
 
+    /// Shows the collection's tab, opening one if there is none.
     fn open_tab(&mut self, target: Selection) {
         self.record_recent(&target);
         if let Some(index) = self.tabs.iter().position(|tab| tab.target == target) {
             self.active_tab = Some(index);
             return;
         }
+        self.push_tab(target, String::new());
+    }
+
+    /// Opens another tab even when the collection has one, and runs `filter`.
+    fn push_tab(&mut self, target: Selection, filter: String) {
+        self.load_references(&target);
         self.next_tab_id += 1;
-        let tab = CollectionTab::new(self.next_tab_id, target);
+        let mut tab = CollectionTab::new(self.next_tab_id, target);
+        tab.inputs.filter = filter;
         self.backend.send(Command::LoadQueries(tab.namespace()));
         self.backend.send(Command::SampleFields(tab.namespace()));
         self.tabs.push(tab);
         let index = self.tabs.len() - 1;
         self.active_tab = Some(index);
         self.tab_action(index, TabAction::Run);
+    }
+
+    /// With lookups on, lists the collections of the tab's database if the
+    /// sidebar hasn't yet, so id fields can be matched to them.
+    fn load_references(&mut self, target: &Selection) {
+        if !self.settings.look_up_references {
+            return;
+        }
+        let not_loaded = self
+            .entry(target.connection)
+            .and_then(|entry| entry.database(&target.database))
+            .is_some_and(|node| matches!(node.collections, Collections::NotLoaded));
+        if not_loaded {
+            self.apply(Action::LoadCollections {
+                connection: target.connection,
+                database: target.database.clone(),
+            });
+        }
+    }
+
+    /// The collections id fields in the tab can refer to; empty when
+    /// lookups are off or the names aren't loaded.
+    fn references(&self, index: usize) -> Vec<String> {
+        if !self.settings.look_up_references {
+            return Vec::new();
+        }
+        let target = &self.tabs[index].target;
+        match self
+            .entry(target.connection)
+            .and_then(|entry| entry.database(&target.database))
+            .map(|node| &node.collections)
+        {
+            Some(Collections::Loaded(collections)) => collections
+                .iter()
+                .map(|collection| collection.name.clone())
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// Moves the collection to the top of the recents and saves them.
@@ -267,9 +317,16 @@ impl NordpilApp {
 
     fn set_settings(&mut self, ctx: &egui::Context, settings: Settings) {
         let scope_changed = settings.goto_scope != self.settings.goto_scope;
+        let lookups_turned_on = settings.look_up_references && !self.settings.look_up_references;
         self.settings = settings;
         theme::apply_settings(ctx, &settings);
         self.backend.send(Command::SaveSettings(settings));
+        if lookups_turned_on {
+            let targets: Vec<Selection> = self.tabs.iter().map(|tab| tab.target.clone()).collect();
+            for target in targets {
+                self.load_references(&target);
+            }
+        }
         if !scope_changed {
             return;
         }
@@ -296,8 +353,8 @@ impl NordpilApp {
     }
 
     fn close_tab(&mut self, index: usize) {
-        let target = self.tabs[index].target.clone();
-        self.deselect_if(|t| *t == target);
+        let id = self.tabs[index].id;
+        self.close_tabs(|tab| tab.id == id);
     }
 
     fn tab_action(&mut self, index: usize, action: TabAction) {
@@ -414,6 +471,17 @@ impl NordpilApp {
                         },
                     ),
                 });
+            }
+            // `documents::show` puts the field into the filter itself.
+            TabAction::AddToFilter { .. } => {}
+            TabAction::Lookup { collection, filter } => {
+                let target = Selection {
+                    collection,
+                    ..tab.target.clone()
+                };
+                let filter = nordpil_query::format_document(&filter, nordpil_query::Style::Compact);
+                self.record_recent(&target);
+                self.push_tab(target, filter);
             }
             TabAction::UpdateMany | TabAction::DeleteMany => {
                 let Some(applied) = &tab.applied else {
@@ -1201,7 +1269,9 @@ impl NordpilApp {
                 ui.add_space(14.0);
                 match self.tabs[index].panel {
                     Panel::Documents => {
-                        if let Some(action) = documents::show(ui, &mut self.tabs[index], read_only)
+                        let references = self.references(index);
+                        if let Some(action) =
+                            documents::show(ui, &mut self.tabs[index], read_only, &references)
                         {
                             self.tab_action(index, action);
                         }
@@ -1541,6 +1611,71 @@ mod tests {
         assert_eq!(tab.error, None);
         assert_eq!(tab.count, Some(Some(0)));
         assert!(harness.query_by_label("No documents match.").is_some());
+    }
+
+    #[test]
+    fn lookup_opens_the_referenced_document_in_a_new_tab() {
+        use nordpil_backend::{CollectionInfo, CollectionKind};
+
+        use crate::connections::DatabaseNode;
+
+        let mut harness = harness();
+        // Let the initial (empty) load finish so it doesn't replace the test data.
+        run_until(&mut harness, |app| app.keyring_available);
+        let customer = bson::oid::ObjectId::from_bytes([7; 12]);
+        let app = harness.state_mut();
+        let mut entry = ConnectionEntry::new(SavedConnection {
+            id: Uuid::new_v4(),
+            name: "Local".to_owned(),
+            uri: "mongodb://localhost:27017".to_owned(),
+            color: None,
+            read_only: false,
+        });
+        entry.state = ConnectionState::Connected(vec![DatabaseNode {
+            info: DatabaseInfo {
+                name: "shop".to_owned(),
+                size_on_disk: 0,
+                empty: false,
+            },
+            collections: Collections::Loaded(
+                ["customers", "orders"]
+                    .map(|name| CollectionInfo {
+                        name: name.to_owned(),
+                        kind: CollectionKind::Collection,
+                        capped: false,
+                    })
+                    .into(),
+            ),
+        }]);
+        let target = Selection {
+            connection: entry.saved.id,
+            database: "shop".to_owned(),
+            collection: "orders".to_owned(),
+        };
+        app.connections = vec![entry];
+        app.settings.look_up_references = true;
+        let mut tab = CollectionTab::new(1, target);
+        tab.set_documents(vec![nordpil_backend::FoundDocument::new(
+            bson::doc! { "_id": 1, "customerId": customer },
+        )]);
+        app.tabs.push(tab);
+        app.active_tab = Some(0);
+        app.next_tab_id = 1;
+        harness.run();
+
+        harness.get_by_label("customerId:").click_secondary();
+        harness.run();
+        harness.get_by_label("Open in customers").click();
+        harness.run();
+
+        let app = harness.state();
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, Some(1));
+        assert_eq!(app.tabs[1].target.collection, "customers");
+        assert_eq!(
+            app.tabs[1].inputs.filter,
+            format!("{{ _id: ObjectId('{}') }}", customer.to_hex())
+        );
     }
 
     #[test]

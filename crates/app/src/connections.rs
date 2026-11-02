@@ -44,6 +44,15 @@ impl ConnectionEntry {
         }
     }
 
+    pub fn database(&self, name: &str) -> Option<&DatabaseNode> {
+        match &self.state {
+            ConnectionState::Connected(databases) => {
+                databases.iter().find(|db| db.info.name == name)
+            }
+            _ => None,
+        }
+    }
+
     pub fn database_mut(&mut self, name: &str) -> Option<&mut DatabaseNode> {
         match &mut self.state {
             ConnectionState::Connected(databases) => {

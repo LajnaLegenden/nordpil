@@ -1,7 +1,7 @@
 //! A collection tab: query bar, result toolbar, and the list, JSON and table
 //! views of the current page.
 
-use bson::{Bson, Document};
+use bson::{Bson, Document, doc};
 use eframe::egui::collapsing_header::CollapsingState;
 use eframe::egui::{
     self, Align, CornerRadius, Frame, Label, Layout, Margin, RichText, Sense, Stroke, StrokeKind,
@@ -9,10 +9,11 @@ use eframe::egui::{
 };
 use egui_extras::{Column, TableBuilder};
 use nordpil_backend::SavedQuery;
-use nordpil_query::{Highlight, Mode, Style, format_document, format_value};
+use nordpil_query::{Highlight, Mode, Segment, Style, format_document, format_value};
 use uuid::Uuid;
 
 use crate::icons;
+use crate::lookup;
 use crate::query_language::QueryLanguage;
 use crate::tabs::{CollectionTab, PAGE_SIZES, QueryInputs, View};
 use crate::theme;
@@ -44,6 +45,18 @@ pub enum TabAction {
     DeleteMany,
     Export,
     Import,
+    /// Put `path: value` into the filter and focus it, without running.
+    /// [`show`] does this itself; it never reaches the app.
+    AddToFilter {
+        path: String,
+        value: Bson,
+    },
+    /// Open another collection of the same database in a new tab, filtered
+    /// to the documents a field refers to.
+    Lookup {
+        collection: String,
+        filter: Document,
+    },
 }
 
 /// The table shows at most this many columns, so huge documents stay usable.
@@ -53,8 +66,14 @@ const MAX_CHILDREN: usize = 200;
 /// Nested values with more entries get no hover preview in the table.
 const MAX_HOVER_ENTRIES: usize = 50;
 
-/// `read_only` hides everything that writes.
-pub fn show(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Option<TabAction> {
+/// `read_only` hides everything that writes. `references` are the
+/// collections id fields can be looked up in; empty when lookups are off.
+pub fn show(
+    ui: &mut egui::Ui,
+    tab: &mut CollectionTab,
+    read_only: bool,
+    references: &[String],
+) -> Option<TabAction> {
     let palette = theme::palette(ui);
     let mut action = query_bar(ui, tab);
     for error in &tab.input_errors {
@@ -96,11 +115,116 @@ pub fn show(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Opti
     }
     let mut view_action = None;
     match tab.view {
-        View::List => list_view(ui, tab, read_only, &mut view_action),
-        View::Json => json_view(ui, tab, read_only, &mut view_action),
-        View::Table => table_view(ui, tab, read_only, &mut view_action),
+        View::List => list_view(ui, tab, read_only, references, &mut view_action),
+        View::Json => json_view(ui, tab, read_only, references, &mut view_action),
+        View::Table => table_view(ui, tab, read_only, references, &mut view_action),
+    }
+    if let Some(TabAction::AddToFilter { path, value }) = &view_action {
+        let edit = nordpil_query::set_field(&tab.inputs.filter, path, value);
+        let cursor = edit.text[..edit.cursor].chars().count();
+        tab.inputs.filter = edit.text;
+        tab.editors.filter.focus_at(ui.ctx(), cursor);
+        return action;
     }
     view_action.or(action)
+}
+
+/// Where a value sits in its document, for the field menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Place {
+    /// Dotted path for a filter, without array indexes: `items.sku`.
+    path: String,
+    /// The nearest field name; an array item has its array's.
+    name: String,
+}
+
+impl Place {
+    fn root(key: &str) -> Self {
+        Self {
+            path: key.to_owned(),
+            name: key.to_owned(),
+        }
+    }
+
+    fn child(&self, key: &str) -> Self {
+        Self {
+            path: format!("{}.{key}", self.path),
+            name: key.to_owned(),
+        }
+    }
+}
+
+/// The value at `segments` in `document`, and its place.
+fn resolve<'a>(document: &'a Document, segments: &[Segment]) -> Option<(Place, &'a Bson)> {
+    let mut found: Option<(Place, &Bson)> = None;
+    for segment in segments {
+        found = Some(match (segment, found) {
+            (Segment::Key(key), None) => (Place::root(key), document.get(key)?),
+            (Segment::Key(key), Some((place, Bson::Document(inner)))) => {
+                (place.child(key), inner.get(key)?)
+            }
+            (Segment::Index(index), Some((place, Bson::Array(items)))) => {
+                (place, items.get(*index)?)
+            }
+            _ => return None,
+        });
+    }
+    found
+}
+
+/// The documents `value` refers to, by collection; empty unless its field
+/// name looks like an id and a matching collection exists.
+fn lookups<'a>(place: &Place, value: &Bson, references: &'a [String]) -> Vec<(&'a str, Document)> {
+    let targets = lookup::targets(&place.name, references);
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let Some(filter) = lookup::filter(value) else {
+        return Vec::new();
+    };
+    targets
+        .into_iter()
+        .map(|collection| (collection, filter.clone()))
+        .collect()
+}
+
+/// Add to filter, exclude from filter and lookups for a right-clicked value.
+/// Returns true when it showed anything.
+fn field_menu(
+    ui: &mut egui::Ui,
+    place: &Place,
+    value: &Bson,
+    references: &[String],
+    action: &mut Option<TabAction>,
+) -> bool {
+    let leaf = !matches!(value, Bson::Document(_) | Bson::Array(_));
+    if leaf {
+        if ui.button("Add to filter").clicked() {
+            *action = Some(TabAction::AddToFilter {
+                path: place.path.clone(),
+                value: value.clone(),
+            });
+        }
+        if ui.button("Exclude from filter").clicked() {
+            *action = Some(TabAction::AddToFilter {
+                path: place.path.clone(),
+                value: Bson::Document(doc! { "$ne": value.clone() }),
+            });
+        }
+    }
+    let lookups = lookups(place, value, references);
+    if leaf && !lookups.is_empty() {
+        ui.separator();
+    }
+    for (collection, filter) in &lookups {
+        if ui.button(format!("Open in {collection}")).clicked() {
+            *action = Some(TabAction::Lookup {
+                collection: (*collection).to_owned(),
+                filter: filter.clone(),
+            });
+        }
+    }
+    leaf || !lookups.is_empty()
 }
 
 /// Narrower than this, the query buttons move under the filter.
@@ -607,6 +731,7 @@ fn list_view(
     ui: &mut egui::Ui,
     tab: &CollectionTab,
     read_only: bool,
+    references: &[String],
     action: &mut Option<TabAction>,
 ) {
     let Some(results) = &tab.results else {
@@ -631,7 +756,9 @@ fn list_view(
                                     ui.spacing_mut().item_spacing.y = 4.0;
                                     ui.spacing_mut().interact_size.y = 20.0;
                                     for (key, value) in document {
-                                        field(ui, id.with(key), key, value);
+                                        let place = Place::root(key);
+                                        let field_id = id.with(key);
+                                        field(ui, field_id, key, value, &place, references, action);
                                     }
                                 });
                         },
@@ -651,7 +778,7 @@ fn list_view(
                 if response.double_clicked() && !read_only {
                     *action = Some(TabAction::Edit(index));
                 }
-                document_menu(&response, document, index, read_only, action);
+                document_menu(&response, document, index, read_only, None, action);
                 ui.add_space(10.0);
             }
         });
@@ -697,14 +824,22 @@ fn card_actions(ui: &mut egui::Ui, card: egui::Rect, index: usize, action: &mut 
         });
 }
 
+/// The menu of a document. `field` is the value that was right-clicked, if
+/// any; its [`field_menu`] goes first.
 fn document_menu(
     response: &egui::Response,
     document: &Document,
     index: usize,
     read_only: bool,
+    field: Option<(&Place, &Bson, &[String])>,
     action: &mut Option<TabAction>,
 ) {
     response.context_menu(|ui| {
+        if let Some((place, value, references)) = field
+            && field_menu(ui, place, value, references, action)
+        {
+            ui.separator();
+        }
         if ui.button("Copy document").clicked() {
             ui.ctx()
                 .copy_text(format_document(document, Style::Pretty(2)));
@@ -725,8 +860,17 @@ fn document_menu(
     });
 }
 
-/// One field of the list view; documents and arrays expand.
-fn field(ui: &mut egui::Ui, id: egui::Id, key: &str, value: &Bson) {
+/// One field of the list view; documents and arrays expand. `place` is where
+/// it is, for its menu.
+fn field(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    key: &str,
+    value: &Bson,
+    place: &Place,
+    references: &[String],
+    action: &mut Option<TabAction>,
+) {
     let palette = theme::palette(ui);
     let children: Option<(String, Vec<(String, &Bson)>)> = match value {
         Bson::Document(document) => Some((
@@ -747,10 +891,13 @@ fn field(ui: &mut egui::Ui, id: egui::Id, key: &str, value: &Bson) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.add_space(18.0);
-            key_label(ui, key);
+            let key = ui.add(Label::new(key_text(ui, key)).sense(Sense::click()));
             ui.add_space(6.0);
-            let response = value_label(ui, value);
-            response.context_menu(|ui| {
+            let value_response = value_label(ui, value, Sense::click());
+            (key | value_response).context_menu(|ui| {
+                if field_menu(ui, place, value, references, action) {
+                    ui.separator();
+                }
                 if ui.button("Copy value").clicked() {
                     ui.ctx().copy_text(copy_text(value));
                 }
@@ -780,12 +927,19 @@ fn field(ui: &mut egui::Ui, id: egui::Id, key: &str, value: &Bson) {
         ui.add_space(18.0 - chevron_width);
         let label = ui.add(Label::new(key_text(ui, key)).sense(Sense::click()));
         ui.add_space(6.0);
-        ui.label(
+        let summary = ui.label(
             RichText::new(summary)
                 .monospace()
                 .italics()
                 .color(palette.subtle),
         );
+        // Objects and arrays can't go into the filter, but an array of ids
+        // can be looked up.
+        if !references.is_empty() && !lookups(place, value, references).is_empty() {
+            (label.clone() | summary).context_menu(|ui| {
+                field_menu(ui, place, value, references, action);
+            });
+        }
         chevron.clicked() || label.clicked()
     });
     if header.inner {
@@ -807,7 +961,20 @@ fn field(ui: &mut egui::Ui, id: egui::Id, key: &str, value: &Bson) {
                         })
                         .show(ui, |ui| {
                             for (child_key, child) in children.into_iter().take(MAX_CHILDREN) {
-                                field(ui, id.with(&child_key), &child_key, child);
+                                let child_place = match value {
+                                    Bson::Array(_) => place.clone(),
+                                    _ => place.child(&child_key),
+                                };
+                                let child_id = id.with(&child_key);
+                                field(
+                                    ui,
+                                    child_id,
+                                    &child_key,
+                                    child,
+                                    &child_place,
+                                    references,
+                                    action,
+                                );
                             }
                             if total > MAX_CHILDREN {
                                 ui.weak(format!(
@@ -827,10 +994,6 @@ fn field(ui: &mut egui::Ui, id: egui::Id, key: &str, value: &Bson) {
     }
 }
 
-fn key_label(ui: &mut egui::Ui, key: &str) {
-    ui.label(key_text(ui, key));
-}
-
 fn key_text(ui: &egui::Ui, key: &str) -> RichText {
     let color = code_editor::color(Highlight::Key, ui.visuals());
     RichText::new(format!("{key}:")).monospace().color(color)
@@ -841,11 +1004,18 @@ fn mono(text: impl Into<String>) -> RichText {
     RichText::new(text).monospace()
 }
 
-fn value_label(ui: &mut egui::Ui, value: &Bson) -> egui::Response {
+fn value_label(ui: &mut egui::Ui, value: &Bson, sense: Sense) -> egui::Response {
     let text = mono(format_value(value, Style::Compact))
         .color(code_editor::color(value_highlight(value), ui.visuals()));
-    ui.add(Label::new(text).truncate().sense(Sense::click()))
-        .on_hover_text(nordpil_query::type_name(value))
+    let label = Label::new(text).truncate().sense(sense);
+    // A label that can't be clicked must not select text either, so clicks
+    // reach what is under it.
+    let label = if sense.senses_click() {
+        label
+    } else {
+        label.selectable(false)
+    };
+    ui.add(label).on_hover_text(nordpil_query::type_name(value))
 }
 
 /// Strings copy without quotes; everything else as shell syntax.
@@ -860,6 +1030,7 @@ fn json_view(
     ui: &mut egui::Ui,
     tab: &CollectionTab,
     read_only: bool,
+    references: &[String],
     action: &mut Option<TabAction>,
 ) {
     let Some(results) = &tab.results else {
@@ -877,19 +1048,39 @@ fn json_view(
                     job.wrap.max_width = wrap;
                     ui.fonts_mut(|fonts| fonts.layout_job(job))
                 };
-                let response = kit::card(ui)
+                let output = kit::card(ui)
                     .inner_margin(Margin::symmetric(12, 8))
                     .show(ui, |ui| {
-                        ui.add(
-                            TextEdit::multiline(&mut text.as_str())
-                                .id_salt(("json", tab.id, tab.page, index))
-                                .frame(Frame::new())
-                                .desired_width(f32::INFINITY)
-                                .layouter(&mut layouter),
-                        )
+                        TextEdit::multiline(&mut text.as_str())
+                            .id_salt(("json", tab.id, tab.page, index))
+                            .frame(Frame::new())
+                            .desired_width(f32::INFINITY)
+                            .layouter(&mut layouter)
+                            .show(ui)
                     })
                     .inner;
-                document_menu(&response, document, index, read_only, action);
+                let response = &output.response;
+                // Remember which field the menu was opened on.
+                let clicked_field = response.id.with("clicked_field");
+                if response.secondary_clicked()
+                    && let Some(pointer) = response.interact_pointer_pos()
+                {
+                    let cursor = output.galley.cursor_from_pos(pointer - output.galley_pos);
+                    let offset = text
+                        .char_indices()
+                        .nth(cursor.index.0)
+                        .map_or(text.len(), |(offset, _)| offset);
+                    let segments = nordpil_query::path_at(text, offset);
+                    ui.data_mut(|data| data.insert_temp(clicked_field, segments));
+                }
+                let segments: Vec<Segment> = ui
+                    .data(|data| data.get_temp(clicked_field))
+                    .unwrap_or_default();
+                let field = resolve(document, &segments);
+                let field = field
+                    .as_ref()
+                    .map(|(place, value)| (place, *value, references));
+                document_menu(response, document, index, read_only, field, action);
                 if preview.full_len > text.len() {
                     ui.weak(format!(
                         "Showing the first {} of {}.",
@@ -910,6 +1101,7 @@ fn table_view(
     ui: &mut egui::Ui,
     tab: &CollectionTab,
     read_only: bool,
+    references: &[String],
     action: &mut Option<TabAction>,
 ) {
     let Some(results) = &tab.results else {
@@ -959,8 +1151,10 @@ fn table_view(
                         body.rows(38.0, results.documents.len(), |mut row| {
                             let index = row.index();
                             let document = &results.documents[index];
+                            // Remember which cell the row's menu was opened on.
+                            let clicked_column = egui::Id::unique(("table_menu_column", tab.id));
                             for name in &columns {
-                                row.col(|ui| {
+                                let (_, cell) = row.col(|ui| {
                                     ui.add_space(10.0);
                                     if let Some(value) = document.get(name) {
                                         table_cell(ui, value);
@@ -972,12 +1166,25 @@ fn table_view(
                                         Stroke::new(1.0, palette.line),
                                     );
                                 });
+                                if cell.secondary_clicked() {
+                                    cell.ctx.data_mut(|data| {
+                                        data.insert_temp(clicked_column, name.clone());
+                                    });
+                                }
                             }
                             let response = row.response();
                             if response.double_clicked() && !read_only {
                                 *action = Some(TabAction::Edit(index));
                             }
-                            document_menu(&response, document, index, read_only, action);
+                            let column: Option<String> =
+                                response.ctx.data(|data| data.get_temp(clicked_column));
+                            let field = column.and_then(|name| {
+                                document.get(&name).map(|value| (Place::root(&name), value))
+                            });
+                            let field = field
+                                .as_ref()
+                                .map(|(place, value)| (place, *value, references));
+                            document_menu(&response, document, index, read_only, field, action);
                         });
                     });
             });
@@ -1012,25 +1219,26 @@ fn column_names(documents: &[Document]) -> Vec<String> {
     names
 }
 
+/// Labels in cells only sense hovers, so right-clicks reach the cell and
+/// open the row's menu with the cell's field menu.
 fn table_cell(ui: &mut egui::Ui, value: &Bson) {
     let subtle = theme::palette(ui).subtle;
-    let summary = |text: String| mono(text).italics().color(subtle);
+    let summary = |text: String| Label::new(mono(text).italics().color(subtle)).selectable(false);
     match value {
         Bson::Document(document) => {
-            let label = ui.label(summary(format!("{{{}}}", plural(document.len(), "field"))));
+            let label = ui.add(summary(format!("{{{}}}", plural(document.len(), "field"))));
             if document.len() <= MAX_HOVER_ENTRIES {
                 label.on_hover_text(format_value(value, Style::Pretty(2)));
             }
         }
         Bson::Array(items) => {
-            let label = ui.label(summary(format!("[{}]", plural(items.len(), "item"))));
+            let label = ui.add(summary(format!("[{}]", plural(items.len(), "item"))));
             if items.len() <= MAX_HOVER_ENTRIES {
                 label.on_hover_text(format_value(value, Style::Pretty(2)));
             }
         }
         _ => {
-            // The row's menu (copy/edit/delete) covers the cell.
-            value_label(ui, value);
+            value_label(ui, value, Sense::hover());
         }
     }
 }
@@ -1090,7 +1298,7 @@ mod tests {
             .build_ui_state(
                 |ui, tab: &mut CollectionTab| {
                     let mut action = None;
-                    list_view(ui, tab, false, &mut action);
+                    list_view(ui, tab, false, &[], &mut action);
                 },
                 tab,
             );
@@ -1116,6 +1324,44 @@ mod tests {
         harness.get_by_label("address:").click();
         harness.run();
         assert!(harness.query_by_label("city:").is_none());
+    }
+
+    #[test]
+    fn right_click_adds_a_field_to_the_filter() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable as _;
+
+        let mut tab = CollectionTab::new(
+            1,
+            crate::connections::Selection {
+                connection: uuid::Uuid::nil(),
+                database: "db".to_owned(),
+                collection: "c".to_owned(),
+            },
+        );
+        tab.inputs.filter = "{ age: { $gt: 3 } }".to_owned();
+        tab.set_documents(vec![nordpil_backend::FoundDocument::new(
+            doc! { "_id": 1, "status": "done" },
+        )]);
+        let mut harness = Harness::builder()
+            .with_context_setup(theme::install)
+            .build_ui_state(
+                |ui, tab: &mut CollectionTab| {
+                    show(ui, tab, false, &[]);
+                },
+                tab,
+            );
+        harness.run();
+
+        harness.get_by_label("status:").click_secondary();
+        harness.run();
+        harness.get_by_label("Add to filter").click();
+        harness.run();
+
+        assert_eq!(
+            harness.state().inputs.filter,
+            "{ age: { $gt: 3 }, status: 'done' }"
+        );
     }
 
     #[test]

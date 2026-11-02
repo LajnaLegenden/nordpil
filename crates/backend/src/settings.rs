@@ -45,6 +45,9 @@ pub struct Settings {
     pub theme: Theme,
     pub text_size: TextSize,
     pub goto_scope: GotoScope,
+    /// Right-clicking an id field like `userId` offers to open the document
+    /// it refers to, in a collection of the same database like `users`.
+    pub look_up_references: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -102,12 +105,14 @@ mod tests {
             theme: Theme::Light,
             text_size: TextSize::Large,
             goto_scope: GotoScope::OpenOnly,
+            look_up_references: true,
         };
         save(&path, settings).unwrap();
 
         assert_eq!(load(&path).unwrap(), settings);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("goto_scope = \"open-only\""), "{text}");
+        assert!(text.contains("look_up_references = true"), "{text}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -4,6 +4,7 @@ mod app;
 mod connections;
 mod icons;
 mod logging;
+mod lookup;
 mod query_language;
 mod tabs;
 mod theme;

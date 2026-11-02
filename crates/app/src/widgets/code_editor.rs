@@ -132,6 +132,16 @@ impl CodeEditor {
         state.store(ctx, self.id);
     }
 
+    /// Focuses the editor with the cursor after `chars` characters.
+    pub fn focus_at(&self, ctx: &egui::Context, chars: usize) {
+        ctx.memory_mut(|memory| memory.request_focus(self.id));
+        let mut state = TextEditState::load(ctx, self.id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(chars))));
+        state.store(ctx, self.id);
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
