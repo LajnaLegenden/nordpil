@@ -156,6 +156,28 @@ proptest! {
         let _ = parse_value(&text);
         let _ = highlight(&text);
     }
+
+    /// Statements of any script are in order, apart, inside the text and on
+    /// char boundaries; highlighting and completion never panic.
+    #[test]
+    fn script_tools_never_panic(text in "([a-z.;(){}\\[\\]'\"`/=+\n $:,]|db|if|do|else|use|const|\\PC){0,60}") {
+        let statements = split_statements(&text);
+        let mut end = 0;
+        for statement in &statements {
+            prop_assert!(statement.span.start >= end);
+            prop_assert!(statement.span.start < statement.span.end);
+            prop_assert!(text.get(statement.span.clone()).is_some());
+            end = statement.span.end;
+        }
+        let _ = highlight_script(&text);
+        let collections = ["users".to_owned()];
+        let hints = ScriptHints { collections: &collections, ..ScriptHints::default() };
+        for (cursor, _) in text.char_indices().chain([(text.len(), ' ')]) {
+            let _ = statement_at(&text, &statements, cursor);
+            let _ = complete_script(&text, cursor, &hints, true);
+            let _ = script_target(&text, cursor);
+        }
+    }
 }
 
 #[test]

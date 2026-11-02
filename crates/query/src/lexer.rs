@@ -38,6 +38,17 @@ pub enum TokenKind {
         terminated: bool,
     },
     Comment,
+    /// Script mode only: the `.` of a member access, e.g. in `db.users`.
+    Dot,
+    /// Script mode only.
+    Semicolon,
+    /// Script mode only: a run of operator characters, e.g. `=`, `=>`,
+    /// `===`, `&&` or `-`.
+    Operator(String),
+    /// Script mode only: a backtick template, `${…}` parts included.
+    Template {
+        terminated: bool,
+    },
     Unknown,
 }
 
@@ -54,8 +65,37 @@ impl TokenKind {
                 | Self::Number(_)
                 | Self::Ident(_)
                 | Self::Regex { .. }
+                | Self::Template { .. }
         )
     }
+}
+
+/// Script-mode words after which a value starts, so a `/` after them opens
+/// a regex.
+const BEFORE_VALUE: &[&str] = &[
+    "return",
+    "typeof",
+    "case",
+    "do",
+    "else",
+    "in",
+    "instanceof",
+    "new",
+    "of",
+    "throw",
+    "void",
+    "yield",
+    "await",
+    "delete",
+];
+
+/// Characters that make up script-mode operators. `/` is handled apart,
+/// since it can also start a regex or a comment.
+fn is_operator_char(c: char) -> bool {
+    matches!(
+        c,
+        '=' | '+' | '-' | '*' | '%' | '<' | '>' | '!' | '&' | '|' | '?' | '^' | '~'
+    )
 }
 
 pub fn lex(text: &str) -> Vec<Token> {
@@ -63,6 +103,20 @@ pub fn lex(text: &str) -> Vec<Token> {
         text,
         pos: 0,
         tokens: Vec::new(),
+        script: false,
+    };
+    lexer.run();
+    lexer.tokens
+}
+
+/// Lexes JavaScript for the shell: identifiers stop at dots, and `.`, `;`,
+/// operators and template literals get their own tokens.
+pub fn lex_script(text: &str) -> Vec<Token> {
+    let mut lexer = Lexer {
+        text,
+        pos: 0,
+        tokens: Vec::new(),
+        script: true,
     };
     lexer.run();
     lexer.tokens
@@ -72,6 +126,7 @@ struct Lexer<'a> {
     text: &'a str,
     pos: usize,
     tokens: Vec<Token>,
+    script: bool,
 }
 
 impl Lexer<'_> {
@@ -109,7 +164,10 @@ impl Lexer<'_> {
             .iter()
             .rev()
             .find(|token| token.kind != TokenKind::Comment)
-            .is_some_and(|token| token.kind.ends_value())
+            .is_some_and(|token| match &token.kind {
+                TokenKind::Ident(word) if self.script => !BEFORE_VALUE.contains(&word.as_str()),
+                kind => kind.ends_value(),
+            })
     }
 
     fn run(&mut self) {
@@ -120,6 +178,14 @@ impl Lexer<'_> {
                 continue;
             }
             let kind = match c {
+                '-' | '/' | '.' | ';' | '`' if self.script => match self.script_token(c) {
+                    Some(kind) => kind,
+                    None => continue,
+                },
+                c if self.script && is_operator_char(c) => {
+                    self.eat_while(is_operator_char);
+                    TokenKind::Operator(self.text[start..self.pos].to_owned())
+                }
                 '{' | '}' | '[' | ']' | '(' | ')' | ':' | ',' | '-' => {
                     self.bump();
                     match c {
@@ -153,8 +219,12 @@ impl Lexer<'_> {
                 '.' if self.peek_second().is_some_and(|c| c.is_ascii_digit()) => self.number(),
                 c if is_ident_start(c) => {
                     self.bump();
-                    // Dots make paths like `address.city` one token, also mid-typing (`address.`).
-                    self.eat_while(|c| is_ident_continue(c) || c == '.');
+                    if self.script {
+                        self.eat_while(is_ident_continue);
+                    } else {
+                        // Dots make paths like `address.city` one token, also mid-typing (`address.`).
+                        self.eat_while(|c| is_ident_continue(c) || c == '.');
+                    }
                     TokenKind::Ident(self.text[start..self.pos].to_owned())
                 }
                 _ => {
@@ -164,6 +234,105 @@ impl Lexer<'_> {
             };
             self.push(kind, start);
         }
+    }
+
+    /// Script-mode tokens that start with a character value mode reads
+    /// differently. `None` when the character belongs to a token value mode
+    /// reads the same way; the caller then reads it without a script token.
+    fn script_token(&mut self, c: char) -> Option<TokenKind> {
+        let start = self.pos;
+        let second = self.peek_second();
+        Some(match c {
+            '.' if second.is_some_and(|c| c.is_ascii_digit()) => self.number(),
+            '.' => {
+                self.bump();
+                TokenKind::Dot
+            }
+            ';' => {
+                self.bump();
+                TokenKind::Semicolon
+            }
+            '`' => self.template(),
+            '/' if matches!(second, Some('/' | '*')) || !self.previous_ends_value() => {
+                return self.read_shared(start);
+            }
+            _ => {
+                // `-` or a division.
+                self.bump();
+                self.eat_while(is_operator_char);
+                TokenKind::Operator(self.text[start..self.pos].to_owned())
+            }
+        })
+    }
+
+    /// Reads a comment or regex at `start` and pushes it, as value mode does.
+    fn read_shared(&mut self, start: usize) -> Option<TokenKind> {
+        let kind = if self.peek_second() == Some('/') {
+            self.eat_while(|c| c != '\n');
+            TokenKind::Comment
+        } else if self.peek_second() == Some('*') {
+            self.bump();
+            self.bump();
+            match self.text[self.pos..].find("*/") {
+                Some(end) => self.pos += end + 2,
+                None => self.pos = self.text.len(),
+            }
+            TokenKind::Comment
+        } else {
+            self.regex()
+        };
+        self.push(kind, start);
+        None
+    }
+
+    /// A template literal. Strings, templates and braces inside `${…}` are
+    /// skipped whole, so a backtick or brace in them doesn't end it.
+    fn template(&mut self) -> TokenKind {
+        self.bump();
+        loop {
+            match self.bump() {
+                None => return TokenKind::Template { terminated: false },
+                Some('`') => return TokenKind::Template { terminated: true },
+                Some('\\') => {
+                    self.bump();
+                }
+                Some('$') if self.peek() == Some('{') => {
+                    self.bump();
+                    if !self.substitution() {
+                        return TokenKind::Template { terminated: false };
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// Skips a template's `${…}` after its `{`. False if the text ends first.
+    fn substitution(&mut self) -> bool {
+        let mut depth = 1;
+        while let Some(c) = self.peek() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.bump();
+                        return true;
+                    }
+                }
+                '\'' | '"' => {
+                    self.string(c);
+                    continue;
+                }
+                '`' => {
+                    self.template();
+                    continue;
+                }
+                _ => {}
+            }
+            self.bump();
+        }
+        false
     }
 
     fn string(&mut self, quote: char) -> TokenKind {
@@ -391,6 +560,63 @@ mod tests {
                 },
                 TokenKind::Comment,
                 TokenKind::Comment,
+            ]
+        );
+    }
+
+    #[test]
+    fn script_mode_splits_members_and_operators() {
+        let kinds: Vec<_> = lex_script("const n = db.users.find({ a: -1 }).length / 2; // x")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect();
+        let ident = |name: &str| TokenKind::Ident(name.to_owned());
+        let operator = |text: &str| TokenKind::Operator(text.to_owned());
+        assert_eq!(
+            kinds,
+            [
+                ident("const"),
+                ident("n"),
+                operator("="),
+                ident("db"),
+                TokenKind::Dot,
+                ident("users"),
+                TokenKind::Dot,
+                ident("find"),
+                TokenKind::LParen,
+                TokenKind::LBrace,
+                ident("a"),
+                TokenKind::Colon,
+                operator("-"),
+                TokenKind::Number("1".to_owned()),
+                TokenKind::RBrace,
+                TokenKind::RParen,
+                TokenKind::Dot,
+                ident("length"),
+                operator("/"),
+                TokenKind::Number("2".to_owned()),
+                TokenKind::Semicolon,
+                TokenKind::Comment,
+            ]
+        );
+    }
+
+    #[test]
+    fn script_mode_reads_templates_and_regex_after_keywords() {
+        let kinds: Vec<_> = lex_script("`a ${ { b: '`' } } c` return /x/")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                TokenKind::Template { terminated: true },
+                TokenKind::Ident("return".to_owned()),
+                TokenKind::Regex {
+                    pattern: "x".to_owned(),
+                    flags: String::new(),
+                    terminated: true
+                },
             ]
         );
     }

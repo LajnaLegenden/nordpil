@@ -41,7 +41,7 @@ pub struct Suggestion {
 
 impl Suggestion {
     /// The cursor goes to the end of `insert`.
-    fn new(label: &str, insert: &str, detail: &str) -> Self {
+    pub(crate) fn new(label: &str, insert: &str, detail: &str) -> Self {
         Self {
             label: label.to_owned(),
             insert: insert.to_owned(),
@@ -52,7 +52,7 @@ impl Suggestion {
     }
 
     /// `insert` marks the cursor position with `|`.
-    fn snippet(label: &str, insert: &str, detail: &str) -> Self {
+    pub(crate) fn snippet(label: &str, insert: &str, detail: &str) -> Self {
         let (before, after) = insert.split_once('|').unwrap_or((insert, ""));
         Self {
             cursor: before.len(),
@@ -99,7 +99,7 @@ const FIELD_OPERATORS: &[(&str, &str)] = &[
 ];
 
 /// Inserts mark the cursor with `|`.
-const CONSTRUCTORS: &[(&str, &str, &str)] = &[
+pub(crate) const CONSTRUCTORS: &[(&str, &str, &str)] = &[
     ("ObjectId", "ObjectId('|')", "ObjectId"),
     ("ISODate", "ISODate('|')", "date"),
     ("NumberInt", "NumberInt(|)", "32-bit integer"),
@@ -256,7 +256,7 @@ impl Context<'_> {
 }
 
 /// The quote at the end of `text`, if it opens a string rather than closing one.
-fn opening_quote(text: &str) -> Option<char> {
+pub(crate) fn opening_quote(text: &str) -> Option<char> {
     let quote = text
         .chars()
         .next_back()
@@ -281,6 +281,18 @@ fn value_path(owner: &Owner, key: &str) -> Option<String> {
         Owner::Field(path) if comparison => Some(path.clone()),
         _ => None,
     }
+}
+
+/// Whether a value, rather than a key, is being typed at the end of `text`.
+/// Outside any brackets counts as a value.
+pub(crate) fn at_value(text: &str) -> bool {
+    !matches!(
+        frames(text).last(),
+        Some(Frame::Object {
+            in_value: false,
+            ..
+        })
+    )
 }
 
 fn frames(text: &str) -> Vec<Frame> {
@@ -496,7 +508,7 @@ fn field_values(
 }
 
 /// `text` as the inside of a string literal quoted with `quote`.
-fn escape(text: &str, quote: char) -> String {
+pub(crate) fn escape(text: &str, quote: char) -> String {
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {
         if c == '\\' || c == quote {
@@ -510,7 +522,7 @@ fn escape(text: &str, quote: char) -> String {
 /// Keeps matches of `word`: prefix matches first, then matches at the start
 /// of a path segment (`ci` finds `address.city`), then, for words of three
 /// or more characters, substrings. Ties keep their original order.
-fn rank(candidates: &mut Vec<Suggestion>, word: &str) {
+pub(crate) fn rank(candidates: &mut Vec<Suggestion>, word: &str) {
     let word = word.to_lowercase();
     let score = |label: &str| {
         // String values match on their text, not the quote.

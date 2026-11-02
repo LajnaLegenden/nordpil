@@ -46,7 +46,7 @@ pub fn highlight(text: &str) -> Vec<(Range<usize>, Highlight)> {
                 }
                 _ => continue,
             },
-            TokenKind::String { .. } => Highlight::String,
+            TokenKind::String { .. } | TokenKind::Template { .. } => Highlight::String,
             TokenKind::Number(_) => Highlight::Number,
             TokenKind::Regex { .. } => Highlight::Regex,
             TokenKind::Comment => Highlight::Comment,
@@ -59,7 +59,10 @@ pub fn highlight(text: &str) -> Vec<(Range<usize>, Highlight)> {
             | TokenKind::RParen
             | TokenKind::Colon
             | TokenKind::Comma
-            | TokenKind::Minus => Highlight::Punctuation,
+            | TokenKind::Minus
+            | TokenKind::Dot
+            | TokenKind::Semicolon
+            | TokenKind::Operator(_) => Highlight::Punctuation,
         };
         spans.push((token.span.clone(), class));
     }

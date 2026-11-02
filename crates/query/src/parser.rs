@@ -223,7 +223,15 @@ impl Parser {
                 // Leave closers for the enclosing object or array to handle.
                 self.missing("Expected a value.")
             }
-            TokenKind::Colon | TokenKind::LParen | TokenKind::Unknown | TokenKind::Comment => {
+            // The script-mode tokens never come from `lex`.
+            TokenKind::Colon
+            | TokenKind::LParen
+            | TokenKind::Unknown
+            | TokenKind::Comment
+            | TokenKind::Dot
+            | TokenKind::Semicolon
+            | TokenKind::Operator(_)
+            | TokenKind::Template { .. } => {
                 let span = self.bump().span;
                 self.error("Expected a value.", span.clone());
                 Node {

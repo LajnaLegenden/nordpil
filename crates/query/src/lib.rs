@@ -1,5 +1,5 @@
 //! Query language for nordpil: mongosh shell syntax to BSON and back,
-//! plus highlighting.
+//! plus highlighting, and the syntax side of shell scripts.
 //!
 //! ```
 //! let filter = nordpil_query::parse_document("{ age: { $gt: 30 }, name: /^an/i }").unwrap();
@@ -13,6 +13,8 @@ mod format;
 mod highlight;
 pub mod lexer;
 pub mod parser;
+mod script;
+mod script_complete;
 mod values;
 
 use bson::{Bson, Document};
@@ -22,6 +24,11 @@ pub use fields::{FilterEdit, Segment, path_at, set_field};
 pub use format::{Style, format_document, format_value};
 pub use highlight::{Highlight, highlight};
 pub use parser::ParseError;
+pub use script::{
+    Show, Statement, StatementKind, declared_names, highlight_script, split_statements,
+    statement_at,
+};
+pub use script_complete::{ScriptHints, complete_script, script_target};
 pub use values::{ValueHint, value_hints};
 
 /// A document's pretty-printed, highlighted text for display, cut after
