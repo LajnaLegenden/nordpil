@@ -30,6 +30,21 @@ tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = "1"
 
+[package.metadata.deb]
+maintainer = "Linus Jansson <00jansson@gmail.com>"
+copyright = "Linus Jansson"
+extended-description = "A lightweight, native MongoDB GUI: browse, query, edit and script MongoDB databases."
+section = "database"
+# The GUI libraries are loaded at run time, so $auto can't see them.
+depends = "$auto, libegl1, libgl1, libxkbcommon0"
+recommends = "libwayland-client0, libwayland-egl1, libxkbcommon-x11-0, libx11-6, libxcursor1, libxi6, libxrandr2, xdg-desktop-portal"
+assets = [
+    ["target/release/nordpil", "usr/bin/", "755"],
+    ["assets/nordpil.desktop", "usr/share/applications/", "644"],
+    ["assets/nordpil.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../README.md", "usr/share/doc/nordpil/README.md", "644"],
+]
+
 [features]
 # Lets tests render the UI to PNG files (pulls in wgpu). See `just screenshots`.
 screenshots = ["egui_kittest/wgpu"]

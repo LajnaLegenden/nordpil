@@ -51,7 +51,16 @@ when idle, against roughly 1 GB for Compass.
 
 ## Install
 
-There are no release builds yet. Build from source with Rust 1.97 or newer.
+Download a build from [Releases](https://github.com/LajnaLegenden/nordpil/releases):
+
+- **macOS**: the `.dmg` for your Mac (`arm64` for Apple Silicon, `x86_64` for Intel);
+  drag nordpil to Applications. The app isn't notarized, so run
+  `xattr -dr com.apple.quarantine /Applications/nordpil.app` once before opening it.
+- **Linux** (`x86_64` or `aarch64`): the `.deb` (`sudo apt install ./nordpil-….deb`), the
+  AppImage (`chmod +x`, then run it), or the `.tar.gz` with `./install.sh`
+  (`./install.sh --user` installs into `~/.local` without sudo).
+
+Or build from source with Rust 1.97 or newer.
 
 On Linux, install it system-wide with a launcher entry and icon. This builds a release as
 you, then copies the files to `/usr/local` with sudo:
@@ -86,6 +95,13 @@ The workspace has four crates:
 - `crates/shell`: runs shell scripts on embedded QuickJS. A JavaScript prelude provides
   the mongosh API; database calls go through a `Host` trait the backend implements.
 - `crates/app`: the egui app.
+
+Releases come from the **Release** workflow: run it from the Actions tab with the new
+version. It checks and builds everything for that version first; only if all of it passes
+does it commit the version bump to `main`, tag it and publish the release with the macOS
+and Linux files. Tick "dry run" to only build the files, kept as workflow artifacts.
+The packaging lives in `scripts/` (`package-linux.sh`, `package-macos.sh`,
+`bump-version.sh`) and runs locally too.
 
 Tasks use [just](https://github.com/casey/just):
 
