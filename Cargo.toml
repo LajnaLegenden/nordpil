@@ -11,6 +11,7 @@ rust-version = "1.97"
 [workspace.dependencies]
 nordpil-backend = { path = "crates/backend" }
 nordpil-query = { path = "crates/query" }
+nordpil-shell = { path = "crates/shell" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

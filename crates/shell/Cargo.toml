@@ -1,0 +1,20 @@
+[package]
+name = "nordpil-shell"
+description = "Runs mongosh-style scripts for nordpil on an embedded QuickJS engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bson = { version = "3.1", features = ["serde", "serde_json-1"] }
+nordpil-query.workspace = true
+rquickjs = "0.14"
+serde_json = { version = "1", features = ["preserve_order"] }
+uuid = { version = "1", features = ["v4"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1.12"
