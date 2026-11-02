@@ -13,7 +13,7 @@ use nordpil_query::{Highlight, Mode, Segment, Style, format_document, format_val
 use uuid::Uuid;
 
 use crate::icons;
-use crate::lookup;
+use crate::lookup::{self, References};
 use crate::query_language::QueryLanguage;
 use crate::tabs::{CollectionTab, PAGE_SIZES, QueryInputs, View};
 use crate::theme;
@@ -57,6 +57,8 @@ pub enum TabAction {
         collection: String,
         filter: Document,
     },
+    /// Link fields named this to a collection, or edit their link.
+    LinkField(String),
 }
 
 /// The table shows at most this many columns, so huge documents stay usable.
@@ -66,13 +68,13 @@ const MAX_CHILDREN: usize = 200;
 /// Nested values with more entries get no hover preview in the table.
 const MAX_HOVER_ENTRIES: usize = 50;
 
-/// `read_only` hides everything that writes. `references` are the
-/// collections id fields can be looked up in; empty when lookups are off.
+/// `read_only` hides everything that writes. `references` says where id
+/// fields can be looked up; `None` when lookups are off.
 pub fn show(
     ui: &mut egui::Ui,
     tab: &mut CollectionTab,
     read_only: bool,
-    references: &[String],
+    references: Option<&References>,
 ) -> Option<TabAction> {
     let palette = theme::palette(ui);
     let mut action = query_bar(ui, tab);
@@ -172,29 +174,27 @@ fn resolve<'a>(document: &'a Document, segments: &[Segment]) -> Option<(Place, &
     found
 }
 
-/// The documents `value` refers to, by collection; empty unless its field
-/// name looks like an id and a matching collection exists.
-fn lookups<'a>(place: &Place, value: &Bson, references: &'a [String]) -> Vec<(&'a str, Document)> {
-    let targets = lookup::targets(&place.name, references);
-    if targets.is_empty() {
-        return Vec::new();
-    }
-    let Some(filter) = lookup::filter(value) else {
-        return Vec::new();
-    };
-    targets
+/// The documents `value` refers to, by collection: where the user linked
+/// its field, and collections whose names match the field's.
+fn lookups<'a>(
+    place: &Place,
+    value: &Bson,
+    references: &'a References,
+) -> Vec<(&'a str, Document)> {
+    references
+        .targets(&place.name)
         .into_iter()
-        .map(|collection| (collection, filter.clone()))
+        .filter_map(|target| Some((target.collection, lookup::filter(value, target.field)?)))
         .collect()
 }
 
-/// Add to filter, exclude from filter and lookups for a right-clicked value.
-/// Returns true when it showed anything.
+/// Add to filter, exclude from filter, lookups and linking for a
+/// right-clicked value. Returns true when it showed anything.
 fn field_menu(
     ui: &mut egui::Ui,
     place: &Place,
     value: &Bson,
-    references: &[String],
+    references: Option<&References>,
     action: &mut Option<TabAction>,
 ) -> bool {
     let leaf = !matches!(value, Bson::Document(_) | Bson::Array(_));
@@ -212,19 +212,30 @@ fn field_menu(
             });
         }
     }
-    let lookups = lookups(place, value, references);
-    if leaf && !lookups.is_empty() {
+    // An object can't be an id.
+    let Some(references) = references.filter(|_| !matches!(value, Bson::Document(_))) else {
+        return leaf;
+    };
+    if leaf {
         ui.separator();
     }
-    for (collection, filter) in &lookups {
+    for (collection, filter) in lookups(place, value, references) {
         if ui.button(format!("Open in {collection}")).clicked() {
             *action = Some(TabAction::Lookup {
-                collection: (*collection).to_owned(),
-                filter: filter.clone(),
+                collection: collection.to_owned(),
+                filter,
             });
         }
     }
-    leaf || !lookups.is_empty()
+    let link = if references.mapping(&place.name).is_some() {
+        "Edit link…"
+    } else {
+        "Link to collection…"
+    };
+    if ui.button(link).clicked() {
+        *action = Some(TabAction::LinkField(place.name.clone()));
+    }
+    true
 }
 
 /// Narrower than this, the query buttons move under the filter.
@@ -731,7 +742,7 @@ fn list_view(
     ui: &mut egui::Ui,
     tab: &CollectionTab,
     read_only: bool,
-    references: &[String],
+    references: Option<&References>,
     action: &mut Option<TabAction>,
 ) {
     let Some(results) = &tab.results else {
@@ -831,7 +842,7 @@ fn document_menu(
     document: &Document,
     index: usize,
     read_only: bool,
-    field: Option<(&Place, &Bson, &[String])>,
+    field: Option<(&Place, &Bson, Option<&References>)>,
     action: &mut Option<TabAction>,
 ) {
     response.context_menu(|ui| {
@@ -868,7 +879,7 @@ fn field(
     key: &str,
     value: &Bson,
     place: &Place,
-    references: &[String],
+    references: Option<&References>,
     action: &mut Option<TabAction>,
 ) {
     let palette = theme::palette(ui);
@@ -934,8 +945,8 @@ fn field(
                 .color(palette.subtle),
         );
         // Objects and arrays can't go into the filter, but an array of ids
-        // can be looked up.
-        if !references.is_empty() && !lookups(place, value, references).is_empty() {
+        // can be looked up or linked.
+        if references.is_some() && matches!(value, Bson::Array(_)) {
             (label.clone() | summary).context_menu(|ui| {
                 field_menu(ui, place, value, references, action);
             });
@@ -1030,7 +1041,7 @@ fn json_view(
     ui: &mut egui::Ui,
     tab: &CollectionTab,
     read_only: bool,
-    references: &[String],
+    references: Option<&References>,
     action: &mut Option<TabAction>,
 ) {
     let Some(results) = &tab.results else {
@@ -1101,7 +1112,7 @@ fn table_view(
     ui: &mut egui::Ui,
     tab: &CollectionTab,
     read_only: bool,
-    references: &[String],
+    references: Option<&References>,
     action: &mut Option<TabAction>,
 ) {
     let Some(results) = &tab.results else {
@@ -1298,7 +1309,7 @@ mod tests {
             .build_ui_state(
                 |ui, tab: &mut CollectionTab| {
                     let mut action = None;
-                    list_view(ui, tab, false, &[], &mut action);
+                    list_view(ui, tab, false, None, &mut action);
                 },
                 tab,
             );
@@ -1347,7 +1358,7 @@ mod tests {
             .with_context_setup(theme::install)
             .build_ui_state(
                 |ui, tab: &mut CollectionTab| {
-                    show(ui, tab, false, &[]);
+                    show(ui, tab, false, None);
                 },
                 tab,
             );

@@ -2,6 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Frame, Key, Margin, Modifiers, RichText, Stroke};
 use nordpil_backend::navigation::{KnownDatabase, Recent};
+use nordpil_backend::references::{DatabaseMappings, Mapping};
 use nordpil_backend::settings::{GotoScope, Settings};
 use nordpil_backend::store::SavedConnection;
 use nordpil_backend::{
@@ -11,6 +12,7 @@ use nordpil_backend::{
 use uuid::Uuid;
 
 use crate::connections::{Collections, ConnectionEntry, ConnectionState, Selection};
+use crate::lookup::References;
 use crate::tabs::{CollectionTab, Panel, build_query, history_entry};
 use crate::ui::connection_form::{ConnectionForm, FormResult};
 use crate::ui::dialogs::{CreateCollectionDialog, Dialog, DropDialog, PasswordPrompt};
@@ -19,6 +21,7 @@ use crate::ui::documents::TabAction;
 use crate::ui::goto::{self, GotoPalette};
 use crate::ui::index_dialog::{self, IndexDialog};
 use crate::ui::indexes::{self, IndexAction};
+use crate::ui::mappings_dialog::{self, MappingsDialog, Source};
 use crate::ui::settings_dialog::{self, SettingsDialog};
 use crate::ui::transfer_dialog::{self, TransferDialog};
 use crate::ui::{Action, chrome, documents, sidebar};
@@ -47,6 +50,9 @@ pub struct NordpilApp {
     notifications: Vec<BackendError>,
     settings: Settings,
     settings_dialog: Option<SettingsDialog>,
+    /// Fields the user linked to collections, per database.
+    mappings: Vec<DatabaseMappings>,
+    mappings_dialog: Option<MappingsDialog>,
     goto: Option<GotoPalette>,
     /// Newest first.
     recents: Vec<Recent>,
@@ -70,6 +76,7 @@ impl NordpilApp {
         let mut backend = Bridge::new(backend, move || ctx.request_repaint())?;
         backend.send(Command::LoadConnections);
         backend.send(Command::LoadNavigation);
+        backend.send(Command::LoadMappings);
 
         let mut app = Self {
             backend,
@@ -87,6 +94,8 @@ impl NordpilApp {
             notifications: Vec::new(),
             settings,
             settings_dialog: None,
+            mappings: Vec::new(),
+            mappings_dialog: None,
             goto: None,
             recents: Vec::new(),
             known: Vec::new(),
@@ -191,16 +200,26 @@ impl NordpilApp {
         }
     }
 
-    /// The collections id fields in the tab can refer to; empty when
-    /// lookups are off or the names aren't loaded.
-    fn references(&self, index: usize) -> Vec<String> {
+    /// Where id fields in the tab can be looked up; `None` when lookups
+    /// are off.
+    fn references(&self, index: usize) -> Option<References> {
         if !self.settings.look_up_references {
-            return Vec::new();
+            return None;
         }
         let target = &self.tabs[index].target;
+        Some(References {
+            collections: self.collection_names(target.connection, &target.database),
+            mappings: self
+                .database_mappings(target.connection, &target.database)
+                .to_vec(),
+        })
+    }
+
+    /// Empty until the database's collections are loaded.
+    fn collection_names(&self, connection: Uuid, database: &str) -> Vec<String> {
         match self
-            .entry(target.connection)
-            .and_then(|entry| entry.database(&target.database))
+            .entry(connection)
+            .and_then(|entry| entry.database(database))
             .map(|node| &node.collections)
         {
             Some(Collections::Loaded(collections)) => collections
@@ -208,6 +227,53 @@ impl NordpilApp {
                 .map(|collection| collection.name.clone())
                 .collect(),
             _ => Vec::new(),
+        }
+    }
+
+    fn database_mappings(&self, connection: Uuid, database: &str) -> &[Mapping] {
+        self.mappings
+            .iter()
+            .find(|mappings| mappings.connection == connection && mappings.database == database)
+            .map_or(&[], |mappings| &mappings.mappings)
+    }
+
+    /// E.g. `Local dev / shop`; `None` for a deleted connection.
+    fn location(&self, connection: Uuid, database: &str) -> Option<String> {
+        self.entry(connection)
+            .map(|entry| format!("{} / {database}", entry.saved.name))
+    }
+
+    /// Replaces a database's linked fields and saves them all.
+    fn set_mappings(&mut self, connection: Uuid, database: String, mappings: Vec<Mapping>) {
+        self.mappings
+            .retain(|other| !(other.connection == connection && other.database == database));
+        if !mappings.is_empty() {
+            self.mappings.push(DatabaseMappings {
+                connection,
+                database,
+                mappings,
+            });
+        }
+        self.backend
+            .send(Command::SaveMappings(self.mappings.clone()));
+    }
+
+    fn show_mappings_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &self.mappings_dialog else {
+            return;
+        };
+        let collections = self.collection_names(dialog.connection, &dialog.database);
+        let Some(dialog) = &mut self.mappings_dialog else {
+            return;
+        };
+        match dialog.show(ctx, &collections) {
+            mappings_dialog::Outcome::Open => {}
+            mappings_dialog::Outcome::Cancel => self.mappings_dialog = None,
+            mappings_dialog::Outcome::Save(mappings) => {
+                let (connection, database) = (dialog.connection, dialog.database.clone());
+                self.mappings_dialog = None;
+                self.set_mappings(connection, database, mappings);
+            }
         }
     }
 
@@ -474,6 +540,18 @@ impl NordpilApp {
             }
             // `documents::show` puts the field into the filter itself.
             TabAction::AddToFilter { .. } => {}
+            TabAction::LinkField(key) => {
+                let Selection {
+                    connection,
+                    database,
+                    ..
+                } = tab.target.clone();
+                let location = self.location(connection, &database).unwrap_or_default();
+                let mappings = self.database_mappings(connection, &database).to_vec();
+                self.mappings_dialog = Some(MappingsDialog::link(
+                    connection, database, location, key, mappings,
+                ));
+            }
             TabAction::Lookup { collection, filter } => {
                 let target = Selection {
                     collection,
@@ -556,6 +634,8 @@ impl NordpilApp {
                     self.connections.retain(|entry| entry.saved.id != id);
                     self.deselect_if(|s| s.connection == id);
                     self.recents.retain(|recent| recent.connection != id);
+                    // The backend dropped them from its file too.
+                    self.mappings.retain(|database| database.connection != id);
                     self.known.retain(|known| known.connection != id);
                     self.backend
                         .send(Command::SaveRecents(self.recents.clone()));
@@ -754,6 +834,10 @@ impl NordpilApp {
                         self.known = navigation.databases;
                     }
                 }
+                Err(error) => self.notify(error),
+            },
+            Response::Mappings(result) => match result {
+                Ok(mappings) => self.mappings = mappings,
                 Err(error) => self.notify(error),
             },
             Response::CollectionIndex { connection, result } => match result {
@@ -1039,6 +1123,38 @@ impl NordpilApp {
                     database,
                 });
             }
+            Action::EditMappings {
+                connection,
+                database,
+            } => {
+                let not_loaded = self
+                    .entry(connection)
+                    .and_then(|entry| entry.database(&database))
+                    .is_some_and(|node| matches!(node.collections, Collections::NotLoaded));
+                if not_loaded {
+                    self.apply(Action::LoadCollections {
+                        connection,
+                        database: database.clone(),
+                    });
+                }
+                let mut sources: Vec<Source> = self
+                    .mappings
+                    .iter()
+                    .filter(|other| !(other.connection == connection && other.database == database))
+                    .filter_map(|other| {
+                        Some(Source {
+                            label: self.location(other.connection, &other.database)?,
+                            mappings: other.mappings.clone(),
+                        })
+                    })
+                    .collect();
+                sources.sort_by(|a, b| a.label.cmp(&b.label));
+                let location = self.location(connection, &database).unwrap_or_default();
+                let mappings = self.database_mappings(connection, &database).to_vec();
+                self.mappings_dialog = Some(MappingsDialog::list(
+                    connection, database, location, &mappings, sources,
+                ));
+            }
         }
     }
 
@@ -1270,9 +1386,12 @@ impl NordpilApp {
                 match self.tabs[index].panel {
                     Panel::Documents => {
                         let references = self.references(index);
-                        if let Some(action) =
-                            documents::show(ui, &mut self.tabs[index], read_only, &references)
-                        {
+                        if let Some(action) = documents::show(
+                            ui,
+                            &mut self.tabs[index],
+                            read_only,
+                            references.as_ref(),
+                        ) {
                             self.tab_action(index, action);
                         }
                     }
@@ -1303,7 +1422,8 @@ impl NordpilApp {
             || self.document_dialog.is_some()
             || self.index_dialog.is_some()
             || self.transfer_dialog.is_some()
-            || self.settings_dialog.is_some();
+            || self.settings_dialog.is_some()
+            || self.mappings_dialog.is_some();
         if goto && !dialog_open {
             self.goto = match self.goto {
                 Some(_) => None,
@@ -1413,7 +1533,13 @@ impl NordpilApp {
                     rect.y_range(),
                     Stroke::new(1.0, palette.line),
                 );
-                sidebar::show(ui, &self.connections, self.selection(), &mut actions);
+                sidebar::show(
+                    ui,
+                    &self.connections,
+                    self.selection(),
+                    self.settings.look_up_references,
+                    &mut actions,
+                );
             });
         self.show_notifications(ui);
         egui::CentralPanel::no_frame()
@@ -1438,6 +1564,7 @@ impl NordpilApp {
             self.dialog = None;
         }
         self.show_settings(&ctx);
+        self.show_mappings_dialog(&ctx);
         self.show_goto(&ctx);
 
         for action in actions {
@@ -1613,8 +1740,12 @@ mod tests {
         assert!(harness.query_by_label("No documents match.").is_some());
     }
 
-    #[test]
-    fn lookup_opens_the_referenced_document_in_a_new_tab() {
+    /// An app with lookups on, showing `document` in `shop.orders` of a
+    /// connected connection whose `shop` has `collections`.
+    fn lookup_harness(
+        collections: &[&str],
+        document: bson::Document,
+    ) -> Harness<'static, NordpilApp> {
         use nordpil_backend::{CollectionInfo, CollectionKind};
 
         use crate::connections::DatabaseNode;
@@ -1622,7 +1753,6 @@ mod tests {
         let mut harness = harness();
         // Let the initial (empty) load finish so it doesn't replace the test data.
         run_until(&mut harness, |app| app.keyring_available);
-        let customer = bson::oid::ObjectId::from_bytes([7; 12]);
         let app = harness.state_mut();
         let mut entry = ConnectionEntry::new(SavedConnection {
             id: Uuid::new_v4(),
@@ -1638,13 +1768,14 @@ mod tests {
                 empty: false,
             },
             collections: Collections::Loaded(
-                ["customers", "orders"]
+                collections
+                    .iter()
                     .map(|name| CollectionInfo {
-                        name: name.to_owned(),
+                        name: (*name).to_owned(),
                         kind: CollectionKind::Collection,
                         capped: false,
                     })
-                    .into(),
+                    .collect(),
             ),
         }]);
         let target = Selection {
@@ -1655,13 +1786,21 @@ mod tests {
         app.connections = vec![entry];
         app.settings.look_up_references = true;
         let mut tab = CollectionTab::new(1, target);
-        tab.set_documents(vec![nordpil_backend::FoundDocument::new(
-            bson::doc! { "_id": 1, "customerId": customer },
-        )]);
+        tab.set_documents(vec![nordpil_backend::FoundDocument::new(document)]);
         app.tabs.push(tab);
         app.active_tab = Some(0);
         app.next_tab_id = 1;
         harness.run();
+        harness
+    }
+
+    #[test]
+    fn lookup_opens_the_referenced_document_in_a_new_tab() {
+        let customer = bson::oid::ObjectId::from_bytes([7; 12]);
+        let mut harness = lookup_harness(
+            &["customers", "orders"],
+            bson::doc! { "_id": 1, "customerId": customer },
+        );
 
         harness.get_by_label("customerId:").click_secondary();
         harness.run();
@@ -1676,6 +1815,43 @@ mod tests {
             app.tabs[1].inputs.filter,
             format!("{{ _id: ObjectId('{}') }}", customer.to_hex())
         );
+    }
+
+    #[test]
+    fn linking_a_field_offers_its_collection() {
+        let mut harness = lookup_harness(
+            &["accounts", "orders"],
+            bson::doc! { "_id": 1, "ownerRef": "a-1" },
+        );
+        harness.get_by_label("ownerRef:").click_secondary();
+        harness.run();
+        assert!(harness.query_by_label("Open in accounts").is_none());
+
+        harness.get_by_label("Link to collection…").click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Collection")
+            .click();
+        harness.run();
+        harness.get_by_label("accounts").click();
+        harness.run();
+        harness.get_by_role_and_label(Role::Button, "Save").click();
+        harness.run();
+
+        let app = harness.state();
+        assert!(app.mappings_dialog.is_none());
+        assert_eq!(
+            app.database_mappings(app.tabs[0].target.connection, "shop"),
+            [Mapping {
+                key: "ownerRef".to_owned(),
+                collection: "accounts".to_owned(),
+                field: None,
+            }]
+        );
+        harness.get_by_label("ownerRef:").click_secondary();
+        harness.run();
+        assert!(harness.query_by_label("Open in accounts").is_some());
+        assert!(harness.query_by_label("Edit link…").is_some());
     }
 
     #[test]

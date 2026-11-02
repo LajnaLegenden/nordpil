@@ -9,6 +9,7 @@ pub mod documents;
 pub mod goto;
 pub mod index_dialog;
 pub mod indexes;
+pub mod mappings_dialog;
 pub mod settings_dialog;
 pub mod sidebar;
 pub mod transfer_dialog;
@@ -58,5 +59,10 @@ pub enum Action {
         connection: Uuid,
         database: String,
         collection: Option<String>,
+    },
+    /// Opens the database's linked fields, for lookups.
+    EditMappings {
+        connection: Uuid,
+        database: String,
     },
 }

@@ -17,10 +17,12 @@ use crate::widgets::kit;
 
 const INDENT: f32 = 16.0;
 
+/// `links` offers editing a database's linked fields, for lookups.
 pub fn show(
     ui: &mut egui::Ui,
     entries: &[ConnectionEntry],
     selection: Option<&Selection>,
+    links: bool,
     actions: &mut Vec<Action>,
 ) {
     let palette = theme::palette(ui);
@@ -61,7 +63,7 @@ pub fn show(
             Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for entry in entries {
-                    connection(ui, entry, selection, actions);
+                    connection(ui, entry, selection, links, actions);
                     ui.add_space(4.0);
                 }
             });
@@ -241,6 +243,7 @@ fn connection(
     ui: &mut egui::Ui,
     entry: &ConnectionEntry,
     selection: Option<&Selection>,
+    links: bool,
     actions: &mut Vec<Action>,
 ) {
     let id = entry.saved.id;
@@ -343,7 +346,7 @@ fn connection(
     });
     if open {
         for database in databases {
-            database_node(ui, entry, database, selection, actions);
+            database_node(ui, entry, database, selection, links, actions);
         }
     }
 }
@@ -373,6 +376,7 @@ fn database_node(
     entry: &ConnectionEntry,
     database: &DatabaseNode,
     selection: Option<&Selection>,
+    links: bool,
     actions: &mut Vec<Action>,
 ) {
     let connection = entry.saved.id;
@@ -407,6 +411,12 @@ fn database_node(
     response.context_menu(|ui| {
         if ui.button("Refresh").clicked() {
             actions.push(Action::LoadCollections {
+                connection,
+                database: name.clone(),
+            });
+        }
+        if links && ui.button("Reference mappings…").clicked() {
+            actions.push(Action::EditMappings {
                 connection,
                 database: name.clone(),
             });
