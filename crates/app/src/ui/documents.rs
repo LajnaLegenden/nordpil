@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::icons;
 use crate::lookup::{self, References};
 use crate::query_language::QueryLanguage;
-use crate::tabs::{CollectionTab, PAGE_SIZES, QueryInputs, View};
+use crate::tabs::{CollectionTab, PAGE_SIZES, QueryInputs, Results, View};
 use crate::theme;
 use crate::widgets::code_editor::{self, CodeEditor};
 use crate::widgets::kit::{self, Tone};
@@ -116,11 +116,12 @@ pub fn show(
         return action;
     }
     let mut view_action = None;
-    match tab.view {
-        View::List => list_view(ui, tab, read_only, references, &mut view_action),
-        View::Json => json_view(ui, tab, read_only, references, &mut view_action),
-        View::Table => table_view(ui, tab, read_only, references, &mut view_action),
-    }
+    let page = DocumentPage {
+        results,
+        scope: egui::Id::unique(("tab", tab.id)),
+        page: tab.page,
+    };
+    page_view(ui, tab.view, &page, read_only, references, &mut view_action);
     if let Some(TabAction::AddToFilter { path, value }) = &view_action {
         let edit = nordpil_query::set_field(&tab.inputs.filter, path, value);
         let cursor = edit.text[..edit.cursor].chars().count();
@@ -738,22 +739,47 @@ pub fn thousands(n: u64) -> String {
     out
 }
 
-fn list_view(
+/// A page of documents to show, and where its widget state lives.
+pub struct DocumentPage<'a> {
+    pub results: &'a Results,
+    /// Keeps widget state, like expanded fields and column widths, apart
+    /// from other result sets.
+    pub scope: egui::Id,
+    /// Expanded fields reset per page; column widths don't.
+    pub page: u64,
+}
+
+/// Shows `page` in the list, JSON or table view. `read_only` hides
+/// everything that writes.
+pub fn page_view(
     ui: &mut egui::Ui,
-    tab: &CollectionTab,
+    view: View,
+    page: &DocumentPage,
     read_only: bool,
     references: Option<&References>,
     action: &mut Option<TabAction>,
 ) {
-    let Some(results) = &tab.results else {
-        return;
-    };
+    match view {
+        View::List => list_view(ui, page, read_only, references, action),
+        View::Json => json_view(ui, page, read_only, references, action),
+        View::Table => table_view(ui, page, read_only, references, action),
+    }
+}
+
+fn list_view(
+    ui: &mut egui::Ui,
+    page: &DocumentPage,
+    read_only: bool,
+    references: Option<&References>,
+    action: &mut Option<TabAction>,
+) {
+    let results = page.results;
     let palette = theme::palette(ui);
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
             for (index, document) in results.documents.iter().enumerate() {
-                let id = egui::Id::unique(("document", tab.id, tab.page, index));
+                let id = page.scope.with(("document", page.page, index));
                 // The scope's click area is registered before the fields, so
                 // the expand arrows inside stay clickable.
                 let response = ui
@@ -1039,14 +1065,12 @@ fn copy_text(value: &Bson) -> String {
 
 fn json_view(
     ui: &mut egui::Ui,
-    tab: &CollectionTab,
+    page: &DocumentPage,
     read_only: bool,
     references: Option<&References>,
     action: &mut Option<TabAction>,
 ) {
-    let Some(results) = &tab.results else {
-        return;
-    };
+    let results = page.results;
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
@@ -1063,7 +1087,7 @@ fn json_view(
                     .inner_margin(Margin::symmetric(12, 8))
                     .show(ui, |ui| {
                         TextEdit::multiline(&mut text.as_str())
-                            .id_salt(("json", tab.id, tab.page, index))
+                            .id_salt(page.scope.with(("json", page.page, index)))
                             .frame(Frame::new())
                             .desired_width(f32::INFINITY)
                             .layouter(&mut layouter)
@@ -1110,14 +1134,12 @@ fn human_size(bytes: usize) -> String {
 
 fn table_view(
     ui: &mut egui::Ui,
-    tab: &CollectionTab,
+    page: &DocumentPage,
     read_only: bool,
     references: Option<&References>,
     action: &mut Option<TabAction>,
 ) {
-    let Some(results) = &tab.results else {
-        return;
-    };
+    let results = page.results;
     let palette = theme::palette(ui);
     let columns = column_names(&results.documents);
     let types: Vec<&str> = columns
@@ -1132,7 +1154,7 @@ fn table_view(
                 ui.spacing_mut().item_spacing.x = 0.0;
                 kit::table_header_band(ui, 46.0);
                 TableBuilder::new(ui)
-                    .id_salt(("table", tab.id))
+                    .id_salt(page.scope.with("table"))
                     .striped(false)
                     .resizable(true)
                     .sense(Sense::click())
@@ -1163,7 +1185,7 @@ fn table_view(
                             let index = row.index();
                             let document = &results.documents[index];
                             // Remember which cell the row's menu was opened on.
-                            let clicked_column = egui::Id::unique(("table_menu_column", tab.id));
+                            let clicked_column = page.scope.with("table_menu_column");
                             for name in &columns {
                                 let (_, cell) = row.col(|ui| {
                                     ui.add_space(10.0);
@@ -1309,7 +1331,12 @@ mod tests {
             .build_ui_state(
                 |ui, tab: &mut CollectionTab| {
                     let mut action = None;
-                    list_view(ui, tab, false, None, &mut action);
+                    let page = DocumentPage {
+                        results: tab.results.as_ref().unwrap(),
+                        scope: egui::Id::unique("test"),
+                        page: 0,
+                    };
+                    list_view(ui, &page, false, None, &mut action);
                 },
                 tab,
             );
