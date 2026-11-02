@@ -132,6 +132,14 @@ impl CodeEditor {
         state.store(ctx, self.id);
     }
 
+    /// The selection as byte offsets into `text`; empty at the cursor.
+    /// `None` until the editor has been shown.
+    pub fn selection(&self, ctx: &egui::Context, text: &str) -> Option<Range<usize>> {
+        let range = TextEditState::load(ctx, self.id)?.cursor.char_range()?;
+        let (a, b) = (range.primary.index.0, range.secondary.index.0);
+        Some(byte_offset(text, a.min(b))..byte_offset(text, a.max(b)))
+    }
+
     /// Focuses the editor with the cursor after `chars` characters.
     pub fn focus_at(&self, ctx: &egui::Context, chars: usize) {
         ctx.memory_mut(|memory| memory.request_focus(self.id));

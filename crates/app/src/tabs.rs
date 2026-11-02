@@ -8,6 +8,7 @@ use nordpil_backend::{FindQuery, FoundDocument, IndexInfo, Namespace, RequestId,
 use nordpil_query::{FieldHint, Preview, ValueHint};
 
 use crate::connections::Selection;
+use crate::shell::ShellState;
 use crate::widgets::code_editor::{CodeEditor, is_empty_object};
 
 pub const PAGE_SIZES: [u64; 4] = [10, 20, 50, 100];
@@ -21,6 +22,7 @@ const DEFAULT_MAX_TIME: Duration = Duration::from_secs(60);
 pub enum Panel {
     Documents,
     Indexes,
+    Shell,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +87,7 @@ pub struct CollectionTab {
     /// `None` until loaded.
     pub indexes: Option<Result<Vec<IndexInfo>, String>>,
     pub indexes_request: Option<RequestId>,
+    pub shell: ShellState,
 }
 
 impl CollectionTab {
@@ -120,6 +123,7 @@ impl CollectionTab {
             panel: Panel::Documents,
             indexes: None,
             indexes_request: None,
+            shell: ShellState::new(id),
         }
     }
 
@@ -148,13 +152,9 @@ impl CollectionTab {
     /// Find options for the current page.
     pub fn page_query(&self) -> Option<FindQuery> {
         let applied = self.applied.as_ref()?;
-        let offset = self.page * self.page_size;
-        let limit = match applied.limit {
-            0 => self.page_size,
-            limit => self.page_size.min(limit.saturating_sub(offset)),
-        };
+        let (skip, limit) = page_window(applied.skip, applied.limit, self.page, self.page_size);
         Some(FindQuery {
-            skip: applied.skip + offset,
+            skip,
             limit: i64::try_from(limit).unwrap_or(i64::MAX),
             ..applied.query.clone()
         })
@@ -203,6 +203,17 @@ impl CollectionTab {
             previews,
         });
     }
+}
+
+/// The skip and limit for `page` inside the user's `skip` and `limit`
+/// (0 = no limit).
+pub fn page_window(skip: u64, limit: u64, page: u64, page_size: u64) -> (u64, u64) {
+    let offset = page * page_size;
+    let window = match limit {
+        0 => page_size,
+        limit => page_size.min(limit.saturating_sub(offset)),
+    };
+    (skip + offset, window)
 }
 
 /// Reads the query inputs. Errors name the input and column.

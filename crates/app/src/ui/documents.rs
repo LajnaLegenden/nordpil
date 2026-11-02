@@ -120,6 +120,7 @@ pub fn show(
         results,
         scope: egui::Id::unique(("tab", tab.id)),
         page: tab.page,
+        field_menus: true,
     };
     page_view(ui, tab.view, &page, read_only, references, &mut view_action);
     if let Some(TabAction::AddToFilter { path, value }) = &view_action {
@@ -528,7 +529,7 @@ fn query_summary(query: &QueryInputs) -> String {
     parts.join("  ")
 }
 
-const VIEWS: [(View, Option<&str>, &str); 3] = [
+pub const VIEWS: [(View, Option<&str>, &str); 3] = [
     (View::List, Some(icons::LIST), "List"),
     (View::Json, Some(icons::BRACES), "JSON"),
     (View::Table, Some(icons::TABLE), "Table"),
@@ -696,7 +697,7 @@ fn paging_width(ui: &egui::Ui, tab: &CollectionTab) -> f32 {
 }
 
 /// A bordered square button for paging.
-fn page_button(ui: &mut egui::Ui, icon: &str, label: &str) -> egui::Response {
+pub fn page_button(ui: &mut egui::Ui, icon: &str, label: &str) -> egui::Response {
     let palette = theme::palette(ui);
     let response = kit::icon_button(ui, icon, label, 32.0);
     ui.painter().rect_stroke(
@@ -747,6 +748,8 @@ pub struct DocumentPage<'a> {
     pub scope: egui::Id,
     /// Expanded fields reset per page; column widths don't.
     pub page: u64,
+    /// Offer "Add to filter" and lookups on fields.
+    pub field_menus: bool,
 }
 
 /// Shows `page` in the list, JSON or table view. `read_only` hides
@@ -792,10 +795,19 @@ fn list_view(
                                     ui.set_width(ui.available_width());
                                     ui.spacing_mut().item_spacing.y = 4.0;
                                     ui.spacing_mut().interact_size.y = 20.0;
+                                    let field_menus = page.field_menus.then_some(references);
                                     for (key, value) in document {
                                         let place = Place::root(key);
                                         let field_id = id.with(key);
-                                        field(ui, field_id, key, value, &place, references, action);
+                                        field(
+                                            ui,
+                                            field_id,
+                                            key,
+                                            value,
+                                            &place,
+                                            field_menus,
+                                            action,
+                                        );
                                     }
                                 });
                         },
@@ -898,16 +910,17 @@ fn document_menu(
 }
 
 /// One field of the list view; documents and arrays expand. `place` is where
-/// it is, for its menu.
+/// it is, for its menu. `menus` is `None` when fields get only "Copy value".
 fn field(
     ui: &mut egui::Ui,
     id: egui::Id,
     key: &str,
     value: &Bson,
     place: &Place,
-    references: Option<&References>,
+    menus: Option<Option<&References>>,
     action: &mut Option<TabAction>,
 ) {
+    let references = menus.flatten();
     let palette = theme::palette(ui);
     let children: Option<(String, Vec<(String, &Bson)>)> = match value {
         Bson::Document(document) => Some((
@@ -932,7 +945,7 @@ fn field(
             ui.add_space(6.0);
             let value_response = value_label(ui, value, Sense::click());
             (key | value_response).context_menu(|ui| {
-                if field_menu(ui, place, value, references, action) {
+                if menus.is_some() && field_menu(ui, place, value, references, action) {
                     ui.separator();
                 }
                 if ui.button("Copy value").clicked() {
@@ -1003,15 +1016,7 @@ fn field(
                                     _ => place.child(&child_key),
                                 };
                                 let child_id = id.with(&child_key);
-                                field(
-                                    ui,
-                                    child_id,
-                                    &child_key,
-                                    child,
-                                    &child_place,
-                                    references,
-                                    action,
-                                );
+                                field(ui, child_id, &child_key, child, &child_place, menus, action);
                             }
                             if total > MAX_CHILDREN {
                                 ui.weak(format!(
@@ -1111,7 +1116,7 @@ fn json_view(
                 let segments: Vec<Segment> = ui
                     .data(|data| data.get_temp(clicked_field))
                     .unwrap_or_default();
-                let field = resolve(document, &segments);
+                let field = resolve(document, &segments).filter(|_| page.field_menus);
                 let field = field
                     .as_ref()
                     .map(|(place, value)| (place, *value, references));
@@ -1211,7 +1216,7 @@ fn table_view(
                             }
                             let column: Option<String> =
                                 response.ctx.data(|data| data.get_temp(clicked_column));
-                            let field = column.and_then(|name| {
+                            let field = column.filter(|_| page.field_menus).and_then(|name| {
                                 document.get(&name).map(|value| (Place::root(&name), value))
                             });
                             let field = field
@@ -1276,7 +1281,7 @@ fn table_cell(ui: &mut egui::Ui, value: &Bson) {
     }
 }
 
-fn plural(count: usize, noun: &str) -> String {
+pub fn plural(count: usize, noun: &str) -> String {
     if count == 1 {
         format!("1 {noun}")
     } else {
@@ -1335,6 +1340,7 @@ mod tests {
                         results: tab.results.as_ref().unwrap(),
                         scope: egui::Id::unique("test"),
                         page: 0,
+                        field_menus: true,
                     };
                     list_view(ui, &page, false, None, &mut action);
                 },

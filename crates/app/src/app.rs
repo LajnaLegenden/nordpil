@@ -1,4 +1,5 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Frame, Key, Margin, Modifiers, RichText, Stroke};
 use nordpil_backend::navigation::{KnownDatabase, Recent};
@@ -13,6 +14,7 @@ use uuid::Uuid;
 
 use crate::connections::{Collections, ConnectionEntry, ConnectionState, Selection};
 use crate::lookup::References;
+use crate::shell::{Body, Ending, FileJob, PageRequest, Running};
 use crate::tabs::{CollectionTab, Panel, build_query, history_entry};
 use crate::ui::connection_form::{ConnectionForm, FormResult};
 use crate::ui::dialogs::{CreateCollectionDialog, Dialog, DropDialog, PasswordPrompt};
@@ -23,6 +25,7 @@ use crate::ui::index_dialog::{self, IndexDialog};
 use crate::ui::indexes::{self, IndexAction};
 use crate::ui::mappings_dialog::{self, MappingsDialog, Source};
 use crate::ui::settings_dialog::{self, SettingsDialog};
+use crate::ui::shell::ShellAction;
 use crate::ui::transfer_dialog::{self, TransferDialog};
 use crate::ui::{Action, chrome, documents, sidebar};
 use crate::widgets::kit;
@@ -143,9 +146,19 @@ impl NordpilApp {
 
     fn close_tabs(&mut self, matches: impl Fn(&CollectionTab) -> bool) {
         let active_id = self.active_tab.map(|index| self.tabs[index].id);
-        for tab in self.tabs.iter().filter(|tab| matches(tab)) {
-            for request in [tab.pending_find, tab.pending_count].into_iter().flatten() {
+        for tab in self.tabs.iter_mut().filter(|tab| matches(tab)) {
+            let running = tab.shell.running.as_ref().map(|running| running.request);
+            for request in [tab.pending_find, tab.pending_count, running]
+                .into_iter()
+                .flatten()
+            {
                 self.backend.cancel(request);
+            }
+            if let Some(text) = tab.shell.draft_to_save(true) {
+                self.backend.send(Command::SaveDraft {
+                    namespace: tab.namespace(),
+                    text,
+                });
             }
         }
         self.tabs.retain(|tab| !matches(tab));
@@ -175,6 +188,7 @@ impl NordpilApp {
         let mut tab = CollectionTab::new(self.next_tab_id, target);
         tab.inputs.filter = filter;
         self.backend.send(Command::LoadQueries(tab.namespace()));
+        self.backend.send(Command::LoadScripts(tab.namespace()));
         self.backend.send(Command::SampleFields(tab.namespace()));
         self.tabs.push(tab);
         let index = self.tabs.len() - 1;
@@ -587,6 +601,291 @@ impl NordpilApp {
         }
     }
 
+    fn shell_action(&mut self, ctx: &egui::Context, index: usize, action: ShellAction) {
+        let namespace = self.tabs[index].namespace();
+        let page_size = self.tabs[index].page_size;
+        let shell = &mut self.tabs[index].shell;
+        match action {
+            ShellAction::Run(script) => {
+                if script.trim().is_empty() || shell.running.is_some() {
+                    return;
+                }
+                let run = nordpil_backend::ScriptRun::new();
+                let request = self.backend.send(Command::RunScript {
+                    namespace: namespace.clone(),
+                    script: script.clone(),
+                    run: Arc::clone(&run),
+                });
+                shell.start(script.clone(), Running { request, run });
+                self.backend
+                    .send(Command::RecordScript { namespace, script });
+            }
+            ShellAction::Stop => {
+                if let Some(running) = &shell.running {
+                    self.backend.cancel(running.request);
+                }
+            }
+            ShellAction::Page { result, page } => {
+                let Some(entry) = shell.results.get_mut(result) else {
+                    return;
+                };
+                match &mut entry.body {
+                    Body::Query(query) => query.page = page,
+                    Body::Documents {
+                        documents,
+                        page: current_page,
+                        current,
+                    } => {
+                        *current_page = page;
+                        *current = crate::shell::page_of(documents, page, page_size);
+                        return;
+                    }
+                    Body::Value { .. } => return,
+                }
+                self.fetch_shell_page(index, result);
+            }
+            ShellAction::SetFavorite { id, favorite } => {
+                self.backend.send(Command::SetScriptFavorite {
+                    namespace,
+                    id,
+                    favorite,
+                });
+            }
+            ShellAction::Delete(id) => {
+                self.backend.send(Command::DeleteScript { namespace, id });
+            }
+            ShellAction::Sample(collection) => {
+                if shell.sampling.insert(collection.clone()) {
+                    self.backend
+                        .send(Command::SampleFields(nordpil_backend::Namespace {
+                            collection,
+                            ..namespace
+                        }));
+                }
+            }
+            ShellAction::File(job) => {
+                if shell.picker.is_none() {
+                    let receiver = crate::shell::pick_file(ctx, job, shell.text.clone());
+                    shell.picker = Some((job, receiver));
+                }
+            }
+        }
+    }
+
+    /// Fetches the current page of a shell result that is a query.
+    fn fetch_shell_page(&mut self, index: usize, result: usize) {
+        let tab = &mut self.tabs[index];
+        let connection = tab.target.connection;
+        let page_size = tab.page_size;
+        let Some(Body::Query(page)) = tab.shell.results.get_mut(result).map(|r| &mut r.body) else {
+            return;
+        };
+        if let Some(request) = page.pending.take() {
+            self.backend.cancel(request);
+        }
+        page.error = None;
+        let namespace = nordpil_backend::Namespace {
+            connection,
+            database: page.query.namespace.database.clone(),
+            collection: page.query.namespace.collection.clone(),
+        };
+        let command = match page.request(page_size) {
+            PageRequest::Find(query) => Command::Find { namespace, query },
+            PageRequest::Aggregate(query) => Command::Aggregate { namespace, query },
+        };
+        page.pending = Some(self.backend.send(command));
+    }
+
+    fn shell_page_arrived(
+        &mut self,
+        request: RequestId,
+        result: Result<Vec<nordpil_backend::FoundDocument>, BackendError>,
+    ) {
+        for tab in &mut self.tabs {
+            if let Some(page) = tab.shell.result_for_request(request) {
+                page.pending = None;
+                match result {
+                    Ok(found) => page.results = Some(crate::shell::results_of(found)),
+                    Err(error) => {
+                        page.results = None;
+                        page.error = Some(error.message);
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    fn running_tab(&self, request: RequestId) -> Option<usize> {
+        self.tabs.iter().position(|tab| {
+            tab.shell
+                .running
+                .as_ref()
+                .is_some_and(|running| running.request == request)
+        })
+    }
+
+    fn script_finished(
+        &mut self,
+        request: RequestId,
+        result: Result<nordpil_shell::Outcome, BackendError>,
+    ) {
+        let Some(index) = self.running_tab(request) else {
+            return;
+        };
+        let ending = match result {
+            Ok(nordpil_shell::Outcome::Finished) => None,
+            Ok(nordpil_shell::Outcome::Failed(error)) => Some(Ending::Failed(error)),
+            Ok(nordpil_shell::Outcome::Cancelled) => Some(Ending::Stopped),
+            Ok(nordpil_shell::Outcome::Declined) => Some(Ending::Declined),
+            Err(error) => Some(Ending::Failed(nordpil_shell::ScriptError {
+                message: error.message,
+                statement: None,
+                line: None,
+                column: None,
+            })),
+        };
+        self.finish_script(index, ending);
+    }
+
+    /// Takes the run's last results, then marks it done.
+    fn finish_script(&mut self, index: usize, ending: Option<Ending>) {
+        let page_size = self.tabs[index].page_size;
+        for result in self.tabs[index].shell.take_events(page_size) {
+            self.fetch_shell_page(index, result);
+        }
+        self.tabs[index].shell.finish(ending);
+    }
+
+    /// Each frame: results of running scripts, drafts to save and file
+    /// dialogs that closed.
+    fn poll_shells(&mut self, ctx: &egui::Context) {
+        for index in 0..self.tabs.len() {
+            let page_size = self.tabs[index].page_size;
+            let shell = &mut self.tabs[index].shell;
+            if shell.running.is_some() {
+                // Results come from another thread without waking the UI.
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            for result in shell.take_events(page_size) {
+                self.fetch_shell_page(index, result);
+            }
+            let shell = &mut self.tabs[index].shell;
+            if shell.edited_at.is_some() {
+                ctx.request_repaint_after(crate::shell::DRAFT_DELAY);
+            }
+            if let Some(text) = shell.draft_to_save(false) {
+                let namespace = self.tabs[index].namespace();
+                self.backend.send(Command::SaveDraft { namespace, text });
+            }
+            let shell = &mut self.tabs[index].shell;
+            let Some((job, receiver)) = &shell.picker else {
+                continue;
+            };
+            let Ok(result) = receiver.try_recv() else {
+                continue;
+            };
+            let job = *job;
+            shell.picker = None;
+            match result {
+                Some(Ok((_, text))) if job == FileJob::Open => {
+                    shell.text = text;
+                    shell.edited();
+                }
+                Some(Err(message)) => self.notify(BackendError::new(message)),
+                _ => {}
+            }
+        }
+    }
+
+    /// Asks before a script's first write, for whichever tab's run waits.
+    fn show_write_confirmation(&mut self, ctx: &egui::Context) {
+        let Some((tab, run, summary)) = self.tabs.iter().find_map(|tab| {
+            let running = tab.shell.running.as_ref()?;
+            let summary = running.run.pending_write()?;
+            Some((tab, Arc::clone(&running.run), summary))
+        }) else {
+            return;
+        };
+        let namespace = format!(
+            "{}.{}",
+            summary.namespace.database, summary.namespace.collection
+        );
+        let count = documents::plural(
+            usize::try_from(summary.documents).unwrap_or(usize::MAX),
+            "document",
+        );
+        let what = match summary.operation.as_str() {
+            "insertOne" | "insertMany" => {
+                format!("{} adds {count} to {namespace}.", summary.operation)
+            }
+            "bulkWrite" => format!(
+                "bulkWrite runs {} on {namespace}.",
+                documents::plural(
+                    usize::try_from(summary.documents).unwrap_or(usize::MAX),
+                    "operation"
+                )
+            ),
+            operation => format!("{operation} on {namespace} matches {count} now."),
+        };
+        let subtitle = format!("Shell in {}", tab.target.collection);
+        let mut answer = None;
+        let modal = kit::modal(ctx, egui::Id::unique("shell_write")).show(ctx, |ui| {
+            kit::dialog_width(ui, 440.0);
+            kit::dialog_title(ui, "Allow writes in this run?", Some(&subtitle));
+            ui.label(what);
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Later writes in this run won't ask again.")
+                    .color(theme::palette(ui).muted),
+            );
+            kit::dialog_footer(ui, |ui| {
+                if kit::button(
+                    ui,
+                    kit::Tone::Danger,
+                    None,
+                    "Allow writes",
+                    kit::DIALOG_HEIGHT,
+                )
+                .clicked()
+                {
+                    answer = Some(true);
+                }
+                if kit::button(
+                    ui,
+                    kit::Tone::Secondary,
+                    None,
+                    "Stop run",
+                    kit::DIALOG_HEIGHT,
+                )
+                .clicked()
+                {
+                    answer = Some(false);
+                }
+            });
+        });
+        if modal.should_close() {
+            answer = answer.or(Some(false));
+        }
+        if let Some(allow) = answer {
+            run.answer(allow);
+        }
+    }
+
+    /// Lists the database's collections if the sidebar hasn't yet.
+    fn ensure_collections(&mut self, target: &Selection) {
+        let not_loaded = self
+            .entry(target.connection)
+            .and_then(|entry| entry.database(&target.database))
+            .is_some_and(|node| matches!(node.collections, Collections::NotLoaded));
+        if not_loaded {
+            self.apply(Action::LoadCollections {
+                connection: target.connection,
+                database: target.database.clone(),
+            });
+        }
+    }
+
     /// Sends the find for the tab's current page, and a count if asked.
     fn fetch_page(&mut self, index: usize, count: bool) {
         let tab = &mut self.tabs[index];
@@ -689,6 +988,7 @@ impl NordpilApp {
                     .iter_mut()
                     .find(|t| t.pending_find == Some(request))
                 else {
+                    self.shell_page_arrived(request, result);
                     return;
                 };
                 tab.pending_find = None;
@@ -712,6 +1012,13 @@ impl NordpilApp {
                     for tab in &mut self.tabs {
                         if tab.namespace() == namespace {
                             tab.fields = hints.clone();
+                        }
+                        let same_database = tab.target.connection == namespace.connection
+                            && tab.target.database == namespace.database;
+                        if same_database && tab.shell.sampling.contains(&namespace.collection) {
+                            tab.shell
+                                .fields
+                                .insert(namespace.collection.clone(), hints.clone());
                         }
                     }
                 }
@@ -850,8 +1157,19 @@ impl NordpilApp {
                     self.notify(error);
                 }
             }
-            // The shell panel isn't wired up yet.
-            Response::ScriptFinished(_) | Response::Scripts { .. } => {}
+            Response::ScriptFinished(result) => self.script_finished(request, result),
+            Response::Scripts { namespace, result } => match result {
+                Ok(scripts) => {
+                    for tab in &mut self.tabs {
+                        if tab.namespace() == namespace {
+                            tab.shell.history = scripts.history.clone();
+                            tab.shell
+                                .load_draft(scripts.draft.clone(), &tab.target.collection);
+                        }
+                    }
+                }
+                Err(error) => self.notify(error),
+            },
             Response::DatabaseDropped {
                 connection,
                 database,
@@ -1010,6 +1328,12 @@ impl NordpilApp {
             if tab.pending_count == Some(request) {
                 tab.pending_count = None;
             }
+            if let Some(page) = tab.shell.result_for_request(request) {
+                page.pending = None;
+            }
+        }
+        if let Some(index) = self.running_tab(request) {
+            self.finish_script(index, Some(Ending::Stopped));
         }
         for entry in &mut self.connections {
             if matches!(entry.state, ConnectionState::Connecting(r) if r == request) {
@@ -1407,6 +1731,17 @@ impl NordpilApp {
                             self.index_action(index, action);
                         }
                     }
+                    Panel::Shell => {
+                        let target = self.tabs[index].target.clone();
+                        self.ensure_collections(&target);
+                        let collections =
+                            self.collection_names(target.connection, &target.database);
+                        if let Some(action) =
+                            crate::ui::shell::show(ui, &mut self.tabs[index], &collections)
+                        {
+                            self.shell_action(ui.ctx(), index, action);
+                        }
+                    }
                 }
             });
     }
@@ -1497,6 +1832,7 @@ impl NordpilApp {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let mut actions = Vec::new();
         let ctx = ui.ctx().clone();
+        self.poll_shells(&ctx);
         self.shortcuts(&ctx);
         let palette = theme::palette(ui);
 
@@ -1568,6 +1904,7 @@ impl NordpilApp {
         self.show_settings(&ctx);
         self.show_mappings_dialog(&ctx);
         self.show_goto(&ctx);
+        self.show_write_confirmation(&ctx);
 
         for action in actions {
             self.apply(action);
@@ -2275,6 +2612,48 @@ mod screenshots {
             .get_by_role_and_label(Role::Button, "Cancel")
             .click();
         harness.run();
+        harness.state_mut().tabs[0].panel = Panel::Documents;
+
+        {
+            use crate::shell::{Body, Selected, ShellResult, page_of};
+            let tab = &mut harness.state_mut().tabs[0];
+            tab.panel = Panel::Shell;
+            tab.shell.loaded = true;
+            tab.shell.text = "const since = ISODate('2024-01-01')\n\
+                db.orders.find({ status: 'shipped', created: { $gte: since } })\n  \
+                .sort({ total: -1 })\n\
+                db.orders.countDocuments({ status: 'shipped' })\n\
+                print('checked', since)"
+                .to_owned();
+            let documents = tab
+                .results
+                .as_ref()
+                .map(|results| results.documents.clone())
+                .unwrap_or_default();
+            tab.shell.results = vec![
+                ShellResult {
+                    title: "db.orders.find({ status: 'shipped', cr…".to_owned(),
+                    elapsed: std::time::Duration::from_millis(14),
+                    body: Body::Documents {
+                        current: page_of(&documents, 0, 20),
+                        documents,
+                        page: 0,
+                    },
+                },
+                ShellResult {
+                    title: "db.orders.countDocuments({ status: 'sh…".to_owned(),
+                    elapsed: std::time::Duration::from_millis(3),
+                    body: Body::Value {
+                        text: "1234".to_owned(),
+                        spans: nordpil_query::highlight("1234"),
+                    },
+                },
+            ];
+            tab.shell.output = vec!["checked 2024-01-01T00:00:00.000Z".to_owned()];
+            tab.shell.selected = Some(Selected::Result(0));
+        }
+        harness.run();
+        save(&mut harness, "shell");
         harness.state_mut().tabs[0].panel = Panel::Documents;
 
         harness.state_mut().tab_action(0, TabAction::Export);

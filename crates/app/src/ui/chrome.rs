@@ -258,6 +258,7 @@ pub fn collection_header(
     let panels = [
         (Panel::Documents, Some(icons::FILE_TEXT), "Documents"),
         (Panel::Indexes, Some(icons::KEY), "Indexes"),
+        (Panel::Shell, Some(icons::SQUARE_TERMINAL), "Shell"),
     ];
     let title_width = kit::text_width(ui, collection, FontId::new(21.0, theme::semibold()))
         + count.as_deref().map_or(0.0, |count| {

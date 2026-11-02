@@ -27,6 +27,14 @@ when idle, against roughly 1 GB for Compass.
   and refuse to overwrite a document that changed since it was loaded. Bulk update and
   delete show how many documents match first.
 - **Indexes**: keys, properties, size and usage; create, drop, hide and unhide.
+- **Shell**: write mongosh-style JavaScript (`db.users.find({ age: { $gt: 30 } }).sort({ name: 1 })`)
+  and run it, like Studio 3T's IntelliShell. Each statement's value gets its own result,
+  shown in the list, JSON or table view with paging. Runs on an embedded QuickJS engine:
+  no Node or mongosh needed. Covers reads, writes, cursors, the BSON types, `use` and
+  `show`. The first write of a run asks first; read-only connections refuse writes.
+  Ctrl+Enter runs the statement at the cursor, Ctrl+Shift+Enter the whole script.
+  Autocomplete for collections, methods, fields and the script's variables. Drafts,
+  history and favorites per collection; open and save `.js` files.
 - **Import and export**: JSON, JSON lines and CSV, streamed with progress and cancel.
 - **Settings**: dark, light or system theme, three text sizes, and whether Ctrl+K searches
   all saved connections or only open ones.
@@ -38,6 +46,8 @@ when idle, against roughly 1 GB for Compass.
 | ![Table view](docs/screenshots/table.png) | ![Edit dialog](docs/screenshots/edit-document.png) |
 | **Indexes** | **Light theme** |
 | ![Indexes](docs/screenshots/indexes.png) | ![Light theme](docs/screenshots/main-light.png) |
+| **Shell** | |
+| ![Shell](docs/screenshots/shell.png) | |
 
 ## Install
 
@@ -67,12 +77,14 @@ folder (`~/.local/state/nordpil/logs/` on Linux).
 
 ## Development
 
-The workspace has three crates:
+The workspace has four crates:
 
 - `crates/query`: parses mongosh shell syntax into BSON and back, highlighting and
   autocomplete. No UI or database code.
 - `crates/backend`: the database work on a background tokio runtime, saved connections,
   keyring access, import and export.
+- `crates/shell`: runs shell scripts on embedded QuickJS. A JavaScript prelude provides
+  the mongosh API; database calls go through a `Host` trait the backend implements.
 - `crates/app`: the egui app.
 
 Tasks use [just](https://github.com/casey/just):
