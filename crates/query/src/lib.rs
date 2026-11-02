@@ -8,6 +8,7 @@
 
 mod complete;
 mod eval;
+mod fields;
 mod format;
 mod highlight;
 pub mod lexer;
@@ -17,6 +18,7 @@ mod values;
 use bson::{Bson, Document};
 
 pub use complete::{FieldHint, Mode, Suggestion, complete, is_word_char};
+pub use fields::{FilterEdit, Segment, path_at, set_field};
 pub use format::{Style, format_document, format_value};
 pub use highlight::{Highlight, highlight};
 pub use parser::ParseError;

@@ -161,7 +161,7 @@ fn write_list<T>(
 }
 
 /// Bare when the key is a plain identifier (`name`, `$gt`), quoted otherwise.
-fn write_key(out: &mut String, key: &str) {
+pub(crate) fn write_key(out: &mut String, key: &str) {
     let mut chars = key.chars();
     let bare = chars.next().is_some_and(crate::lexer::is_ident_start)
         && chars.all(crate::lexer::is_ident_continue)
