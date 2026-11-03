@@ -1,0 +1,23 @@
+# Checks pull requests into main once they are ready for review; drafts are
+# skipped until then. The main ruleset requires this check, "CI / Check".
+# Release PRs are opened with GITHUB_TOKEN, which starts no workflows, so the
+# Release workflow sets that check on them itself after running it.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: CI
+    if: ${{ !github.event.pull_request.draft }}
+    uses: ./.github/workflows/check.yml
