@@ -1985,7 +1985,7 @@ impl NordpilApp {
     fn run_command(&mut self, ctx: &egui::Context, command: AppCommand) {
         let toggles_own_modal = matches!(
             (self.open_modal(), command),
-            (Some(Modal::GoTo), AppCommand::GoTo)
+            (Some(Modal::GoTo), AppCommand::GoTo) | (Some(Modal::Settings), AppCommand::Settings)
         );
         if self.open_modal().is_some() && !toggles_own_modal {
             return;
@@ -2002,10 +2002,25 @@ impl NordpilApp {
                     return;
                 };
                 let tab = &mut self.tabs[index];
-                tab.panel = Panel::Documents;
-                tab.editors
-                    .filter
-                    .focus_and_select_all(ctx, &tab.inputs.filter);
+                if tab.panel == Panel::Shell {
+                    tab.shell.editor.focus(ctx, &tab.shell.text);
+                } else {
+                    tab.panel = Panel::Documents;
+                    tab.editors
+                        .filter
+                        .focus_and_select_all(ctx, &tab.inputs.filter);
+                }
+            }
+            AppCommand::CloseTab => {
+                if let Some(index) = self.active_tab {
+                    self.close_tab(index);
+                }
+            }
+            AppCommand::Settings => {
+                self.settings_dialog = match self.settings_dialog {
+                    Some(_) => None,
+                    None => Some(SettingsDialog),
+                };
             }
         }
     }
@@ -2401,6 +2416,99 @@ mod tests {
             app.tabs[1].inputs.filter,
             format!("{{ _id: ObjectId('{}') }}", customer.to_hex())
         );
+    }
+
+    /// `lookup_harness` with a second tab, on "customers", active.
+    fn two_tabs_harness() -> Harness<'static, NordpilApp> {
+        let mut harness = lookup_harness(&["customers", "orders"], bson::doc! { "_id": 1 });
+        let target = Selection {
+            collection: "customers".to_owned(),
+            ..harness.state().tabs[0].target.clone()
+        };
+        harness.state_mut().open_tab(target);
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn ctrl_l_focuses_the_shell_script_where_its_cursor_was() {
+        let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
+        let tab = &mut harness.state_mut().tabs[0];
+        tab.panel = Panel::Shell;
+        tab.shell.load_draft(None, "orders");
+        harness.run();
+        let ctx = harness.ctx.clone();
+        let editor = harness.state().tabs[0].shell.editor.id();
+        harness.state().tabs[0].shell.editor.focus_at(&ctx, 3);
+        harness.run();
+        ctx.memory_mut(|memory| memory.surrender_focus(editor));
+        harness.run();
+        assert!(!ctx.memory(|memory| memory.has_focus(editor)));
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::L);
+        harness.run();
+
+        let tab = &harness.state().tabs[0];
+        assert_eq!(tab.panel, Panel::Shell);
+        assert!(ctx.memory(|memory| memory.has_focus(editor)));
+        assert_eq!(
+            tab.shell.editor.selection(&ctx, &tab.shell.text),
+            Some(3..3)
+        );
+    }
+
+    #[test]
+    fn ctrl_l_off_the_shell_selects_the_whole_filter() {
+        let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
+        let tab = &mut harness.state_mut().tabs[0];
+        tab.panel = Panel::Indexes;
+        tab.inputs.filter = "{ total: 5 }".to_owned();
+        harness.run();
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::L);
+        harness.run();
+
+        let ctx = harness.ctx.clone();
+        let tab = &harness.state().tabs[0];
+        assert_eq!(tab.panel, Panel::Documents);
+        assert!(ctx.memory(|memory| memory.has_focus(tab.editors.filter.id())));
+        assert_eq!(
+            tab.editors.filter.selection(&ctx, &tab.inputs.filter),
+            Some(0..tab.inputs.filter.len())
+        );
+    }
+
+    #[test]
+    fn ctrl_w_closes_the_active_tab_and_then_does_nothing() {
+        let mut harness = two_tabs_harness();
+        assert_eq!(harness.state().active_tab, Some(1));
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::W);
+        harness.run();
+        let app = harness.state();
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].target.collection, "orders");
+        assert_eq!(app.active_tab, Some(0));
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::W);
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::W);
+        harness.run();
+        assert!(harness.state().tabs.is_empty());
+        assert_eq!(harness.state().active_tab, None);
+    }
+
+    #[test]
+    fn ctrl_comma_opens_and_closes_settings() {
+        let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Comma);
+        harness.run();
+        assert!(harness.state().settings_dialog.is_some());
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Comma);
+        harness.run();
+        assert!(harness.state().settings_dialog.is_none());
     }
 
     #[test]

@@ -139,6 +139,17 @@ impl CodeEditor {
         state.store(ctx, self.id);
     }
 
+    /// Focuses the editor where its cursor was; the first time, at the end.
+    pub fn focus(&self, ctx: &egui::Context, text: &str) {
+        let has_cursor = TextEditState::load(ctx, self.id)
+            .is_some_and(|state| state.cursor.char_range().is_some());
+        if has_cursor {
+            ctx.memory_mut(|memory| memory.request_focus(self.id));
+        } else {
+            self.focus_at(ctx, text.chars().count());
+        }
+    }
+
     /// The selection as byte offsets into `text`; empty at the cursor.
     /// `None` until the editor has been shown.
     pub fn selection(&self, ctx: &egui::Context, text: &str) -> Option<Range<usize>> {
