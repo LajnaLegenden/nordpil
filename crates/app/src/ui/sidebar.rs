@@ -153,7 +153,6 @@ fn tree_row(ui: &mut egui::Ui, row: Row<'_>) -> Response {
         x += 24.0;
     }
 
-    let trailing_width = paint_trailing(ui, palette, &row.trailing, rect);
     let text_color = if row.selected {
         palette.accent_text
     } else if row.strong || row.depth == 1 {
@@ -166,6 +165,12 @@ fn tree_row(ui: &mut egui::Ui, row: Row<'_>) -> Response {
     } else {
         FontId::proportional(14.0)
     };
+    // The label keeps its width where it can; a long host gets cut instead,
+    // down to 40% of the room.
+    let room = rect.right() - 8.0 - x;
+    let label_width = kit::text_width(ui, row.label, font.clone());
+    let trailing_room = (room - label_width - 12.0).max(room * 0.4);
+    let trailing_width = paint_trailing(ui, palette, &row.trailing, rect, trailing_room);
     let max_width = (rect.right() - trailing_width - x - 8.0).max(10.0);
     let mut job = egui::text::LayoutJob::simple_singleline(row.label.to_owned(), font, text_color);
     job.wrap.max_width = max_width;
@@ -180,16 +185,29 @@ fn tree_row(ui: &mut egui::Ui, row: Row<'_>) -> Response {
     response
 }
 
-/// Paints the trailing text and returns its width.
-fn paint_trailing(ui: &egui::Ui, palette: &Palette, trailing: &Trailing, rect: Rect) -> f32 {
+/// Paints the trailing text, a host cut to `room`, and returns its width.
+fn paint_trailing(
+    ui: &egui::Ui,
+    palette: &Palette,
+    trailing: &Trailing,
+    rect: Rect,
+    room: f32,
+) -> f32 {
     let painter = ui.painter();
     let right = rect.right() - 8.0;
     let y = rect.center().y;
     match trailing {
         Trailing::None => 0.0,
         Trailing::Text(text) => {
-            let galley =
-                painter.layout_no_wrap(text.clone(), FontId::monospace(11.5), palette.subtle);
+            let mut job = egui::text::LayoutJob::simple_singleline(
+                text.clone(),
+                FontId::monospace(11.5),
+                palette.subtle,
+            );
+            job.wrap.max_width = room.max(10.0);
+            job.wrap.max_rows = 1;
+            job.wrap.break_anywhere = true;
+            let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
             let width = galley.size().x;
             painter.galley(
                 pos2(right - width, y - galley.size().y / 2.0),
