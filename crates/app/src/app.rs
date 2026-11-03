@@ -27,6 +27,7 @@ use crate::ui::indexes::{self, IndexAction};
 use crate::ui::mappings_dialog::{self, MappingsDialog, Source};
 use crate::ui::settings_dialog::{self, SettingsDialog};
 use crate::ui::shell::ShellAction;
+use crate::ui::shortcuts_dialog;
 use crate::ui::transfer_dialog::{self, TransferDialog};
 use crate::ui::{Action, chrome, documents, sidebar};
 use crate::update::{self, Updater};
@@ -51,6 +52,7 @@ fn script_action(panel: Panel, command: AppCommand) -> Option<ShellAction> {
 enum Modal {
     Settings,
     GoTo,
+    Shortcuts,
     Other,
 }
 
@@ -125,6 +127,8 @@ pub struct NordpilApp {
     notifications: Vec<BackendError>,
     settings: Settings,
     settings_dialog: Option<SettingsDialog>,
+    /// The F1 sheet of keyboard shortcuts.
+    shortcuts_sheet: bool,
     /// Fields the user linked to collections, per database.
     mappings: Vec<DatabaseMappings>,
     mappings_dialog: Option<MappingsDialog>,
@@ -173,6 +177,7 @@ impl NordpilApp {
             notifications: Vec::new(),
             settings,
             settings_dialog: None,
+            shortcuts_sheet: false,
             mappings: Vec::new(),
             mappings_dialog: None,
             goto: None,
@@ -2124,6 +2129,8 @@ impl NordpilApp {
             Some(Modal::Settings)
         } else if self.goto.is_some() {
             Some(Modal::GoTo)
+        } else if self.shortcuts_sheet {
+            Some(Modal::Shortcuts)
         } else {
             None
         }
@@ -2132,7 +2139,9 @@ impl NordpilApp {
     fn run_command(&mut self, ctx: &egui::Context, command: AppCommand) {
         let toggles_own_modal = matches!(
             (self.open_modal(), command),
-            (Some(Modal::GoTo), AppCommand::GoTo) | (Some(Modal::Settings), AppCommand::Settings)
+            (Some(Modal::GoTo), AppCommand::GoTo)
+                | (Some(Modal::Settings), AppCommand::Settings)
+                | (Some(Modal::Shortcuts), AppCommand::Shortcuts)
         );
         if self.open_modal().is_some() && !toggles_own_modal {
             return;
@@ -2197,6 +2206,7 @@ impl NordpilApp {
                     None => Some(SettingsDialog),
                 };
             }
+            AppCommand::Shortcuts => self.shortcuts_sheet = !self.shortcuts_sheet,
             AppCommand::SaveScript | AppCommand::OpenScript | AppCommand::StopScript => {
                 let Some(index) = self.active_tab else {
                     return;
@@ -2334,6 +2344,9 @@ impl NordpilApp {
             self.dialog = None;
         }
         self.show_settings(&ctx);
+        if self.shortcuts_sheet {
+            self.shortcuts_sheet = shortcuts_dialog::show(&ctx);
+        }
         self.show_mappings_dialog(&ctx);
         self.show_goto(&ctx);
         self.show_write_confirmation(&ctx);
@@ -2925,6 +2938,57 @@ mod tests {
     }
 
     #[test]
+    fn f1_and_ctrl_slash_toggle_the_shortcuts_sheet() {
+        let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
+
+        harness.key_press(Key::F1);
+        harness.run();
+        assert!(harness.state().shortcuts_sheet);
+        assert!(harness.query_by_label("Reopen closed tab").is_some());
+        harness.key_press(Key::F1);
+        harness.run();
+        assert!(!harness.state().shortcuts_sheet);
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Slash);
+        harness.run();
+        assert!(harness.state().shortcuts_sheet);
+        harness.key_press(Key::Escape);
+        harness.run();
+        assert!(!harness.state().shortcuts_sheet);
+    }
+
+    #[test]
+    fn shortcuts_wait_while_a_modal_is_open() {
+        let mut harness = two_tabs_harness();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Comma);
+        harness.run();
+        assert!(harness.state().settings_dialog.is_some());
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::W);
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::K);
+        harness.key_press(Key::F1);
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Tab);
+        harness.run();
+        let app = harness.state();
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, Some(1));
+        assert!(app.goto.is_none());
+        assert!(!app.shortcuts_sheet);
+
+        // The key that opened it still closes it.
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Comma);
+        harness.run();
+        assert!(harness.state().settings_dialog.is_none());
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::K);
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Comma);
+        harness.run();
+        assert!(harness.state().goto.is_some());
+        assert!(harness.state().settings_dialog.is_none());
+    }
+
+    #[test]
     fn new_tabs_open_on_the_last_used_panel() {
         let mut harness = lookup_harness(&["customers", "orders"], bson::doc! { "_id": 1 });
         harness.state_mut().tabs[0].panel = Panel::Shell;
@@ -3346,6 +3410,12 @@ mod screenshots {
         harness.state_mut().settings_dialog = Some(SettingsDialog);
         harness.run();
         save(&mut harness, "settings");
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+
+        harness.key_press(egui::Key::F1);
+        harness.run();
+        save(&mut harness, "shortcuts");
         harness.key_press(egui::Key::Escape);
         harness.run();
 
