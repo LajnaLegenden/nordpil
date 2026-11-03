@@ -1,4 +1,6 @@
-# Starts a release: run it from the Actions tab with the new version.
+# Starts a release: run it from the Actions tab and pick the bump. The new
+# version comes from scripts/next-version.sh and the version in Cargo.toml;
+# a pre-release tag such as beta or rc makes it a pre-release, e.g. 0.3.0-beta.1.
 #
 # Checks and every build run on the bumped version first. Only when all of
 # them pass does it push the bump to a release/v<version> branch and open a
@@ -13,14 +15,21 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: Version to release, e.g. 0.2.0 or 0.2.0-beta.1
+      bump:
+        description: Bump (prerelease continues the current pre-release, e.g. beta.1 -> beta.2)
         required: true
+        type: choice
+        options: [patch, minor, major, prerelease]
+      tag:
+        description: Pre-release tag, e.g. beta or rc (empty for a full release)
         type: string
+        default: ""
       dry_run:
         description: Dry run (build the files only; no pull request)
         type: boolean
         default: true
+
+run-name: Release ${{ inputs.bump }}${{ inputs.tag != '' && format(' ({0})', inputs.tag) || '' }}${{ inputs.dry_run && ', dry run' || '' }}
 
 permissions:
   contents: read
@@ -29,16 +38,24 @@ concurrency:
   group: release
   cancel-in-progress: false
 
-env:
-  VERSION: ${{ inputs.version }}
-
 jobs:
   guard:
     name: Can release
     runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+      - id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          version="$(scripts/next-version.sh "$BUMP" "$TAG")"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "Releasing **v$version**" >>"$GITHUB_STEP_SUMMARY"
       - env:
+          VERSION: ${{ steps.version.outputs.version }}
           DRY_RUN: ${{ inputs.dry_run }}
           HAS_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY != '' }}
         run: |
@@ -64,20 +81,22 @@ jobs:
     needs: guard
     uses: ./.github/workflows/check.yml
     with:
-      version: ${{ inputs.version }}
+      version: ${{ needs.guard.outputs.version }}
 
   build:
-    needs: check
+    needs: [guard, check]
     uses: ./.github/workflows/build.yml
     with:
-      version: ${{ inputs.version }}
+      version: ${{ needs.guard.outputs.version }}
       bump: true
 
   propose:
     name: Open the release PR
-    needs: [check, build]
+    needs: [guard, check, build]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
     permissions:
       contents: write
       pull-requests: write
@@ -85,7 +104,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: scripts/bump-version.sh "$VERSION"
-      - name: Push the bump to release/v${{ inputs.version }}
+      - name: Push the bump to release/v${{ needs.guard.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
