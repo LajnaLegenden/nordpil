@@ -1,8 +1,8 @@
-//! Settings: theme, text size, what Ctrl+K searches and id lookups. Changes
+//! Settings: theme, text size, what Ctrl+K searches, id lookups and updates. Changes
 //! apply at once and are saved to `config.toml`.
 
 use eframe::egui::{self, CornerRadius, Frame, Margin, RichText, Stroke};
-use nordpil_backend::settings::{GotoScope, Settings, TextSize, Theme};
+use nordpil_backend::settings::{GotoScope, Settings, TextSize, Theme, Updates};
 
 use crate::theme;
 use crate::widgets::kit::{self, Tone};
@@ -104,6 +104,19 @@ impl SettingsDialog {
                         );
                     });
                 });
+                ui.end_row();
+
+                described(ui, "Updates", "From GitHub releases");
+                kit::segmented(
+                    ui,
+                    &mut settings.updates,
+                    &[
+                        (Updates::Automatic, None, "Install"),
+                        (Updates::Notify, None, "Notify"),
+                        (Updates::Off, None, "Off"),
+                    ],
+                    38.0,
+                );
                 ui.end_row();
             });
             kit::dialog_footer(ui, |ui| {

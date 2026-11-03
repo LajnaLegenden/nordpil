@@ -10,6 +10,7 @@ rust-version.workspace = true
 bson = "3.1"
 crossbeam-channel = "0.5.17"
 directories = "6"
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 eframe = { version = "0.37", default-features = false, features = [
     "accesskit",
     "clipboard",
@@ -25,9 +26,14 @@ nordpil-backend.workspace = true
 nordpil-query.workspace = true
 nordpil-shell.workspace = true
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 uuid = "1"
 
 [package.metadata.deb]

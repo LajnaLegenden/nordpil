@@ -60,6 +60,11 @@ Download a build from [Releases](https://github.com/LajnaLegenden/nordpil/releas
   AppImage (`chmod +x`, then run it), or the `.tar.gz` with `./install.sh`
   (`./install.sh --user` installs into `~/.local` without sudo).
 
+Release builds update themselves: the AppImage, a `.tar.gz` install in a folder you can
+write (like `~/.local`) and nordpil.app download and install a new release, then offer a
+restart. A `.deb` or a system-wide install shows a link to the release instead. Choose
+Install, Notify or Off under Settings → Updates.
+
 Or build from source with Rust 1.97 or newer.
 
 On Linux, install it system-wide with a launcher entry and icon. This builds a release as
@@ -99,9 +104,16 @@ The workspace has four crates:
 Releases come from the **Release** workflow: run it from the Actions tab with the new
 version. It checks and builds everything for that version first; only if all of it passes
 does it commit the version bump to `main`, tag it and publish the release with the macOS
-and Linux files. Tick "dry run" to only build the files, kept as workflow artifacts.
-The packaging lives in `scripts/` (`package-linux.sh`, `package-macos.sh`,
-`bump-version.sh`) and runs locally too.
+and Linux files. Tick "dry run" to only build the files, kept as one workflow artifact per
+file. The packaging lives in `scripts/` (`package-linux.sh`, `package-macos.sh`,
+`bump-version.sh`, `update-manifest.sh`) and runs locally too.
+
+Each release carries `nordpil-update.json`, the SHA-256 of every file, signed with the
+Ed25519 key in the `UPDATE_SIGNING_KEY` secret. The app installs only files listed in a
+manifest that verifies against `crates/app/assets/update-key.pem`, for the version it
+names. To replace the key, make a new pair with `openssl genpkey -algorithm ed25519`,
+commit its public half (`openssl pkey -pubout`) there and update the secret; apps from
+before the change stop updating until they're reinstalled.
 
 Tasks use [just](https://github.com/casey/just):
 
