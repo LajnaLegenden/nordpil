@@ -201,6 +201,7 @@ impl NordpilApp {
         self.load_references(&target);
         self.next_tab_id += 1;
         let mut tab = CollectionTab::new(self.next_tab_id, target);
+        tab.panel = self.settings.last_panel;
         tab.inputs.filter = filter;
         self.backend.send(Command::LoadQueries(tab.namespace()));
         self.backend.send(Command::LoadScripts(tab.namespace()));
@@ -2050,6 +2051,19 @@ impl NordpilApp {
         for action in actions {
             self.apply(action);
         }
+        self.remember_panel();
+    }
+
+    /// Keeps the active tab's panel in the settings, for new tabs to open on.
+    fn remember_panel(&mut self) {
+        let Some(index) = self.active_tab else {
+            return;
+        };
+        let panel = self.tabs[index].panel;
+        if panel != self.settings.last_panel {
+            self.settings.last_panel = panel;
+            self.backend.send(Command::SaveSettings(self.settings));
+        }
     }
 }
 
@@ -2295,6 +2309,26 @@ mod tests {
             app.tabs[1].inputs.filter,
             format!("{{ _id: ObjectId('{}') }}", customer.to_hex())
         );
+    }
+
+    #[test]
+    fn new_tabs_open_on_the_last_used_panel() {
+        let mut harness = lookup_harness(&["customers", "orders"], bson::doc! { "_id": 1 });
+        harness.state_mut().tabs[0].panel = Panel::Shell;
+        harness.run();
+        assert_eq!(harness.state().settings.last_panel, Panel::Shell);
+
+        let target = Selection {
+            collection: "customers".to_owned(),
+            ..harness.state().tabs[0].target.clone()
+        };
+        harness.state_mut().open_tab(target);
+        harness.run();
+
+        let app = harness.state();
+        assert_eq!(app.active_tab, Some(1));
+        assert_eq!(app.tabs[1].panel, Panel::Shell);
+        assert_eq!(app.tabs[0].panel, Panel::Shell);
     }
 
     #[test]
