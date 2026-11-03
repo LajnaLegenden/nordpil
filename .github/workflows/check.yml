@@ -45,6 +45,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       # The tests marked "needs Docker": MongoDB 8.0 through testcontainers.
+      # Pulled once first: tests running in parallel would each pull it, and
+      # those pulls break off with "bytes remaining on stream".
+      - run: docker pull mongo:8.0
       - run: cargo test --workspace --locked -- --ignored
 
   # The macOS menu bar only compiles there, so the Linux job can't see it.
