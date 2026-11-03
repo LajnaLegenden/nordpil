@@ -3,7 +3,11 @@
 # Run it from the Actions tab with the new version. Checks and every build
 # run on the bumped version first; only when all of them pass does the
 # release job commit the bump to main, tag it and publish the release. With
-# "dry run" checked the files are only kept as workflow artifacts.
+# "dry run" checked the files are only kept as workflow artifacts, one per
+# file and named after it, e.g. nordpil-0.2.0-linux-x86_64.deb.
+#
+# The release also carries nordpil-update.json, signed with the
+# UPDATE_SIGNING_KEY secret, which the app's updater checks before installing.
 name: Release
 
 on:
@@ -38,6 +42,7 @@ jobs:
       - name: Check the run can release
         env:
           DRY_RUN: ${{ inputs.dry_run }}
+          HAS_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY != '' }}
         run: |
           if [ "$DRY_RUN" != true ] && [ "$GITHUB_REF" != refs/heads/main ]; then
             echo "::error::Releases are made from main, not $GITHUB_REF_NAME. Run it on main or as a dry run."
@@ -45,6 +50,10 @@ jobs:
           fi
           if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
             echo "::error::v$VERSION is already tagged."
+            exit 1
+          fi
+          if [ "$DRY_RUN" != true ] && [ "$HAS_SIGNING_KEY" != true ]; then
+            echo "::error::The UPDATE_SIGNING_KEY secret is missing, so installed apps couldn't update to this release."
             exit 1
           fi
       - name: Set up Rust
@@ -101,10 +110,23 @@ jobs:
       - run: scripts/bump-version.sh "$VERSION"
       - run: cargo build --release --locked -p nordpil
       - run: scripts/package-linux.sh "$VERSION" dist
+      # One artifact per format, uploaded as the file itself rather than a zip.
       - uses: actions/upload-artifact@v7
         with:
-          name: linux-${{ matrix.arch }}
-          path: dist/*
+          path: dist/nordpil-${{ inputs.version }}-linux-${{ matrix.arch }}.AppImage
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/nordpil-${{ inputs.version }}-linux-${{ matrix.arch }}.deb
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/nordpil-${{ inputs.version }}-linux-${{ matrix.arch }}.tar.gz
+          archive: false
           if-no-files-found: error
           retention-days: 14
 
@@ -143,8 +165,15 @@ jobs:
       - run: scripts/package-macos.sh "$VERSION" ${{ matrix.target }} dist
       - uses: actions/upload-artifact@v7
         with:
-          name: macos-${{ matrix.arch }}
-          path: dist/*
+          path: dist/nordpil-${{ inputs.version }}-macos-${{ matrix.arch }}.dmg
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      # What the updater installs from.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/nordpil-${{ inputs.version }}-macos-${{ matrix.arch }}.app.tar.gz
+          archive: false
           if-no-files-found: error
           retention-days: 14
 
@@ -169,7 +198,12 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: dist
+          pattern: nordpil-*
           merge-multiple: true
+      - name: Sign the update manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: scripts/update-manifest.sh "$VERSION" dist
       - name: Commit, tag and push
         run: |
           git config user.name "github-actions[bot]"

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Packages a release build for macOS into <out-dir> as a .dmg holding
-# nordpil.app, ad-hoc signed (not notarized). Run on macOS after
+# nordpil.app, ad-hoc signed (not notarized), and as an .app.tar.gz that the
+# app's updater unpacks in place of the old bundle. Run on macOS after
 # `cargo build --release --locked -p nordpil --target <target>`.
 #
 #   scripts/package-macos.sh 0.2.0 aarch64-apple-darwin dist
@@ -50,6 +51,8 @@ iconutil -c icns "$iconset" -o "$app/Contents/Resources/nordpil.icns"
 
 # Apple Silicon only runs signed code; an ad-hoc signature is enough for that.
 codesign --force --deep --sign - "$app"
+# Without COPYFILE_DISABLE, tar adds ._ files that would break the signature.
+COPYFILE_DISABLE=1 tar -C "$work/dmg" -czf "$out/$name.app.tar.gz" nordpil.app
 ln -s /Applications "$work/dmg/Applications"
 hdiutil create -volname "nordpil $version" -srcfolder "$work/dmg" -ov -format UDZO \
     "$out/$name.dmg" >/dev/null
