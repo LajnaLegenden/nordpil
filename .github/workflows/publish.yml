@@ -1,0 +1,108 @@
+# Publishes a release once its version bump reaches main, normally by
+# rebase-merging the pull request the Release workflow opened.
+#
+# Runs when Cargo.toml changes on main. If its version has no tag yet, it
+# checks and builds again from main, tags the commit and publishes the GitHub
+# Release with nordpil-update.json, signed with the UPDATE_SIGNING_KEY secret,
+# which the app's updater checks before installing. If a job fails, re-run
+# the failed jobs.
+name: Publish
+
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        env:
+          HAS_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY != '' }}
+        run: |
+          version="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          if [ -z "$version" ]; then
+            echo "::error::No version found under [workspace.package] in Cargo.toml."
+            exit 1
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "v$version is already released; nothing to publish."
+            echo "release=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$HAS_SIGNING_KEY" != true ]; then
+            echo "::error::The UPDATE_SIGNING_KEY secret is missing, so installed apps couldn't update to this release."
+            exit 1
+          fi
+          echo "release=true" >>"$GITHUB_OUTPUT"
+
+  check:
+    needs: version
+    if: ${{ needs.version.outputs.release == 'true' }}
+    uses: ./.github/workflows/check.yml
+
+  build:
+    needs: [version, check]
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      bump: false
+
+  publish:
+    name: Publish
+    needs: [version, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: nordpil-*
+          merge-multiple: true
+      - name: Sign the update manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: scripts/update-manifest.sh "$VERSION" dist
+      # A re-run after a failed release finds the tag already pushed.
+      - name: Tag the commit
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "nordpil $VERSION"
+          git push origin "refs/tags/v$VERSION"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="$(sed "s/@VERSION@/$VERSION/g" .github/release-notes.md)"
+          prerelease=()
+          if [[ $VERSION == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "v$VERSION" dist/* \
+            --title "nordpil $VERSION" \
+            --verify-tag \
+            --generate-notes \
+            --notes "$notes" \
+            "${prerelease[@]}"
