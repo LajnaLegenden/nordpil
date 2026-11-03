@@ -5,6 +5,8 @@ mod connections;
 mod icons;
 mod logging;
 mod lookup;
+#[cfg(target_os = "macos")]
+mod menu;
 mod query_language;
 mod shell;
 mod shortcuts;
@@ -39,6 +41,8 @@ fn main() -> eframe::Result {
                 .ok_or_else(|| std::io::Error::other("Could not find a home directory."))?;
             let backend = Backend::new(ConnectionStore::new(store_path), Keyring);
             let mut app = app::NordpilApp::new(&cc.egui_ctx, backend)?;
+            #[cfg(target_os = "macos")]
+            app.install_menu(&cc.egui_ctx);
             // Development builds aren't replaced by releases.
             if !cfg!(debug_assertions) {
                 app.enable_updates(&cc.egui_ctx);

@@ -43,8 +43,8 @@ when idle, against roughly 1 GB for Compass.
   all saved connections or only open ones.
 - **Keyboard**: F1 lists every shortcut. Ctrl+W closes a tab and Ctrl+Shift+T brings it
   back, Ctrl+Tab and Ctrl+1–9 switch tabs, Alt+1/2/3 switch between Documents, Indexes
-  and Shell, Ctrl+R reruns the query and Ctrl+, opens the settings. Tabs carry their
-  connection's color.
+  and Shell, Ctrl+R reruns the query and Ctrl+, opens the settings. On macOS the keys use
+  ⌘ and the same commands sit in the menu bar. Tabs carry their connection's color.
 
 | Go to collection (Ctrl+K) | Values from the results |
 | --- | --- |
