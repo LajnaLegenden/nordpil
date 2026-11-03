@@ -33,6 +33,19 @@ use crate::update::{self, Updater};
 use crate::widgets::kit::{self, Tone};
 use crate::{icons, theme};
 
+/// What a script key does on `panel`: nothing off the Shell panel.
+fn script_action(panel: Panel, command: AppCommand) -> Option<ShellAction> {
+    if panel != Panel::Shell {
+        return None;
+    }
+    match command {
+        AppCommand::SaveScript => Some(ShellAction::File(FileJob::Save)),
+        AppCommand::OpenScript => Some(ShellAction::File(FileJob::Open)),
+        AppCommand::StopScript => Some(ShellAction::Stop),
+        _ => None,
+    }
+}
+
 /// A modal that holds back app-wide keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Modal {
@@ -1950,9 +1963,28 @@ impl NordpilApp {
 
     /// App-wide keys; see [`shortcuts::BINDINGS`].
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        for command in ctx.input_mut(shortcuts::pressed) {
+        let mut commands = ctx.input_mut(shortcuts::pressed);
+        if self.escape_stops_script(ctx)
+            && ctx.input_mut(|input| input.consume_shortcut(&shortcuts::ESCAPE))
+        {
+            commands.push(AppCommand::StopScript);
+        }
+        for command in commands {
             self.run_command(ctx, command);
         }
+    }
+
+    /// Escape stops the active tab's script unless a popup or dialog would
+    /// close on it instead.
+    fn escape_stops_script(&self, ctx: &egui::Context) -> bool {
+        let Some(tab) = self.active_tab.map(|index| &self.tabs[index]) else {
+            return false;
+        };
+        tab.panel == Panel::Shell
+            && tab.shell.running.is_some()
+            && !tab.shell.editor.popup_open()
+            && !egui::Popup::is_any_open(ctx)
+            && self.open_modal().is_none()
     }
 
     /// Which modal is open. App-wide keys wait while one is, except the key
@@ -2021,6 +2053,14 @@ impl NordpilApp {
                     Some(_) => None,
                     None => Some(SettingsDialog),
                 };
+            }
+            AppCommand::SaveScript | AppCommand::OpenScript | AppCommand::StopScript => {
+                let Some(index) = self.active_tab else {
+                    return;
+                };
+                if let Some(action) = script_action(self.tabs[index].panel, command) {
+                    self.shell_action(ctx, index, action);
+                }
             }
         }
     }
@@ -2509,6 +2549,91 @@ mod tests {
         harness.key_press_modifiers(Modifiers::COMMAND, Key::Comma);
         harness.run();
         assert!(harness.state().settings_dialog.is_none());
+    }
+
+    /// Saves and connects to the MongoDB on `port`, then opens a Shell tab.
+    fn connected_shell_harness(port: u16) -> Harness<'static, NordpilApp> {
+        let mut harness = harness();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "New connection")
+            .click();
+        harness.run();
+        let uri = format!("mongodb://127.0.0.1:{port}/?directConnection=true");
+        type_into(&mut harness, "Connection string", &uri);
+        harness
+            .get_by_role_and_label(Role::Button, "Save and connect")
+            .click();
+        run_until(&mut harness, |app| {
+            matches!(
+                app.connections.first().map(|e| &e.state),
+                Some(ConnectionState::Connected(_))
+            )
+        });
+        let target = Selection {
+            connection: harness.state().connections[0].saved.id,
+            database: "test".to_owned(),
+            collection: "items".to_owned(),
+        };
+        harness.state_mut().open_tab(target);
+        harness.state_mut().tabs[0].panel = Panel::Shell;
+        harness.run();
+        harness
+    }
+
+    #[test]
+    #[ignore = "needs Docker"]
+    fn ctrl_period_and_escape_stop_a_running_script() {
+        let mongo = Mongo::default().with_tag("8.0").start().unwrap();
+        let port = mongo.get_host_port_ipv4(27017).unwrap();
+        let mut harness = connected_shell_harness(port);
+        let stopped = |app: &NordpilApp| {
+            app.tabs[0].shell.running.is_none()
+                && matches!(app.tabs[0].shell.ending, Some(Ending::Stopped))
+        };
+
+        harness
+            .state_mut()
+            .run_script(0, "while (true) {}".to_owned());
+        // The spinner keeps repainting while it runs.
+        harness.step();
+        assert!(harness.state().tabs[0].shell.running.is_some());
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Period);
+        run_until(&mut harness, stopped);
+
+        harness
+            .state_mut()
+            .run_script(0, "while (true) { 1 }".to_owned());
+        // The spinner keeps repainting while it runs.
+        harness.step();
+        assert!(harness.state().tabs[0].shell.running.is_some());
+        harness.key_press(Key::Escape);
+        run_until(&mut harness, stopped);
+    }
+
+    #[test]
+    fn script_keys_only_work_on_the_shell_panel() {
+        // Pressing them on the Shell panel would open a real file dialog.
+        let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::O);
+        harness.run();
+        assert!(harness.state().tabs[0].shell.picker.is_none());
+
+        let on = |panel, command| script_action(panel, command);
+        assert!(matches!(
+            on(Panel::Shell, AppCommand::OpenScript),
+            Some(ShellAction::File(FileJob::Open))
+        ));
+        assert!(matches!(
+            on(Panel::Shell, AppCommand::SaveScript),
+            Some(ShellAction::File(FileJob::Save))
+        ));
+        assert!(matches!(
+            on(Panel::Shell, AppCommand::StopScript),
+            Some(ShellAction::Stop)
+        ));
+        assert!(on(Panel::Documents, AppCommand::SaveScript).is_none());
+        assert!(on(Panel::Indexes, AppCommand::StopScript).is_none());
     }
 
     #[test]

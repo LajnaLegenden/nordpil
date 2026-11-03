@@ -4,9 +4,7 @@
 use std::cell::RefCell;
 
 use bson::Document;
-use eframe::egui::{
-    self, Align, Frame, Key, Layout, Margin, Modifiers, RichText, ScrollArea, TextEdit,
-};
+use eframe::egui::{self, Align, Frame, Layout, Margin, RichText, ScrollArea, TextEdit};
 use nordpil_backend::settings::{ShellLayout, ShellOrientation};
 use nordpil_shell::QueryKind;
 use uuid::Uuid;
@@ -101,7 +99,12 @@ fn toolbar(
     let shell = &mut tab.shell;
     ui.horizontal(|ui| {
         if shell.running.is_some() {
-            if kit::button(ui, Tone::Secondary, Some(icons::SQUARE), "Stop", height).clicked() {
+            let stop = kit::button(ui, Tone::Secondary, Some(icons::SQUARE), "Stop", height)
+                .on_hover_text(format!(
+                    "Stop the script ({})",
+                    shortcuts::text(ui.ctx(), &shortcuts::STOP_SCRIPT)
+                ));
+            if stop.clicked() {
                 action = Some(ShellAction::Stop);
             }
             ui.spinner();
@@ -255,12 +258,14 @@ fn editor(
     let shell = &mut tab.shell;
     let mut action = None;
     let focused = ui.memory(|memory| memory.has_focus(shell.editor.id()));
+    // Before the editor, so neither a new line nor a completion comes of
+    // it, also while a run is still going.
     if focused
+        && ui.input_mut(|input| input.consume_shortcut(&shortcuts::RUN_SCRIPT))
         && shell.running.is_none()
-        && ui
-            .input_mut(|input| input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Enter))
     {
         action = Some(ShellAction::Run(shell.text.clone()));
+        shell.editor.dismiss_popup(ui);
     }
     let language = ShellLanguage {
         collections,
@@ -606,6 +611,7 @@ mod tests {
     use super::*;
     use crate::connections::Selection;
     use crate::shell::page_of;
+    use eframe::egui::{Key, Modifiers};
 
     struct State {
         tab: CollectionTab,
@@ -684,6 +690,41 @@ mod tests {
         harness.get_by_label("Run").click();
         harness.run();
         assert_eq!(harness.state().ran.as_deref(), Some("db.users.find({})"));
+    }
+
+    #[test]
+    fn shift_enter_runs_the_whole_script_without_a_new_line() {
+        let mut harness = shell_harness();
+        let script = "db.users.find({})\ndb.users.countDocuments()";
+        harness.state_mut().tab.shell.text = script.to_owned();
+        harness.run();
+        harness.get_by_label("Script").focus();
+        harness.run();
+
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::Enter);
+        harness.run();
+
+        assert_eq!(harness.state().ran.as_deref(), Some(script));
+        assert_eq!(harness.state().tab.shell.text, script);
+    }
+
+    #[test]
+    fn shift_enter_runs_and_closes_an_open_completion() {
+        let mut harness = shell_harness();
+        harness.state_mut().tab.shell.text = String::new();
+        harness.run();
+        harness.get_by_label("Script").focus();
+        harness.run();
+        harness.get_by_label("Script").type_text("db.users.fin");
+        harness.run();
+        assert!(harness.state().tab.shell.editor.popup_open());
+
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::Enter);
+        harness.run();
+
+        assert_eq!(harness.state().ran.as_deref(), Some("db.users.fin"));
+        assert_eq!(harness.state().tab.shell.text, "db.users.fin");
+        assert!(!harness.state().tab.shell.editor.popup_open());
     }
 
     #[test]

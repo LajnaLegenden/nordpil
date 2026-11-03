@@ -12,6 +12,9 @@ pub enum AppCommand {
     FocusEditor,
     CloseTab,
     Settings,
+    SaveScript,
+    OpenScript,
+    StopScript,
 }
 
 pub struct Binding {
@@ -32,8 +35,12 @@ pub const SETTINGS: KeyboardShortcut = command(Key::Comma);
 pub const SAVE_DOCUMENT: KeyboardShortcut = command(Key::Enter);
 /// In the shell editor; handled there.
 pub const RUN_STATEMENT: KeyboardShortcut = command(Key::Enter);
-pub const RUN_SCRIPT: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Enter);
+pub const RUN_SCRIPT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter);
+/// Also stops a script, when no popup or dialog wants it; handled in the app.
+pub const ESCAPE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Escape);
+pub const SAVE_SCRIPT: KeyboardShortcut = command(Key::S);
+pub const OPEN_SCRIPT: KeyboardShortcut = command(Key::O);
+pub const STOP_SCRIPT: KeyboardShortcut = command(Key::Period);
 
 /// More specific keys come before the ones they contain: Ctrl+Shift+Tab
 /// before Ctrl+Tab, since a match ignores extra Shift.
@@ -53,6 +60,18 @@ pub const BINDINGS: &[Binding] = &[
     Binding {
         command: AppCommand::Settings,
         keys: &[SETTINGS],
+    },
+    Binding {
+        command: AppCommand::SaveScript,
+        keys: &[SAVE_SCRIPT],
+    },
+    Binding {
+        command: AppCommand::OpenScript,
+        keys: &[OPEN_SCRIPT],
+    },
+    Binding {
+        command: AppCommand::StopScript,
+        keys: &[STOP_SCRIPT],
     },
 ];
 
