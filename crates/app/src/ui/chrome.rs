@@ -2,8 +2,8 @@
 //! field, the tab bar, a collection's header, and the welcome screen.
 
 use eframe::egui::{
-    self, Align, Align2, CornerRadius, FontId, Layout, Rect, Response, RichText, Role, Sense,
-    Stroke, StrokeKind, Ui, WidgetInfo, pos2, vec2,
+    self, Align, Align2, Color32, CornerRadius, FontId, Layout, Rect, Response, RichText, Role,
+    Sense, Stroke, StrokeKind, Ui, WidgetInfo, pos2, vec2,
 };
 
 use crate::icons;
@@ -121,11 +121,26 @@ pub enum TabEvent {
 }
 
 /// The open collections as tabs; the active one joins the content below.
-pub fn tab_bar(
-    ui: &mut Ui,
-    titles: &[(String, String)],
-    active: Option<usize>,
-) -> Option<TabEvent> {
+/// What a tab in the tab bar shows.
+pub struct TabTitle {
+    pub database: String,
+    pub collection: String,
+    /// The connection's color, if it has one.
+    pub color: Option<Color32>,
+}
+
+/// A tab's icon takes its connection's color, dimmed on inactive tabs.
+/// Without a color it is accent when active, subtle otherwise.
+pub fn tab_icon_color(palette: &theme::Palette, color: Option<Color32>, selected: bool) -> Color32 {
+    match (color, selected) {
+        (Some(color), true) => color,
+        (Some(color), false) => color.gamma_multiply(0.6),
+        (None, true) => palette.accent,
+        (None, false) => palette.subtle,
+    }
+}
+
+pub fn tab_bar(ui: &mut Ui, titles: &[TabTitle], active: Option<usize>) -> Option<TabEvent> {
     let palette = theme::palette(ui);
     let mut event = None;
     egui::ScrollArea::horizontal()
@@ -135,7 +150,12 @@ pub fn tab_bar(
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 ui.add_space(12.0);
-                for (index, (database, collection)) in titles.iter().enumerate() {
+                for (index, title) in titles.iter().enumerate() {
+                    let TabTitle {
+                        database,
+                        collection,
+                        color,
+                    } = title;
                     let selected = active == Some(index);
                     let font = FontId::proportional(14.0);
                     let label = format!("{database}.{collection}");
@@ -185,11 +205,7 @@ pub fn tab_bar(
                         Align2::LEFT_CENTER,
                         icons::LAYERS,
                         FontId::proportional(15.0),
-                        if selected {
-                            palette.accent
-                        } else {
-                            palette.subtle
-                        },
+                        tab_icon_color(palette, *color, selected),
                     );
                     let mut job = egui::text::LayoutJob::default();
                     job.append(
@@ -346,4 +362,23 @@ pub fn welcome(ui: &mut Ui, has_connections: bool) -> bool {
         }
     });
     new_connection
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_icons_take_the_connection_color_dimmed_when_inactive() {
+        let palette = theme::of(&egui::Visuals::dark());
+        let red = Color32::from_rgb(0xe5, 0x63, 0x6f);
+
+        assert_eq!(tab_icon_color(palette, Some(red), true), red);
+        assert_eq!(
+            tab_icon_color(palette, Some(red), false),
+            red.gamma_multiply(0.6)
+        );
+        assert_eq!(tab_icon_color(palette, None, true), palette.accent);
+        assert_eq!(tab_icon_color(palette, None, false), palette.subtle);
+    }
 }
