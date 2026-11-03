@@ -34,7 +34,8 @@ when idle, against roughly 1 GB for Compass.
   `show`. The first write of a run asks first; read-only connections refuse writes.
   Ctrl+Enter runs the statement at the cursor, Ctrl+Shift+Enter the whole script.
   Autocomplete for collections, methods, fields and the script's variables. Drafts,
-  history and favorites per collection; open and save `.js` files.
+  history and favorites per collection; open and save `.js` files. Results sit below or
+  beside the script, with a divider that drags to give either side more room.
 - **Import and export**: JSON, JSON lines and CSV, streamed with progress and cancel.
 - **Settings**: dark, light or system theme, three text sizes, and whether Ctrl+K searches
   all saved connections or only open ones.
@@ -46,8 +47,8 @@ when idle, against roughly 1 GB for Compass.
 | ![Table view](docs/screenshots/table.png) | ![Edit dialog](docs/screenshots/edit-document.png) |
 | **Indexes** | **Light theme** |
 | ![Indexes](docs/screenshots/indexes.png) | ![Light theme](docs/screenshots/main-light.png) |
-| **Shell** | |
-| ![Shell](docs/screenshots/shell.png) | |
+| **Shell** | **Shell, side by side** |
+| ![Shell](docs/screenshots/shell.png) | ![Shell side by side](docs/screenshots/shell-side-by-side.png) |
 
 ## Install
 

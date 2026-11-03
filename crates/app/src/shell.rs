@@ -119,8 +119,10 @@ pub enum PageRequest {
 impl ShellState {
     pub fn new(tab: u64) -> Self {
         Self {
+            // The panel frames it, around a scroll area it fills.
             editor: CodeEditor::new(egui::Id::unique(("shell", tab)), true)
-                .rows(10)
+                .frameless()
+                .rows(1)
                 .line_numbers()
                 .hint("db.collection.find({})"),
             text: String::new(),

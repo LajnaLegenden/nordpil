@@ -59,6 +59,8 @@ pub struct CodeEditor {
     hint: String,
     /// Visible rows of a multiline editor.
     rows: usize,
+    /// The editor grows to at least this height, e.g. to fill a scroll area.
+    min_height: f32,
     line_numbers: bool,
     /// Drawn without its own frame, inside one the caller draws.
     frameless: bool,
@@ -79,6 +81,7 @@ impl CodeEditor {
             multiline,
             hint: String::new(),
             rows: 4,
+            min_height: 0.0,
             line_numbers: false,
             frameless: false,
             object: false,
@@ -97,6 +100,10 @@ impl CodeEditor {
     pub fn rows(mut self, rows: usize) -> Self {
         self.rows = rows;
         self
+    }
+
+    pub fn set_min_height(&mut self, height: f32) {
+        self.min_height = height;
     }
 
     pub fn line_numbers(mut self) -> Self {
@@ -203,32 +210,20 @@ impl CodeEditor {
         } else {
             egui::TextEdit::singleline(text)
         };
-        let palette = theme::palette(ui);
-        let frame = if self.frameless {
-            Frame::new().inner_margin(Margin {
-                left: gutter as i8,
-                ..Margin::symmetric(0, 4)
-            })
-        } else {
-            Frame::new()
-                .fill(ui.visuals().text_edit_bg_color())
-                .corner_radius(CornerRadius::same(9))
-                .stroke(Stroke::new(
-                    1.0,
-                    if focused {
-                        palette.accent
-                    } else {
-                        palette.line_strong
-                    },
-                ))
-                .inner_margin(Margin {
-                    left: 11 + gutter as i8,
-                    right: 11,
-                    top: 7,
-                    bottom: 7,
-                })
+        let margin = Margin {
+            left: 11 + gutter as i8,
+            right: 11,
+            top: 7,
+            bottom: 7,
+        };
+        let frame = match (self.frameless, self.line_numbers) {
+            // Lines up with the gutter, which starts at the caller's frame.
+            (true, true) => Frame::new().inner_margin(margin),
+            (true, false) => Frame::new().inner_margin(Margin::symmetric(0, 4)),
+            (false, _) => frame(ui, focused).inner_margin(margin),
         };
         let edit = edit
+            .min_size(egui::vec2(0.0, self.min_height))
             .font(TextStyle::Monospace)
             .hint_text(self.hint.clone())
             .desired_width(f32::INFINITY)
@@ -283,12 +278,7 @@ impl CodeEditor {
             );
         }
         if focused && !self.frameless {
-            ui.painter().rect_stroke(
-                response.rect.expand(1.0),
-                CornerRadius::same(10),
-                Stroke::new(3.0, palette.focus),
-                egui::StrokeKind::Outside,
-            );
+            paint_focus_ring(ui, response.rect);
         }
         CodeEditorOutput {
             response,
@@ -535,6 +525,33 @@ impl Typing<'_> {
 
 /// `{ }` and nothing else, which is what an object editor holds after it is
 /// focused empty.
+/// The framed editor's look, without its inner margin: the input fill and
+/// a border that turns accent while `focused`.
+pub fn frame(ui: &egui::Ui, focused: bool) -> Frame {
+    let palette = theme::palette(ui);
+    Frame::new()
+        .fill(ui.visuals().text_edit_bg_color())
+        .corner_radius(CornerRadius::same(9))
+        .stroke(Stroke::new(
+            1.0,
+            if focused {
+                palette.accent
+            } else {
+                palette.line_strong
+            },
+        ))
+}
+
+/// The focus ring around a framed editor at `rect`.
+pub fn paint_focus_ring(ui: &egui::Ui, rect: egui::Rect) {
+    ui.painter().rect_stroke(
+        rect.expand(1.0),
+        CornerRadius::same(10),
+        Stroke::new(3.0, theme::palette(ui).focus),
+        egui::StrokeKind::Outside,
+    );
+}
+
 pub fn is_empty_object(text: &str) -> bool {
     text.chars().filter(|c| !c.is_whitespace()).eq("{}".chars())
 }

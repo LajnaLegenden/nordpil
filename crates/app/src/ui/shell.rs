@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use eframe::egui::{
     self, Align, Frame, Key, Layout, Margin, Modifiers, RichText, ScrollArea, TextEdit,
 };
+use nordpil_backend::settings::{ShellLayout, ShellOrientation};
 use nordpil_shell::QueryKind;
 use uuid::Uuid;
 
@@ -18,6 +19,7 @@ use crate::theme;
 use crate::ui::documents::{self, DocumentPage, VIEWS, page_button};
 use crate::widgets::code_editor;
 use crate::widgets::kit::{self, Tone};
+use crate::widgets::split::{Pane, Split};
 
 pub enum ShellAction {
     /// Run this script.
@@ -36,22 +38,51 @@ pub enum ShellAction {
     /// Completion wants this collection's fields.
     Sample(String),
     File(FileJob),
+    /// The layout changed for good: a drag ended, or the orientation flipped.
+    SaveLayout,
 }
 
-/// `collections` are those of the tab's database, for completion.
+/// What the shell panel uses besides its tab.
+pub struct Surroundings<'a> {
+    /// The collections of the tab's database, for completion.
+    pub collections: &'a [String],
+    /// Shared by every tab and kept in the settings.
+    pub layout: &'a mut ShellLayout,
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     tab: &mut CollectionTab,
-    collections: &[String],
+    surroundings: Surroundings,
 ) -> Option<ShellAction> {
-    let mut action = toolbar(ui, tab);
+    let Surroundings {
+        collections,
+        layout,
+    } = surroundings;
+    let mut action = toolbar(ui, tab, layout);
     ui.add_space(10.0);
-    action = editor(ui, tab, collections).or(action);
-    ui.add_space(12.0);
-    action.or_else(|| results(ui, tab))
+    let split = Split::new(
+        egui::Id::unique(("shell_split", tab.id)),
+        layout.orientation == ShellOrientation::SideBySide,
+    )
+    .default_share(layout.default_split());
+    let mut editor_action = None;
+    let mut results_action = None;
+    let done = split.show(ui, layout.split_mut(), |ui, pane| match pane {
+        Pane::First => editor_action = editor(ui, tab, collections),
+        Pane::Second => results_action = results(ui, tab),
+    });
+    if done {
+        action = action.or(Some(ShellAction::SaveLayout));
+    }
+    action.or(editor_action).or(results_action)
 }
 
-fn toolbar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<ShellAction> {
+fn toolbar(
+    ui: &mut egui::Ui,
+    tab: &mut CollectionTab,
+    layout: &mut ShellLayout,
+) -> Option<ShellAction> {
     let mut action = None;
     let height = kit::TOOLBAR_HEIGHT;
     let shell = &mut tab.shell;
@@ -74,6 +105,23 @@ fn toolbar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<ShellAction> {
             }
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let (icon, label, flipped) = match layout.orientation {
+                ShellOrientation::Stacked => (
+                    icons::COLUMNS_2,
+                    "Show results beside the script",
+                    ShellOrientation::SideBySide,
+                ),
+                ShellOrientation::SideBySide => (
+                    icons::ROWS_2,
+                    "Show results below the script",
+                    ShellOrientation::Stacked,
+                ),
+            };
+            if kit::icon_button(ui, icon, label, height).clicked() {
+                layout.orientation = flipped;
+                action = Some(ShellAction::SaveLayout);
+            }
+            kit::divider(ui, 22.0);
             if kit::button(ui, Tone::Ghost, Some(icons::SAVE), "Save", height)
                 .on_hover_text("Save the script to a file")
                 .clicked()
@@ -203,7 +251,22 @@ fn editor(
         wanted: RefCell::new(None),
     };
     let before = shell.text.clone();
-    let output = shell.editor.show(ui, &mut shell.text, &language);
+    let framed = code_editor::frame(ui, focused)
+        .inner_margin(Margin::same(1))
+        .show(ui, |ui| {
+            ScrollArea::vertical()
+                .id_salt(("shell_script", tab.id))
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    shell.editor.set_min_height(ui.available_height());
+                    shell.editor.show(ui, &mut shell.text, &language)
+                })
+                .inner
+        });
+    if focused {
+        code_editor::paint_focus_ring(ui, framed.response.rect);
+    }
+    let output = framed.inner;
     let wanted = language.wanted.into_inner();
     output
         .response
@@ -485,7 +548,9 @@ mod tests {
 
     struct State {
         tab: CollectionTab,
+        layout: ShellLayout,
         ran: Option<String>,
+        saved_layout: bool,
     }
 
     fn tab_with_results() -> CollectionTab {
@@ -513,22 +578,34 @@ mod tests {
         tab
     }
 
-    #[test]
-    fn shows_results_and_runs_the_script() {
-        let mut harness = Harness::builder()
+    fn shell_harness() -> Harness<'static, State> {
+        Harness::builder()
             .with_size(egui::vec2(900.0, 700.0))
             .with_context_setup(theme::install)
             .build_ui_state(
                 |ui, state: &mut State| {
-                    if let Some(ShellAction::Run(script)) = show(ui, &mut state.tab, &[]) {
-                        state.ran = Some(script);
+                    let surroundings = Surroundings {
+                        collections: &[],
+                        layout: &mut state.layout,
+                    };
+                    match show(ui, &mut state.tab, surroundings) {
+                        Some(ShellAction::Run(script)) => state.ran = Some(script),
+                        Some(ShellAction::SaveLayout) => state.saved_layout = true,
+                        _ => {}
                     }
                 },
                 State {
                     tab: tab_with_results(),
+                    layout: ShellLayout::default(),
                     ran: None,
+                    saved_layout: false,
                 },
-            );
+            )
+    }
+
+    #[test]
+    fn shows_results_and_runs_the_script() {
+        let mut harness = shell_harness();
         harness.run();
 
         assert!(
@@ -545,5 +622,38 @@ mod tests {
         harness.get_by_label("Run").click();
         harness.run();
         assert_eq!(harness.state().ran.as_deref(), Some("db.users.find({})"));
+    }
+
+    #[test]
+    fn the_layout_button_puts_results_beside_the_script_and_back() {
+        let mut harness = shell_harness();
+        harness.run();
+        let script = harness.get_by_label("Script").rect();
+        let result = harness.get_by_label("name:").rect();
+        assert!(result.top() > script.bottom(), "{script:?} {result:?}");
+
+        harness
+            .get_by_label("Show results beside the script")
+            .click();
+        harness.run();
+        assert_eq!(
+            harness.state().layout.orientation,
+            ShellOrientation::SideBySide
+        );
+        assert!(harness.state().saved_layout);
+        let script = harness.get_by_label("Script").rect();
+        let result = harness.get_by_label("name:").rect();
+        assert!(result.left() > script.right(), "{script:?} {result:?}");
+
+        harness.state_mut().saved_layout = false;
+        harness
+            .get_by_label("Show results below the script")
+            .click();
+        harness.run();
+        assert_eq!(
+            harness.state().layout.orientation,
+            ShellOrientation::Stacked
+        );
+        assert!(harness.state().saved_layout);
     }
 }

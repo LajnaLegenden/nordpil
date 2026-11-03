@@ -635,6 +635,9 @@ impl NordpilApp {
                 self.backend
                     .send(Command::RecordScript { namespace, script });
             }
+            ShellAction::SaveLayout => {
+                self.backend.send(Command::SaveSettings(self.settings));
+            }
             ShellAction::Stop => {
                 if let Some(running) = &shell.running {
                     self.backend.cancel(running.request);
@@ -1866,8 +1869,12 @@ impl NordpilApp {
                         self.ensure_collections(&target);
                         let collections =
                             self.collection_names(target.connection, &target.database);
+                        let surroundings = crate::ui::shell::Surroundings {
+                            collections: &collections,
+                            layout: &mut self.settings.shell,
+                        };
                         if let Some(action) =
-                            crate::ui::shell::show(ui, &mut self.tabs[index], &collections)
+                            crate::ui::shell::show(ui, &mut self.tabs[index], surroundings)
                         {
                             self.shell_action(ui.ctx(), index, action);
                         }
@@ -2788,6 +2795,11 @@ mod screenshots {
         }
         harness.run();
         save(&mut harness, "shell");
+        harness.state_mut().settings.shell.orientation =
+            nordpil_backend::settings::ShellOrientation::SideBySide;
+        harness.run();
+        save(&mut harness, "shell-side-by-side");
+        harness.state_mut().settings.shell = Default::default();
         harness.state_mut().tabs[0].panel = Panel::Documents;
 
         harness.state_mut().tab_action(0, TabAction::Export);
