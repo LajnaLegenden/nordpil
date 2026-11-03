@@ -101,6 +101,10 @@ The workspace has four crates:
   the mongosh API; database calls go through a `Host` trait the backend implements.
 - `crates/app`: the egui app.
 
+`main` only changes through pull requests, merged by rebase. **CI** runs `cargo fmt`,
+clippy, the unit tests and the Docker integration tests on every pull request that isn't a
+draft, and it has to pass before merging.
+
 Releases come from the **Release** workflow: run it from the Actions tab with the new
 version. It checks and builds everything for that version first; only if all of it passes
 does it commit the version bump to `main`, tag it and publish the release with the macOS
