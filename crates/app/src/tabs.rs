@@ -69,6 +69,8 @@ pub struct CollectionTab {
     pub pending_count: Option<RequestId>,
     /// From running the query on the server.
     pub error: Option<String>,
+    /// The user stopped the query before it returned.
+    pub stopped: bool,
     /// From reading the query inputs.
     pub input_errors: Vec<String>,
     /// This collection's favorite and recent queries.
@@ -110,6 +112,7 @@ impl CollectionTab {
             pending_find: None,
             pending_count: None,
             error: None,
+            stopped: false,
             input_errors: Vec::new(),
             history: Vec::new(),
             fields: Vec::new(),

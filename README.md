@@ -20,8 +20,8 @@ when idle, against roughly 1 GB for Compass.
   highlighting and autocomplete for operators, constructors, field names sampled from the
   collection and values from the current results. Brackets and quotes close themselves,
   and operators such as `$in` insert their brackets. Ctrl+L focuses the filter. Project,
-  sort, collation, hint, skip, limit and max time. Query history and favorites per
-  collection.
+  sort, collation, hint, skip, limit and max time. A slow query has a Stop button,
+  which ends it on the server too. Query history and favorites per collection.
 - **View**: list, JSON and table views with paging and counts.
 - **Edit**: insert, edit, clone and delete documents. Edits save only the changed fields
   and refuse to overwrite a document that changed since it was loaded. Bulk update and
@@ -34,7 +34,7 @@ when idle, against roughly 1 GB for Compass.
   `show`. Cursors also take `filter`, `reduce`, `find`, `some`, `every` and `flatMap`
   without a `toArray()` first. The first write of a run asks first; read-only connections refuse writes.
   Ctrl+Enter runs the statement at the cursor, Shift+Enter the whole script, and Ctrl+.
-  or Esc stops it. Ctrl+S and Ctrl+O save and open scripts.
+  or Esc stops it, along with the query it is waiting on. Ctrl+S and Ctrl+O save and open scripts.
   Autocomplete for collections, methods (array methods such as `includes`, `filter` and
   `reduce` included, also through variables), fields and the script's variables. Drafts,
   history and favorites per collection; open and save `.js` files. Results sit below or
