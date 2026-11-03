@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use eframe::egui::{self, Frame, Key, Margin, Modifiers, RichText, Stroke};
+use eframe::egui::{self, Frame, Margin, RichText, Stroke};
 use nordpil_backend::navigation::{KnownDatabase, Recent};
 use nordpil_backend::references::{DatabaseMappings, Mapping};
 use nordpil_backend::settings::{GotoScope, Settings};
@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::connections::{Collections, ConnectionEntry, ConnectionState, Selection};
 use crate::lookup::References;
 use crate::shell::{Body, Ending, FileJob, PageRequest, Running};
+use crate::shortcuts::{self, AppCommand};
 use crate::tabs::{CollectionTab, Panel, build_query, history_entry};
 use crate::ui::connection_form::{ConnectionForm, FormResult};
 use crate::ui::dialogs::{CreateCollectionDialog, Dialog, DropDialog, PasswordPrompt};
@@ -31,6 +32,14 @@ use crate::ui::{Action, chrome, documents, sidebar};
 use crate::update::{self, Updater};
 use crate::widgets::kit::{self, Tone};
 use crate::{icons, theme};
+
+/// A modal that holds back app-wide keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Modal {
+    Settings,
+    GoTo,
+    Other,
+}
 
 enum UpdateClick {
     Install,
@@ -1939,37 +1948,65 @@ impl NordpilApp {
             });
     }
 
-    /// Ctrl+K opens "Go to collection"; Ctrl+L focuses the filter.
+    /// App-wide keys; see [`shortcuts::BINDINGS`].
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        let (goto, filter) = ctx.input_mut(|input| {
-            (
-                input.consume_key(Modifiers::COMMAND, Key::K),
-                input.consume_key(Modifiers::COMMAND, Key::L),
-            )
+        for command in ctx.input_mut(shortcuts::pressed) {
+            self.run_command(ctx, command);
+        }
+    }
+
+    /// Which modal is open. App-wide keys wait while one is, except the key
+    /// that toggles that same modal.
+    fn open_modal(&self) -> Option<Modal> {
+        let write_waits = self.tabs.iter().any(|tab| {
+            tab.shell
+                .running
+                .as_ref()
+                .is_some_and(|running| running.run.pending_write().is_some())
         });
-        let dialog_open = self.form.is_some()
+        if self.form.is_some()
             || self.dialog.is_some()
             || self.document_dialog.is_some()
             || self.index_dialog.is_some()
             || self.transfer_dialog.is_some()
-            || self.settings_dialog.is_some()
-            || self.mappings_dialog.is_some();
-        if goto && !dialog_open {
-            self.goto = match self.goto {
-                Some(_) => None,
-                None => Some(GotoPalette::new()),
-            };
-        }
-        if filter
-            && !dialog_open
-            && self.goto.is_none()
-            && let Some(index) = self.active_tab
+            || self.mappings_dialog.is_some()
+            || write_waits
         {
-            let tab = &mut self.tabs[index];
-            tab.panel = Panel::Documents;
-            tab.editors
-                .filter
-                .focus_and_select_all(ctx, &tab.inputs.filter);
+            Some(Modal::Other)
+        } else if self.settings_dialog.is_some() {
+            Some(Modal::Settings)
+        } else if self.goto.is_some() {
+            Some(Modal::GoTo)
+        } else {
+            None
+        }
+    }
+
+    fn run_command(&mut self, ctx: &egui::Context, command: AppCommand) {
+        let toggles_own_modal = matches!(
+            (self.open_modal(), command),
+            (Some(Modal::GoTo), AppCommand::GoTo)
+        );
+        if self.open_modal().is_some() && !toggles_own_modal {
+            return;
+        }
+        match command {
+            AppCommand::GoTo => {
+                self.goto = match self.goto {
+                    Some(_) => None,
+                    None => Some(GotoPalette::new()),
+                };
+            }
+            AppCommand::FocusEditor => {
+                let Some(index) = self.active_tab else {
+                    return;
+                };
+                let tab = &mut self.tabs[index];
+                tab.panel = Panel::Documents;
+                tab.editors
+                    .filter
+                    .focus_and_select_all(ctx, &tab.inputs.filter);
+            }
         }
     }
 

@@ -7,6 +7,7 @@ mod logging;
 mod lookup;
 mod query_language;
 mod shell;
+mod shortcuts;
 mod tabs;
 mod theme;
 mod ui;
