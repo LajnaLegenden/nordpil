@@ -1,0 +1,127 @@
+# Builds and packages nordpil for Linux and macOS. Each file is kept as a
+# workflow artifact of its own, unzipped and named after it, e.g.
+# nordpil-0.2.0-linux-x86_64.deb. Called by the Release and Publish workflows.
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The version the files are named after.
+        type: string
+        required: true
+      bump:
+        description: Bump Cargo.toml to the version first; false when it already has it.
+        type: boolean
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup update stable --no-self-update
+          rustup default stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-deb
+            target
+          key: linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: linux-${{ matrix.arch }}-
+      - name: Install cargo-deb
+        run: command -v cargo-deb >/dev/null || cargo install cargo-deb --locked --version 3.8.0
+      - if: ${{ inputs.bump }}
+        run: scripts/bump-version.sh "$VERSION"
+      - run: cargo build --release --locked -p nordpil
+      - run: scripts/package-linux.sh "$VERSION" dist
+      # One artifact per format, uploaded as the file itself rather than a zip.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/nordpil-${{ inputs.version }}-linux-${{ matrix.arch }}.AppImage
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/nordpil-${{ inputs.version }}-linux-${{ matrix.arch }}.deb
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/nordpil-${{ inputs.version }}-linux-${{ matrix.arch }}.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+          # Built on Apple Silicon too; GitHub is retiring its Intel runners.
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    runs-on: macos-15
+    env:
+      # Matches LSMinimumSystemVersion in crates/app/assets/macos/Info.plist.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: macos-${{ matrix.arch }}-
+      - if: ${{ inputs.bump }}
+        run: scripts/bump-version.sh "$VERSION"
+      - run: cargo build --release --locked -p nordpil --target ${{ matrix.target }}
+      - run: scripts/package-macos.sh "$VERSION" ${{ matrix.target }} dist
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/nordpil-${{ inputs.version }}-macos-${{ matrix.arch }}.dmg
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      # What the updater installs from.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/nordpil-${{ inputs.version }}-macos-${{ matrix.arch }}.app.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 14

@@ -107,9 +107,10 @@ draft, and it has to pass before merging.
 
 Releases come from the **Release** workflow: run it from the Actions tab with the new
 version. It checks and builds everything for that version first; only if all of it passes
-does it commit the version bump to `main`, tag it and publish the release with the macOS
-and Linux files. Tick "dry run" to only build the files, kept as one workflow artifact per
-file. The packaging lives in `scripts/` (`package-linux.sh`, `package-macos.sh`,
+does it open a `chore: release vX` pull request with the version bump. Merging that pull
+request starts the **Publish** workflow, which builds again from `main`, tags the commit
+and publishes the release with the macOS and Linux files. Tick "dry run" to only build
+the files, kept as one workflow artifact per file. The packaging lives in `scripts/` (`package-linux.sh`, `package-macos.sh`,
 `bump-version.sh`, `update-manifest.sh`) and runs locally too.
 
 Each release carries `nordpil-update.json`, the SHA-256 of every file, signed with the
