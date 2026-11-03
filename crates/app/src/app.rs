@@ -536,6 +536,26 @@ impl NordpilApp {
         self.close_tabs(|tab| tab.id == id);
     }
 
+    /// Ctrl+R: Documents runs its query again, staying on the page unless
+    /// the inputs changed since; Indexes reloads. The shell never reruns.
+    fn refresh(&mut self, index: usize) {
+        let tab = &self.tabs[index];
+        match tab.panel {
+            Panel::Documents => {
+                let unchanged = build_query(&tab.inputs)
+                    .is_ok_and(|applied| tab.applied.as_ref() == Some(&applied));
+                let action = if unchanged {
+                    TabAction::Refresh
+                } else {
+                    TabAction::Run
+                };
+                self.tab_action(index, action);
+            }
+            Panel::Indexes => self.index_action(index, IndexAction::Refresh),
+            Panel::Shell => {}
+        }
+    }
+
     /// Brings back the last closed tab whose connection still exists,
     /// connecting first if needed.
     fn reopen_tab(&mut self) {
@@ -2161,6 +2181,16 @@ impl NordpilApp {
                 }
             }
             AppCommand::LastTab => self.active_tab = self.tabs.len().checked_sub(1),
+            AppCommand::Panel(panel) => {
+                if let Some(index) = self.active_tab {
+                    self.tabs[index].panel = panel;
+                }
+            }
+            AppCommand::Refresh => {
+                if let Some(index) = self.active_tab {
+                    self.refresh(index);
+                }
+            }
             AppCommand::Settings => {
                 self.settings_dialog = match self.settings_dialog {
                     Some(_) => None,
@@ -2829,6 +2859,69 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.tabs[0].target, target);
         assert_eq!(app.closed.len(), MAX_CLOSED - 1);
+    }
+
+    #[test]
+    fn alt_digits_switch_the_panel() {
+        let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
+        let mut press = |key| {
+            harness.key_press_modifiers(Modifiers::ALT, key);
+            harness.run();
+            harness.state().tabs[0].panel
+        };
+
+        assert_eq!(press(Key::Num3), Panel::Shell);
+        assert_eq!(press(Key::Num2), Panel::Indexes);
+        assert_eq!(press(Key::Num1), Panel::Documents);
+    }
+
+    #[test]
+    fn ctrl_r_reruns_on_the_same_page_unless_the_inputs_changed() {
+        let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
+        let tab = &mut harness.state_mut().tabs[0];
+        tab.applied = Some(build_query(&tab.inputs).unwrap());
+        tab.page = 2;
+        tab.count = Some(Some(70));
+        harness.run();
+
+        // The test backend has no server, so the count comes back failed.
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::R);
+        harness.run();
+        let tab = &harness.state().tabs[0];
+        assert_eq!(tab.page, 2);
+        assert_ne!(tab.count, Some(Some(70)));
+
+        harness.state_mut().tabs[0].inputs.filter = "{ total: 5 }".to_owned();
+        harness.key_press(Key::F5);
+        harness.run();
+        let tab = &harness.state().tabs[0];
+        assert_eq!(tab.page, 0);
+        let expected = build_query(&tab.inputs).unwrap();
+        assert_eq!(tab.applied.as_ref(), Some(&expected));
+    }
+
+    #[test]
+    fn ctrl_r_reloads_indexes_and_leaves_the_shell_alone() {
+        let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
+        let tab = &mut harness.state_mut().tabs[0];
+        tab.panel = Panel::Shell;
+        tab.count = Some(Some(70));
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::R);
+        harness.run();
+        let tab = &harness.state().tabs[0];
+        assert_eq!(tab.count, Some(Some(70)));
+        assert!(tab.shell.running.is_none());
+
+        let tab = &mut harness.state_mut().tabs[0];
+        tab.panel = Panel::Indexes;
+        tab.indexes = Some(Ok(Vec::new()));
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::R);
+        // Without a server the reload fails, which shows it was asked for.
+        run_until(&mut harness, |app| {
+            app.tabs[0].indexes_request.is_some() || matches!(app.tabs[0].indexes, Some(Err(_)))
+        });
     }
 
     #[test]
