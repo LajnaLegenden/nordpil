@@ -48,6 +48,11 @@ pub struct ShellState {
     pub sampling: HashSet<String>,
     /// An open or save file dialog, and what it was for.
     pub picker: Option<(FileJob, Receiver<FileResult>)>,
+    /// A statement to add to the end of the script, and run, once the
+    /// draft has loaded.
+    pub queued: Option<String>,
+    /// Focus the editor with the cursor at the end of the script.
+    pub cursor_to_end: bool,
 }
 
 pub struct Running {
@@ -140,6 +145,8 @@ impl ShellState {
             fields: HashMap::new(),
             sampling: HashSet::new(),
             picker: None,
+            queued: None,
+            cursor_to_end: false,
         }
     }
 
@@ -151,6 +158,40 @@ impl ShellState {
         self.loaded = true;
         self.saved_text = draft.clone().unwrap_or_default();
         self.text = draft.unwrap_or_else(|| starter(collection));
+    }
+
+    /// Once the draft has loaded, adds the queued statement to the end of
+    /// the script and puts the cursor after it. Returns the statement to run.
+    pub fn append_queued(&mut self) -> Option<String> {
+        if !self.loaded {
+            return None;
+        }
+        let statement = self.queued.take()?;
+        // With no draft saved, the script is only the starter.
+        self.text = if self.saved_text.is_empty() {
+            statement.clone()
+        } else {
+            with_statement(&self.text, &statement)
+        };
+        self.cursor_to_end = true;
+        self.edited();
+        Some(statement)
+    }
+
+    /// The database a result's documents came from, when the result knows.
+    pub fn result_database(&self, index: usize) -> Option<&str> {
+        match &self.results.get(index)?.body {
+            Body::Query(page) => Some(&page.query.namespace.database),
+            _ => None,
+        }
+    }
+
+    /// The database of the shown result's documents, when it knows.
+    pub fn shown_database(&self) -> Option<&str> {
+        match self.selected? {
+            Selected::Result(index) => self.result_database(index),
+            Selected::Output => None,
+        }
     }
 
     /// Clears the last run's results for a new run.
@@ -255,17 +296,43 @@ impl ShellState {
 
 /// `db.<collection>.find({})`, quoting names that aren't identifiers.
 pub fn starter(collection: &str) -> String {
+    format!("{}.find({{}})", collection_expression(collection))
+}
+
+/// `db.<collection>.find(<filter>)`.
+pub fn find_statement(collection: &str, filter: &Document) -> String {
+    format!(
+        "{}.find({})",
+        collection_expression(collection),
+        nordpil_query::format_document(filter, Style::Compact)
+    )
+}
+
+/// `db.<collection>`, or `db.getCollection('<collection>')` for names that
+/// aren't identifiers.
+fn collection_expression(collection: &str) -> String {
     let mut chars = collection.chars();
     let identifier = chars
         .next()
         .is_some_and(nordpil_query::lexer::is_ident_start)
         && chars.all(nordpil_query::lexer::is_ident_continue);
     if identifier {
-        format!("db.{collection}.find({{}})")
+        format!("db.{collection}")
     } else {
         let quoted =
             nordpil_query::format_value(&Bson::String(collection.to_owned()), Style::Compact);
-        format!("db.getCollection({quoted}).find({{}})")
+        format!("db.getCollection({quoted})")
+    }
+}
+
+/// `script` with `statement` on a line of its own at the end.
+fn with_statement(script: &str, statement: &str) -> String {
+    if script.trim().is_empty() {
+        statement.to_owned()
+    } else if script.ends_with('\n') {
+        format!("{script}{statement}")
+    } else {
+        format!("{script}\n{statement}")
     }
 }
 
@@ -473,6 +540,51 @@ mod tests {
             starter("user-logs"),
             "db.getCollection('user-logs').find({})"
         );
+    }
+
+    #[test]
+    fn find_statements_quote_odd_names() {
+        let filter = bson::doc! { "_id": 7 };
+        assert_eq!(
+            find_statement("users", &filter),
+            "db.users.find({ _id: 7 })"
+        );
+        assert_eq!(
+            find_statement("user-logs", &filter),
+            "db.getCollection('user-logs').find({ _id: 7 })"
+        );
+    }
+
+    #[test]
+    fn queued_statements_go_on_a_line_of_their_own() {
+        assert_eq!(with_statement("a()", "b()"), "a()\nb()");
+        assert_eq!(with_statement("a()\n", "b()"), "a()\nb()");
+        assert_eq!(with_statement("  \n", "b()"), "b()");
+    }
+
+    #[test]
+    fn a_queued_statement_waits_for_the_draft() {
+        let mut shell = ShellState::new(1);
+        shell.queued = Some("db.users.find({ _id: 7 })".to_owned());
+        assert_eq!(shell.append_queued(), None);
+
+        shell.load_draft(Some("db.users.count()".to_owned()), "users");
+        assert_eq!(
+            shell.append_queued().as_deref(),
+            Some("db.users.find({ _id: 7 })")
+        );
+        assert_eq!(shell.text, "db.users.count()\ndb.users.find({ _id: 7 })");
+        assert!(shell.cursor_to_end);
+        assert_eq!(shell.append_queued(), None);
+    }
+
+    #[test]
+    fn a_queued_statement_replaces_the_starter() {
+        let mut shell = ShellState::new(1);
+        shell.queued = Some("db.users.find({ _id: 7 })".to_owned());
+        shell.load_draft(None, "users");
+        shell.append_queued();
+        assert_eq!(shell.text, "db.users.find({ _id: 7 })");
     }
 
     #[test]
