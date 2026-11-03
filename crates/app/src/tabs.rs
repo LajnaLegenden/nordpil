@@ -17,13 +17,7 @@ const DEFAULT_PAGE_SIZE: u64 = 20;
 /// huge collection can't run forever.
 const DEFAULT_MAX_TIME: Duration = Duration::from_secs(60);
 
-/// What a tab shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Panel {
-    Documents,
-    Indexes,
-    Shell,
-}
+pub use nordpil_backend::settings::Panel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
