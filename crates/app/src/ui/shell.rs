@@ -429,43 +429,48 @@ fn result_view(
         Body::Value { .. } => "value".to_owned(),
     };
     let info = format!("{describe} · {}", elapsed_text(*elapsed));
-    let is_value = matches!(body, Body::Value { .. });
+    let paging = match body {
+        Body::Query(query) => Some((
+            query.page,
+            query.has_next(page_size),
+            query.page * page_size,
+            query.results.as_ref().map_or(0, |r| r.documents.len()),
+            query.pending.is_some(),
+        )),
+        Body::Documents {
+            documents,
+            page,
+            current,
+        } => Some((
+            *page,
+            ((*page + 1) * page_size) < documents.len() as u64,
+            page * page_size,
+            current.documents.len(),
+            false,
+        )),
+        Body::Value { .. } => None,
+    };
     ui.horizontal(|ui| {
-        if !is_value {
-            kit::segmented_with_labels(
-                ui,
-                &mut shell.view,
-                &VIEWS,
-                kit::TOOLBAR_HEIGHT + 2.0,
-                true,
-            );
-            kit::divider(ui, 22.0);
-        }
-        ui.label(RichText::new(info).color(palette.muted));
-        let (page, has_next, first, shown, loading) = match body {
-            Body::Query(query) => (
-                query.page,
-                query.has_next(page_size),
-                query.page * page_size,
-                query.results.as_ref().map_or(0, |r| r.documents.len()),
-                query.pending.is_some(),
-            ),
-            Body::Documents {
-                documents,
-                page,
-                current,
-            } => (
-                *page,
-                ((*page + 1) * page_size) < documents.len() as u64,
-                page * page_size,
-                current.documents.len(),
-                false,
-            ),
-            Body::Value { .. } => return,
+        let spacing = ui.spacing().item_spacing.x;
+        // Cut to the room the paging leaves; hovering shows all of it.
+        let describe = |ui: &mut egui::Ui| {
+            ui.add(egui::Label::new(RichText::new(&info).color(palette.muted)).truncate());
         };
-        if loading {
-            ui.spinner();
-        }
+        let Some((page, has_next, first, shown, loading)) = paging else {
+            describe(ui);
+            return;
+        };
+        // Icons only when the labels would leave the paging and a bit of
+        // the description no room.
+        let labels = ui.available_width() >= kit::segmented_width(ui, &VIEWS, true) + 240.0;
+        kit::segmented_with_labels(
+            ui,
+            &mut shell.view,
+            &VIEWS,
+            kit::TOOLBAR_HEIGHT + 2.0,
+            labels,
+        );
+        kit::divider(ui, 22.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.add_enabled_ui(has_next, |ui| {
@@ -490,6 +495,13 @@ fn result_view(
                         .color(palette.muted),
                 );
             }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = spacing;
+                describe(ui);
+                if loading {
+                    ui.spinner();
+                }
+            });
         });
     });
     ui.add_space(10.0);
