@@ -1,5 +1,7 @@
 //! Runs against a real mongod in Docker. Run with `just test-int`.
 
+use std::time::{Duration, Instant};
+
 use futures_util::TryStreamExt as _;
 use mongodb::bson::{Document, doc};
 use nordpil_backend::secrets::MemorySecrets;
@@ -540,4 +542,125 @@ async fn scripts_on_read_only_connections_cannot_write() {
     };
     assert_eq!(error.message, "This connection is read-only.");
     assert!(collection_names(&backend, id, "shop").await.is_empty());
+}
+
+/// A filter that matches nothing and sleeps 50 ms on every document, so a
+/// scan of [`slow_collection`] keeps the server busy for over a minute.
+const SLOW_FILTER: &str = "function () { sleep(50); return false; }";
+
+/// A collection that [`SLOW_FILTER`] takes about 100 seconds to scan.
+async fn slow_collection(uri: &str, connection: Uuid) -> (mongodb::Client, Namespace) {
+    let client = mongodb::Client::with_uri_str(uri).await.unwrap();
+    client
+        .database("shop")
+        .collection::<Document>("slow")
+        .insert_many((0..2000).map(|n| doc! { "n": n }))
+        .await
+        .unwrap();
+    let namespace = Namespace {
+        connection,
+        database: "shop".to_owned(),
+        collection: "slow".to_owned(),
+    };
+    (client, namespace)
+}
+
+/// How many operations on `shop.slow` the server is running.
+async fn running_on_server(client: &mongodb::Client) -> usize {
+    let operations: Vec<Document> = client
+        .database("admin")
+        .aggregate([
+            doc! { "$currentOp": {} },
+            doc! { "$match": { "ns": "shop.slow" } },
+        ])
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    operations.len()
+}
+
+/// Waits until the server runs `expected` operations on `shop.slow`, failing
+/// after `limit`.
+async fn wait_for_running(client: &mongodb::Client, expected: usize, limit: Duration) {
+    let started = Instant::now();
+    loop {
+        let running = running_on_server(client).await;
+        if running == expected {
+            return;
+        }
+        assert!(
+            started.elapsed() < limit,
+            "{running} operations still running after {limit:?}, expected {expected}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Starts `command`, waits until the server runs it, then drops it as the
+/// UI's Stop does, and checks that the server stops too.
+async fn stop_once_running(backend: &Backend, client: &mongodb::Client, command: Command) {
+    let response = send(backend, command);
+    tokio::select! {
+        response = response => panic!("the query ended by itself: {response:?}"),
+        () = wait_for_running(client, 1, Duration::from_secs(10)) => {}
+    }
+    // Without the kill, the scan would go on for about 100 seconds.
+    wait_for_running(client, 0, Duration::from_secs(3)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker"]
+async fn stopping_a_find_stops_it_on_the_server() {
+    let (_mongo, backend, id, uri) = connected_backend(false).await;
+    let (client, namespace) = slow_collection(&uri, id).await;
+
+    let find = Command::Find {
+        namespace,
+        query: Box::new(FindQuery {
+            filter: doc! { "$where": SLOW_FILTER },
+            limit: 20,
+            ..FindQuery::default()
+        }),
+    };
+    stop_once_running(&backend, &client, find).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker"]
+async fn stopping_a_count_stops_it_on_the_server() {
+    let (_mongo, backend, id, uri) = connected_backend(false).await;
+    let (client, namespace) = slow_collection(&uri, id).await;
+
+    let count = Command::Count {
+        namespace,
+        // Counting runs as an aggregation, where `$where` isn't allowed.
+        filter: doc! { "$expr": { "$function": { "body": SLOW_FILTER, "args": [], "lang": "js" } } },
+        hint: None,
+    };
+    stop_once_running(&backend, &client, count).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker"]
+async fn stopping_a_script_stops_its_query_on_the_server() {
+    let (_mongo, backend, id, uri) = connected_backend(false).await;
+    let (client, namespace) = slow_collection(&uri, id).await;
+
+    let cancel = CancellationToken::new();
+    let run = Command::RunScript {
+        namespace,
+        script: format!("db.slow.find({{ $where: {SLOW_FILTER:?} }}).toArray()"),
+        run: nordpil_backend::ScriptRun::new(),
+    };
+    let (response, ()) = tokio::join!(backend.handle(run, cancel.clone()), async {
+        wait_for_running(&client, 1, Duration::from_secs(10)).await;
+        cancel.cancel();
+    });
+    let Response::ScriptFinished(outcome) = response else {
+        panic!("unexpected response");
+    };
+    assert_eq!(outcome.unwrap(), nordpil_shell::Outcome::Cancelled);
+    wait_for_running(&client, 0, Duration::from_secs(3)).await;
 }

@@ -632,6 +632,18 @@ impl NordpilApp {
                 tab.page = page;
                 self.fetch_page(index, false);
             }
+            TabAction::Stop => {
+                // Dropping the request closes its connection, and the server
+                // then ends the operation.
+                for request in [tab.pending_find.take(), tab.pending_count.take()]
+                    .into_iter()
+                    .flatten()
+                {
+                    self.backend.cancel(request);
+                }
+                tab.results = None;
+                tab.stopped = true;
+            }
             TabAction::Refresh => {
                 self.backend.send(Command::SampleFields(tab.namespace()));
                 tab.count = None;
@@ -1091,6 +1103,7 @@ impl NordpilApp {
             self.backend.cancel(request);
         }
         tab.error = None;
+        tab.stopped = false;
         tab.pending_find = Some(self.backend.send(Command::Find {
             namespace: namespace.clone(),
             query: Box::new(query.clone()),
@@ -3111,6 +3124,95 @@ mod tests {
         harness.run();
         assert!(harness.query_by_label("Open in accounts").is_some());
         assert!(harness.query_by_label("Edit link…").is_some());
+    }
+
+    /// Runs `script` in mongosh inside the container and returns what it printed.
+    fn mongosh(
+        mongo: &testcontainers_modules::testcontainers::Container<Mongo>,
+        script: &str,
+    ) -> String {
+        use testcontainers_modules::testcontainers::core::ExecCommand;
+
+        let mut result = mongo
+            .exec(ExecCommand::new(["mongosh", "--quiet", "--eval", script]))
+            .unwrap();
+        String::from_utf8(result.stdout_to_vec().unwrap())
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    /// How many operations on `shop.slow` the server is running.
+    fn running_on_server(mongo: &testcontainers_modules::testcontainers::Container<Mongo>) -> u32 {
+        mongosh(
+            mongo,
+            "db.getSiblingDB('admin').aggregate([{ $currentOp: {} }, { $match: { ns: 'shop.slow' } }]).toArray().length",
+        )
+        .parse()
+        .unwrap()
+    }
+
+    #[test]
+    #[ignore = "needs Docker"]
+    fn stop_ends_a_slow_query_on_the_server() {
+        let mongo = Mongo::default().with_tag("8.0").start().unwrap();
+        let port = mongo.get_host_port_ipv4(27017).unwrap();
+        mongosh(
+            &mongo,
+            "db.getSiblingDB('shop').slow.insertMany(Array.from({ length: 2000 }, (_, n) => ({ n })))",
+        );
+        let mut harness = harness();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "New connection")
+            .click();
+        harness.run();
+        let uri = format!("mongodb://127.0.0.1:{port}/?directConnection=true");
+        type_into(&mut harness, "Connection string", &uri);
+        harness
+            .get_by_role_and_label(Role::Button, "Save and connect")
+            .click();
+        run_until(&mut harness, |app| {
+            matches!(
+                app.connections.first().map(|e| &e.state),
+                Some(ConnectionState::Connected(_))
+            )
+        });
+        let connection = harness.state().connections[0].saved.id;
+        harness.state_mut().apply(Action::Select(Selection {
+            connection,
+            database: "shop".to_owned(),
+            collection: "slow".to_owned(),
+        }));
+        run_until(&mut harness, |app| {
+            app.tabs.first().is_some_and(|tab| tab.results.is_some())
+        });
+
+        // Matches nothing and sleeps 50 ms per document: over a minute of scanning.
+        harness.state_mut().tabs[0].inputs.filter =
+            "{ $where: 'function () { sleep(50); return false; }' }".to_owned();
+        harness.state_mut().tab_action(0, TabAction::Run);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running_on_server(&mongo) == 0 {
+            assert!(Instant::now() < deadline, "the query never started");
+            harness.step();
+        }
+        harness.step();
+        assert!(harness.state().tabs[0].is_loading());
+
+        harness.get_by_role_and_label(Role::Button, "Stop").click();
+        harness.step();
+        harness.step();
+        assert!(!harness.state().tabs[0].is_loading());
+        assert!(harness.query_by_label("Stopped.").is_some());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while running_on_server(&mongo) > 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the query still runs on the server"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]

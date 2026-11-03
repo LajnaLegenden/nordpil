@@ -29,6 +29,8 @@ pub enum TabAction {
     Page(u64),
     /// Run the applied query again.
     Refresh,
+    /// Stop the running find and count, on the server too.
+    Stop,
     /// Fill in a query from the history and run it.
     Apply(QueryInputs),
     SetFavorite {
@@ -92,6 +94,8 @@ pub fn show(
     let Some(results) = &tab.results else {
         if tab.is_loading() {
             ui.spinner();
+        } else if tab.stopped {
+            ui.label(RichText::new("Stopped.").color(palette.muted));
         }
         return action;
     };
@@ -636,6 +640,11 @@ fn toolbar(ui: &mut egui::Ui, tab: &mut CollectionTab, read_only: bool) -> Optio
             }
         }
         if tab.is_loading() {
+            let stop = kit::button(ui, Tone::Secondary, Some(icons::SQUARE), "Stop", height)
+                .on_hover_text("Stop the query, on the server too");
+            if stop.clicked() {
+                action = Some(TabAction::Stop);
+            }
             ui.spinner();
         }
         if fit == Fit::OneRow {
