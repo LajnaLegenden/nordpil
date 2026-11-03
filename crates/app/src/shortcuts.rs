@@ -2,7 +2,7 @@
 //! shortcuts sheet and the macOS menu bar all read. Keys that only work in
 //! one editor, such as Ctrl+Enter, stay with that editor.
 
-use eframe::egui::{Event, InputState, Key, KeyboardShortcut, Modifiers};
+use eframe::egui::{self, Event, FontId, InputState, Key, KeyboardShortcut, Modifiers};
 
 /// What an app-wide shortcut does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,12 @@ const fn command(key: Key) -> KeyboardShortcut {
 
 pub const GO_TO: KeyboardShortcut = command(Key::K);
 pub const FOCUS_EDITOR: KeyboardShortcut = command(Key::L);
+/// Saves a document dialog; handled there.
+pub const SAVE_DOCUMENT: KeyboardShortcut = command(Key::Enter);
+/// In the shell editor; handled there.
+pub const RUN_STATEMENT: KeyboardShortcut = command(Key::Enter);
+pub const RUN_SCRIPT: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Enter);
 
 /// More specific keys come before the ones they contain: Ctrl+Shift+Tab
 /// before Ctrl+Tab, since a match ignores extra Shift.
@@ -71,6 +77,60 @@ fn consume(input: &mut InputState, shortcut: &KeyboardShortcut) -> bool {
     found
 }
 
+/// The key caps of `shortcut`, as macOS or everyone else writes them:
+/// ⌃ ⌥ ⇧ ⌘ L on a Mac (names when the font lacks the symbols), Ctrl Alt
+/// Shift L elsewhere.
+pub fn key_caps(ctx: &egui::Context, shortcut: &KeyboardShortcut) -> Vec<&'static str> {
+    let mac = ctx.os().is_mac();
+    let symbols = mac && ctx.fonts_mut(|fonts| fonts.has_glyphs(&FontId::monospace(11.0), "⌃⌥⇧⌘"));
+    caps(shortcut, mac, symbols)
+}
+
+/// `shortcut` as text for a tooltip, e.g. "Ctrl+L" or "⌘L".
+pub fn text(ctx: &egui::Context, shortcut: &KeyboardShortcut) -> String {
+    let caps = key_caps(ctx, shortcut);
+    let symbols = caps.first().is_some_and(|cap| "⌃⌥⇧⌘".contains(cap));
+    caps.join(if symbols { "" } else { "+" })
+}
+
+fn caps(shortcut: &KeyboardShortcut, mac: bool, symbols: bool) -> Vec<&'static str> {
+    let Modifiers {
+        alt, ctrl, shift, ..
+    } = shortcut.modifiers;
+    let command = shortcut.modifiers.command || shortcut.modifiers.mac_cmd;
+    let mut caps = Vec::new();
+    let mut add = |on: bool, cap: &'static str| {
+        if on {
+            caps.push(cap);
+        }
+    };
+    match (mac, symbols) {
+        // Apple's order: Control, Option, Shift, Command.
+        (true, true) => {
+            add(ctrl, "⌃");
+            add(alt, "⌥");
+            add(shift, "⇧");
+            add(command, "⌘");
+        }
+        (true, false) => {
+            add(ctrl, "Ctrl");
+            add(alt, "Option");
+            add(shift, "Shift");
+            add(command, "Cmd");
+        }
+        (false, _) => {
+            add(ctrl || command, "Ctrl");
+            add(alt, "Alt");
+            add(shift, "Shift");
+        }
+    }
+    caps.push(match shortcut.logical_key {
+        Key::Escape => "Esc",
+        key => key.symbol_or_name(),
+    });
+    caps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,6 +145,16 @@ mod tests {
             modifiers,
         });
         pressed(&mut input)
+    }
+
+    #[test]
+    fn key_caps_follow_the_platform() {
+        let shortcut = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::T);
+        assert_eq!(caps(&shortcut, false, false), ["Ctrl", "Shift", "T"]);
+        assert_eq!(caps(&shortcut, true, true), ["⇧", "⌘", "T"]);
+        assert_eq!(caps(&shortcut, true, false), ["Shift", "Cmd", "T"]);
+        let tab = KeyboardShortcut::new(Modifiers::CTRL, Key::Tab);
+        assert_eq!(caps(&tab, true, true), ["⌃", "Tab"]);
     }
 
     #[test]

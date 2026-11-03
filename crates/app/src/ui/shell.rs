@@ -16,6 +16,7 @@ use crate::lookup::References;
 use crate::shell::{
     Body, Ending, FileJob, Selected, ShellLanguage, ShellResult, ShellState, elapsed_text,
 };
+use crate::shortcuts;
 use crate::tabs::CollectionTab;
 use crate::theme;
 use crate::ui::documents::{self, DocumentPage, FieldMenus, TabAction, VIEWS, page_button};
@@ -105,13 +106,20 @@ fn toolbar(
             }
             ui.spinner();
         } else {
-            let run = kit::button(ui, Tone::Primary, Some(icons::PLAY), "Run", height)
-                .on_hover_text("Run the whole script (Ctrl+Shift+Enter)");
+            let ctx = ui.ctx().clone();
+            let keys = |shortcut| shortcuts::text(&ctx, shortcut);
+            let run =
+                kit::button(ui, Tone::Primary, Some(icons::PLAY), "Run", height).on_hover_text(
+                    format!("Run the whole script ({})", keys(&shortcuts::RUN_SCRIPT)),
+                );
             if run.clicked() {
                 action = Some(ShellAction::Run(shell.text.clone()));
             }
             let statement = kit::button(ui, Tone::Secondary, None, "Run statement", height)
-                .on_hover_text("Run the statement at the cursor, or the selection (Ctrl+Enter)");
+                .on_hover_text(format!(
+                    "Run the statement at the cursor, or the selection ({})",
+                    keys(&shortcuts::RUN_STATEMENT)
+                ));
             if statement.clicked() {
                 action = run_statement(ui.ctx(), shell);
             }

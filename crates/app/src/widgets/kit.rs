@@ -292,6 +292,12 @@ pub fn pill(ui: &mut Ui, text: &str, accent: bool) -> Response {
     response
 }
 
+/// The caps of an app shortcut, as this platform writes them.
+pub fn shortcut(ui: &mut Ui, shortcut: &egui::KeyboardShortcut) {
+    let caps = crate::shortcuts::key_caps(ui.ctx(), shortcut);
+    keys(ui, &caps);
+}
+
 /// Key caps such as Ctrl K, shown as a hint.
 pub fn keys(ui: &mut Ui, keys: &[&str]) {
     let palette = theme::palette(ui);

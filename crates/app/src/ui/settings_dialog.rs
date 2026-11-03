@@ -57,7 +57,7 @@ impl SettingsDialog {
                     ui.label("Go to collection");
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("What").size(12.5).weak());
-                        kit::keys(ui, &["Ctrl", "K"]);
+                        kit::shortcut(ui, &crate::shortcuts::GO_TO);
                         ui.label(RichText::new("searches").size(12.5).weak());
                     });
                 });

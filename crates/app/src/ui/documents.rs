@@ -402,7 +402,7 @@ fn filter_field(ui: &mut egui::Ui, tab: &mut CollectionTab) -> bool {
                     submitted = output.submitted;
                 });
                 if !focused {
-                    kit::keys(ui, &["Ctrl", "L"]);
+                    kit::shortcut(ui, &crate::shortcuts::FOCUS_EDITOR);
                 }
             });
         })
