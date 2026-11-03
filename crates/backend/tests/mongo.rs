@@ -147,11 +147,7 @@ async fn finds_pages_and_counts_documents() {
     let Response::Documents(result) = send(&backend, find).await else {
         panic!("unexpected response");
     };
-    let documents: Vec<_> = result
-        .unwrap()
-        .into_iter()
-        .map(|found| found.document)
-        .collect();
+    let documents = result.unwrap();
     assert_eq!(
         documents,
         [doc! { "n": 24 }, doc! { "n": 22 }, doc! { "n": 20 }]
@@ -521,7 +517,7 @@ async fn runs_scripts_and_pages_their_results() {
     let Response::Documents(found) = send(&backend, page).await else {
         panic!("unexpected response");
     };
-    let found: Vec<Document> = found.unwrap().into_iter().map(|f| f.document).collect();
+    let found = found.unwrap();
     assert_eq!(found, [doc! { "_id": 3, "n": "c" }]);
 }
 

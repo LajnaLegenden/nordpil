@@ -16,7 +16,7 @@ use crate::connections::{Collections, ConnectionEntry, ConnectionState, Selectio
 use crate::lookup::References;
 use crate::shell::{Body, Ending, FileJob, PageRequest, Running};
 use crate::shortcuts::{self, AppCommand};
-use crate::tabs::{CollectionTab, Panel, QueryInputs, View, build_query, history_entry};
+use crate::tabs::{CollectionTab, Panel, QueryInputs, Results, View, build_query, history_entry};
 use crate::ui::connection_form::{ConnectionForm, FormResult};
 use crate::ui::dialogs::{CreateCollectionDialog, Dialog, DropDialog, PasswordPrompt};
 use crate::ui::document_dialogs::{self, DocumentDialog};
@@ -47,6 +47,13 @@ fn script_action(panel: Panel, command: AppCommand) -> Option<ShellAction> {
     }
 }
 
+/// The edit dialog shows a document's whole text, which past the preview's
+/// size gets too slow to edit.
+fn too_large_to_edit(document: &bson::Document) -> bool {
+    nordpil_query::format_document(document, nordpil_query::Style::Pretty(2)).len()
+        > nordpil_backend::PREVIEW_BYTES
+}
+
 /// A modal that holds back app-wide keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Modal {
@@ -66,6 +73,8 @@ enum UpdateClick {
 const MAX_NOTIFICATIONS: usize = 5;
 /// Recently opened collections kept for Ctrl+K.
 const MAX_RECENTS: usize = 50;
+/// Points per mouse wheel notch: egui's 40 felt slow.
+const LINE_SCROLL_SPEED: f32 = 60.0;
 /// Closed tabs Ctrl+Shift+T can bring back.
 const MAX_CLOSED: usize = 10;
 
@@ -157,6 +166,7 @@ impl NordpilApp {
         };
         theme::install(ctx);
         theme::apply_settings(ctx, &settings);
+        ctx.options_mut(|options| options.input_options.line_scroll_speed = LINE_SCROLL_SPEED);
         let ctx = ctx.clone();
         let mut backend = Bridge::new(backend, move || ctx.request_repaint())?;
         backend.send(Command::LoadConnections);
@@ -693,8 +703,8 @@ impl NordpilApp {
                 if tab
                     .results
                     .as_ref()
-                    .and_then(|results| results.previews.get(document))
-                    .is_some_and(|preview| preview.full_len > nordpil_backend::PREVIEW_BYTES) =>
+                    .and_then(|results| results.documents.get(document))
+                    .is_some_and(too_large_to_edit) =>
             {
                 self.notify(BackendError::new(
                     "This document is too large to edit here. Use a bulk update with a filter on its _id.",
@@ -905,13 +915,13 @@ impl NordpilApp {
     fn shell_page_arrived(
         &mut self,
         request: RequestId,
-        result: Result<Vec<nordpil_backend::FoundDocument>, BackendError>,
+        result: Result<Vec<bson::Document>, BackendError>,
     ) {
         for tab in &mut self.tabs {
             if let Some(page) = tab.shell.result_for_request(request) {
                 page.pending = None;
                 match result {
-                    Ok(found) => page.results = Some(crate::shell::results_of(found)),
+                    Ok(documents) => page.results = Some(Results::new(documents)),
                     Err(error) => {
                         page.results = None;
                         page.error = Some(error.message);
@@ -2618,7 +2628,7 @@ mod tests {
         app.connections = vec![entry];
         app.settings.look_up_references = true;
         let mut tab = CollectionTab::new(1, target);
-        tab.set_documents(vec![nordpil_backend::FoundDocument::new(document)]);
+        tab.set_documents(vec![document]);
         app.tabs.push(tab);
         app.active_tab = Some(0);
         app.next_tab_id = 1;
@@ -3045,7 +3055,7 @@ mod tests {
 
     #[test]
     fn lookup_from_the_shell_appends_and_runs_a_find() {
-        use crate::shell::{Body, Selected, ShellResult, page_of};
+        use crate::shell::{Body, Selected, ShellResult};
 
         let customer = bson::oid::ObjectId::from_bytes([7; 12]);
         let mut harness = lookup_harness(&["customers", "orders"], bson::doc! { "_id": 1 });
@@ -3057,11 +3067,7 @@ mod tests {
             tab.shell.results.push(ShellResult {
                 title: "db.orders.find({}).toArray()".to_owned(),
                 elapsed: Duration::from_millis(3),
-                body: Body::Documents {
-                    current: page_of(&documents, 0, 20),
-                    documents,
-                    page: 0,
-                },
+                body: Body::documents(documents, 20),
             });
             tab.shell.selected = Some(Selected::Result(0));
         }
@@ -3379,7 +3385,6 @@ mod screenshots {
                         "created": bson::DateTime::from_millis(1_700_000_000_000 + i64::from(n) * 86_400_000),
                     }
                 })
-                .map(nordpil_backend::FoundDocument::new)
                 .collect(),
         );
         let saved = |filter: &str, sort: &str, favorite: bool| nordpil_backend::SavedQuery {
@@ -3643,7 +3648,7 @@ mod screenshots {
         harness.state_mut().tabs[0].panel = Panel::Documents;
 
         {
-            use crate::shell::{Body, Selected, ShellResult, page_of};
+            use crate::shell::{Body, Selected, ShellResult};
             let tab = &mut harness.state_mut().tabs[0];
             tab.panel = Panel::Shell;
             tab.shell.loaded = true;
@@ -3662,11 +3667,7 @@ mod screenshots {
                 ShellResult {
                     title: "db.orders.find({ status: 'shipped', cr…".to_owned(),
                     elapsed: std::time::Duration::from_millis(14),
-                    body: Body::Documents {
-                        current: page_of(&documents, 0, 20),
-                        documents,
-                        page: 0,
-                    },
+                    body: Body::documents(documents, 20),
                 },
                 ShellResult {
                     title: "db.orders.countDocuments({ status: 'sh…".to_owned(),
