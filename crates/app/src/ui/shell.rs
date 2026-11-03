@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 
+use bson::Document;
 use eframe::egui::{
     self, Align, Frame, Key, Layout, Margin, Modifiers, RichText, ScrollArea, TextEdit,
 };
@@ -11,12 +12,13 @@ use nordpil_shell::QueryKind;
 use uuid::Uuid;
 
 use crate::icons;
+use crate::lookup::References;
 use crate::shell::{
     Body, Ending, FileJob, Selected, ShellLanguage, ShellResult, ShellState, elapsed_text,
 };
 use crate::tabs::CollectionTab;
 use crate::theme;
-use crate::ui::documents::{self, DocumentPage, VIEWS, page_button};
+use crate::ui::documents::{self, DocumentPage, FieldMenus, TabAction, VIEWS, page_button};
 use crate::widgets::code_editor;
 use crate::widgets::kit::{self, Tone};
 use crate::widgets::split::{Pane, Split};
@@ -40,6 +42,12 @@ pub enum ShellAction {
     File(FileJob),
     /// The layout changed for good: a drag ended, or the orientation flipped.
     SaveLayout,
+    /// Open the documents an id field of a result refers to, in a new tab.
+    Lookup {
+        database: String,
+        collection: String,
+        filter: Document,
+    },
 }
 
 /// What the shell panel uses besides its tab.
@@ -48,6 +56,9 @@ pub struct Surroundings<'a> {
     pub collections: &'a [String],
     /// Shared by every tab and kept in the settings.
     pub layout: &'a mut ShellLayout,
+    /// Where id fields of the shown result can be looked up; `None` when
+    /// lookups are off.
+    pub references: Option<&'a References>,
 }
 
 pub fn show(
@@ -58,6 +69,7 @@ pub fn show(
     let Surroundings {
         collections,
         layout,
+        references,
     } = surroundings;
     let mut action = toolbar(ui, tab, layout);
     ui.add_space(10.0);
@@ -70,7 +82,7 @@ pub fn show(
     let mut results_action = None;
     let done = split.show(ui, layout.split_mut(), |ui, pane| match pane {
         Pane::First => editor_action = editor(ui, tab, collections),
-        Pane::Second => results_action = results(ui, tab),
+        Pane::Second => results_action = results(ui, tab, references),
     });
     if done {
         action = action.or(Some(ShellAction::SaveLayout));
@@ -251,6 +263,10 @@ fn editor(
         wanted: RefCell::new(None),
     };
     let before = shell.text.clone();
+    let to_end = std::mem::take(&mut shell.cursor_to_end);
+    if to_end {
+        shell.editor.focus_at(ui.ctx(), shell.text.chars().count());
+    }
     let framed = code_editor::frame(ui, focused)
         .inner_margin(Margin::same(1))
         .show(ui, |ui| {
@@ -259,7 +275,11 @@ fn editor(
                 .auto_shrink(false)
                 .show(ui, |ui| {
                     shell.editor.set_min_height(ui.available_height());
-                    shell.editor.show(ui, &mut shell.text, &language)
+                    let output = shell.editor.show(ui, &mut shell.text, &language);
+                    if to_end {
+                        output.response.scroll_to_me(Some(Align::Max));
+                    }
+                    output
                 })
                 .inner
         });
@@ -285,7 +305,11 @@ fn editor(
     action
 }
 
-fn results(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<ShellAction> {
+fn results(
+    ui: &mut egui::Ui,
+    tab: &mut CollectionTab,
+    references: Option<&References>,
+) -> Option<ShellAction> {
     let palette = theme::palette(ui);
     let shell = &mut tab.shell;
     match &shell.ending {
@@ -349,7 +373,9 @@ fn results(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<ShellAction> {
         });
     ui.add_space(10.0);
     match shell.selected {
-        Some(Selected::Result(index)) if index < shell.results.len() => result_view(ui, tab, index),
+        Some(Selected::Result(index)) if index < shell.results.len() => {
+            result_view(ui, tab, index, references)
+        }
         Some(Selected::Output) => {
             output_view(ui, &shell.output);
             None
@@ -379,7 +405,12 @@ fn result_tab(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response 
     )
 }
 
-fn result_view(ui: &mut egui::Ui, tab: &mut CollectionTab, index: usize) -> Option<ShellAction> {
+fn result_view(
+    ui: &mut egui::Ui,
+    tab: &mut CollectionTab,
+    index: usize,
+    references: Option<&References>,
+) -> Option<ShellAction> {
     let palette = theme::palette(ui);
     let page_size = tab.page_size;
     let scope = egui::Id::unique(("shell_result", tab.id, index));
@@ -491,10 +522,20 @@ fn result_view(ui: &mut egui::Ui, tab: &mut CollectionTab, index: usize) -> Opti
         results,
         scope,
         page,
-        field_menus: false,
+        field_menus: FieldMenus::Lookups,
     };
-    let mut ignored = None;
-    documents::page_view(ui, view, &page, true, None, &mut ignored);
+    let mut view_action = None;
+    documents::page_view(ui, view, &page, true, references, &mut view_action);
+    if let Some(TabAction::Lookup { collection, filter }) = view_action {
+        action = Some(ShellAction::Lookup {
+            database: shell
+                .result_database(index)
+                .unwrap_or(&tab.target.database)
+                .to_owned(),
+            collection,
+            filter,
+        });
+    }
     action
 }
 
@@ -587,6 +628,7 @@ mod tests {
                     let surroundings = Surroundings {
                         collections: &[],
                         layout: &mut state.layout,
+                        references: None,
                     };
                     match show(ui, &mut state.tab, surroundings) {
                         Some(ShellAction::Run(script)) => state.ran = Some(script),

@@ -233,15 +233,18 @@ impl NordpilApp {
     /// Where id fields in the tab can be looked up; `None` when lookups
     /// are off.
     fn references(&self, index: usize) -> Option<References> {
+        let target = &self.tabs[index].target;
+        self.references_in(target.connection, &target.database)
+    }
+
+    /// Where id fields of documents in `database` can be looked up.
+    fn references_in(&self, connection: Uuid, database: &str) -> Option<References> {
         if !self.settings.look_up_references {
             return None;
         }
-        let target = &self.tabs[index].target;
         Some(References {
-            collections: self.collection_names(target.connection, &target.database),
-            mappings: self
-                .database_mappings(target.connection, &target.database)
-                .to_vec(),
+            collections: self.collection_names(connection, database),
+            mappings: self.database_mappings(connection, database).to_vec(),
         })
     }
 
@@ -617,27 +620,52 @@ impl NordpilApp {
         }
     }
 
+    /// Runs `script` in the tab's shell, unless a run is going.
+    fn run_script(&mut self, index: usize, script: String) {
+        let namespace = self.tabs[index].namespace();
+        let shell = &mut self.tabs[index].shell;
+        if script.trim().is_empty() || shell.running.is_some() {
+            return;
+        }
+        let run = nordpil_backend::ScriptRun::new();
+        let request = self.backend.send(Command::RunScript {
+            namespace: namespace.clone(),
+            script: script.clone(),
+            run: Arc::clone(&run),
+        });
+        shell.start(script.clone(), Running { request, run });
+        self.backend
+            .send(Command::RecordScript { namespace, script });
+    }
+
     fn shell_action(&mut self, ctx: &egui::Context, index: usize, action: ShellAction) {
         let namespace = self.tabs[index].namespace();
         let page_size = self.tabs[index].page_size;
         let shell = &mut self.tabs[index].shell;
         match action {
-            ShellAction::Run(script) => {
-                if script.trim().is_empty() || shell.running.is_some() {
-                    return;
-                }
-                let run = nordpil_backend::ScriptRun::new();
-                let request = self.backend.send(Command::RunScript {
-                    namespace: namespace.clone(),
-                    script: script.clone(),
-                    run: Arc::clone(&run),
-                });
-                shell.start(script.clone(), Running { request, run });
-                self.backend
-                    .send(Command::RecordScript { namespace, script });
-            }
+            ShellAction::Run(script) => self.run_script(index, script),
             ShellAction::SaveLayout => {
                 self.backend.send(Command::SaveSettings(self.settings));
+            }
+            ShellAction::Lookup {
+                database,
+                collection,
+                filter,
+            } => {
+                let target = Selection {
+                    connection: namespace.connection,
+                    database,
+                    collection,
+                };
+                let statement = crate::shell::find_statement(&target.collection, &filter);
+                let filter = nordpil_query::format_document(&filter, nordpil_query::Style::Compact);
+                self.record_recent(&target);
+                self.push_tab(target, filter);
+                if let Some(tab) = self.tabs.last_mut()
+                    && tab.panel == Panel::Shell
+                {
+                    tab.shell.queued = Some(statement);
+                }
             }
             ShellAction::Stop => {
                 if let Some(running) = &shell.running {
@@ -1179,12 +1207,19 @@ impl NordpilApp {
             Response::ScriptFinished(result) => self.script_finished(request, result),
             Response::Scripts { namespace, result } => match result {
                 Ok(scripts) => {
-                    for tab in &mut self.tabs {
+                    let mut queued = Vec::new();
+                    for (index, tab) in self.tabs.iter_mut().enumerate() {
                         if tab.namespace() == namespace {
                             tab.shell.history = scripts.history.clone();
                             tab.shell
                                 .load_draft(scripts.draft.clone(), &tab.target.collection);
+                            if let Some(statement) = tab.shell.append_queued() {
+                                queued.push((index, statement));
+                            }
                         }
+                    }
+                    for (index, statement) in queued {
+                        self.run_script(index, statement);
                     }
                 }
                 Err(error) => self.notify(error),
@@ -1870,9 +1905,22 @@ impl NordpilApp {
                         self.ensure_collections(&target);
                         let collections =
                             self.collection_names(target.connection, &target.database);
+                        // Lookups go to the shown result's database.
+                        let database = self.tabs[index]
+                            .shell
+                            .shown_database()
+                            .unwrap_or(&target.database)
+                            .to_owned();
+                        let shown = Selection {
+                            database,
+                            ..target.clone()
+                        };
+                        self.load_references(&shown);
+                        let references = self.references_in(shown.connection, &shown.database);
                         let surroundings = crate::ui::shell::Surroundings {
                             collections: &collections,
                             layout: &mut self.settings.shell,
+                            references: references.as_ref(),
                         };
                         if let Some(action) =
                             crate::ui::shell::show(ui, &mut self.tabs[index], surroundings)
@@ -2329,6 +2377,52 @@ mod tests {
         assert_eq!(app.active_tab, Some(1));
         assert_eq!(app.tabs[1].panel, Panel::Shell);
         assert_eq!(app.tabs[0].panel, Panel::Shell);
+    }
+
+    #[test]
+    fn lookup_from_the_shell_appends_and_runs_a_find() {
+        use crate::shell::{Body, Selected, ShellResult, page_of};
+
+        let customer = bson::oid::ObjectId::from_bytes([7; 12]);
+        let mut harness = lookup_harness(&["customers", "orders"], bson::doc! { "_id": 1 });
+        {
+            let tab = &mut harness.state_mut().tabs[0];
+            tab.panel = Panel::Shell;
+            tab.shell.load_draft(None, "orders");
+            let documents = vec![bson::doc! { "_id": 1, "customerId": customer }];
+            tab.shell.results.push(ShellResult {
+                title: "db.orders.find({}).toArray()".to_owned(),
+                elapsed: Duration::from_millis(3),
+                body: Body::Documents {
+                    current: page_of(&documents, 0, 20),
+                    documents,
+                    page: 0,
+                },
+            });
+            tab.shell.selected = Some(Selected::Result(0));
+        }
+        harness.run();
+
+        harness.get_by_label("customerId:").click_secondary();
+        harness.run();
+        assert!(harness.query_by_label("Add to filter").is_none());
+        harness.get_by_label("Open in customers").click();
+        harness.run();
+        run_until(&mut harness, |app| {
+            app.tabs.get(1).is_some_and(|tab| tab.shell.loaded)
+        });
+
+        let app = harness.state();
+        let tab = &app.tabs[1];
+        let find = format!(
+            "db.customers.find({{ _id: ObjectId('{}') }})",
+            customer.to_hex()
+        );
+        assert_eq!(app.active_tab, Some(1));
+        assert_eq!(tab.panel, Panel::Shell);
+        assert_eq!(tab.target.collection, "customers");
+        assert_eq!(tab.shell.text, find);
+        assert_eq!(tab.shell.script, find);
     }
 
     #[test]

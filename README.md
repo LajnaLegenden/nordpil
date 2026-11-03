@@ -35,7 +35,8 @@ when idle, against roughly 1 GB for Compass.
   Ctrl+Enter runs the statement at the cursor, Ctrl+Shift+Enter the whole script.
   Autocomplete for collections, methods, fields and the script's variables. Drafts,
   history and favorites per collection; open and save `.js` files. Results sit below or
-  beside the script, with a divider that drags to give either side more room.
+  beside the script, with a divider that drags to give either side more room. With
+  lookups on, right-clicking an id in a result runs a `find` for it in a new tab's shell.
 - **Import and export**: JSON, JSON lines and CSV, streamed with progress and cancel.
 - **Settings**: dark, light or system theme, three text sizes, and whether Ctrl+K searches
   all saved connections or only open ones.

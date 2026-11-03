@@ -120,7 +120,7 @@ pub fn show(
         results,
         scope: egui::Id::unique(("tab", tab.id)),
         page: tab.page,
-        field_menus: true,
+        field_menus: FieldMenus::All,
     };
     page_view(ui, tab.view, &page, read_only, references, &mut view_action);
     if let Some(TabAction::AddToFilter { path, value }) = &view_action {
@@ -190,16 +190,41 @@ fn lookups<'a>(
         .collect()
 }
 
+/// What a field's menu offers, and where its lookups go.
+#[derive(Clone, Copy)]
+struct Menus<'a> {
+    kind: FieldMenus,
+    /// `None` when lookups are off.
+    references: Option<&'a References>,
+}
+
+impl Menus<'_> {
+    /// Whether an object or array at `place` gets a menu; values always
+    /// have one, with "Copy value".
+    fn offers(&self, place: &Place, value: &Bson) -> bool {
+        match (self.kind, self.references) {
+            // An array of ids can be looked up or linked; an object can't.
+            (FieldMenus::All, Some(_)) => matches!(value, Bson::Array(_)),
+            (FieldMenus::Lookups, Some(references)) => {
+                matches!(value, Bson::Array(_)) && !lookups(place, value, references).is_empty()
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Add to filter, exclude from filter, lookups and linking for a
-/// right-clicked value. Returns true when it showed anything.
+/// right-clicked value, as far as `menus` allows. Returns true when it
+/// showed anything.
 fn field_menu(
     ui: &mut egui::Ui,
     place: &Place,
     value: &Bson,
-    references: Option<&References>,
+    menus: Menus,
     action: &mut Option<TabAction>,
 ) -> bool {
-    let leaf = !matches!(value, Bson::Document(_) | Bson::Array(_));
+    let all = menus.kind == FieldMenus::All;
+    let leaf = all && !matches!(value, Bson::Document(_) | Bson::Array(_));
     if leaf {
         if ui.button("Add to filter").clicked() {
             *action = Some(TabAction::AddToFilter {
@@ -215,19 +240,27 @@ fn field_menu(
         }
     }
     // An object can't be an id.
-    let Some(references) = references.filter(|_| !matches!(value, Bson::Document(_))) else {
+    let Some(references) = menus
+        .references
+        .filter(|_| menus.kind != FieldMenus::Off && !matches!(value, Bson::Document(_)))
+    else {
         return leaf;
     };
+    let targets = lookups(place, value, references);
     if leaf {
         ui.separator();
     }
-    for (collection, filter) in lookups(place, value, references) {
+    let looked_up = !targets.is_empty();
+    for (collection, filter) in targets {
         if ui.button(format!("Open in {collection}")).clicked() {
             *action = Some(TabAction::Lookup {
                 collection: collection.to_owned(),
                 filter,
             });
         }
+    }
+    if !all {
+        return looked_up;
     }
     let link = if references.mapping(&place.name).is_some() {
         "Edit link…"
@@ -740,6 +773,16 @@ pub fn thousands(n: u64) -> String {
     out
 }
 
+/// What right-clicking a field offers besides "Copy value".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldMenus {
+    Off,
+    /// Only lookups, for results that aren't the tab's query.
+    Lookups,
+    /// Add to filter, exclude from filter, lookups and linking.
+    All,
+}
+
 /// A page of documents to show, and where its widget state lives.
 pub struct DocumentPage<'a> {
     pub results: &'a Results,
@@ -748,8 +791,7 @@ pub struct DocumentPage<'a> {
     pub scope: egui::Id,
     /// Expanded fields reset per page; column widths don't.
     pub page: u64,
-    /// Offer "Add to filter" and lookups on fields.
-    pub field_menus: bool,
+    pub field_menus: FieldMenus,
 }
 
 /// Shows `page` in the list, JSON or table view. `read_only` hides
@@ -795,19 +837,14 @@ fn list_view(
                                     ui.set_width(ui.available_width());
                                     ui.spacing_mut().item_spacing.y = 4.0;
                                     ui.spacing_mut().interact_size.y = 20.0;
-                                    let field_menus = page.field_menus.then_some(references);
+                                    let menus = Menus {
+                                        kind: page.field_menus,
+                                        references,
+                                    };
                                     for (key, value) in document {
                                         let place = Place::root(key);
                                         let field_id = id.with(key);
-                                        field(
-                                            ui,
-                                            field_id,
-                                            key,
-                                            value,
-                                            &place,
-                                            field_menus,
-                                            action,
-                                        );
+                                        field(ui, field_id, key, value, &place, menus, action);
                                     }
                                 });
                         },
@@ -880,12 +917,12 @@ fn document_menu(
     document: &Document,
     index: usize,
     read_only: bool,
-    field: Option<(&Place, &Bson, Option<&References>)>,
+    field: Option<(&Place, &Bson, Menus)>,
     action: &mut Option<TabAction>,
 ) {
     response.context_menu(|ui| {
-        if let Some((place, value, references)) = field
-            && field_menu(ui, place, value, references, action)
+        if let Some((place, value, menus)) = field
+            && field_menu(ui, place, value, menus, action)
         {
             ui.separator();
         }
@@ -910,17 +947,16 @@ fn document_menu(
 }
 
 /// One field of the list view; documents and arrays expand. `place` is where
-/// it is, for its menu. `menus` is `None` when fields get only "Copy value".
+/// it is, for its menu.
 fn field(
     ui: &mut egui::Ui,
     id: egui::Id,
     key: &str,
     value: &Bson,
     place: &Place,
-    menus: Option<Option<&References>>,
+    menus: Menus,
     action: &mut Option<TabAction>,
 ) {
-    let references = menus.flatten();
     let palette = theme::palette(ui);
     let children: Option<(String, Vec<(String, &Bson)>)> = match value {
         Bson::Document(document) => Some((
@@ -945,7 +981,7 @@ fn field(
             ui.add_space(6.0);
             let value_response = value_label(ui, value, Sense::click());
             (key | value_response).context_menu(|ui| {
-                if menus.is_some() && field_menu(ui, place, value, references, action) {
+                if field_menu(ui, place, value, menus, action) {
                     ui.separator();
                 }
                 if ui.button("Copy value").clicked() {
@@ -985,9 +1021,9 @@ fn field(
         );
         // Objects and arrays can't go into the filter, but an array of ids
         // can be looked up or linked.
-        if references.is_some() && matches!(value, Bson::Array(_)) {
+        if menus.offers(place, value) {
             (label.clone() | summary).context_menu(|ui| {
-                field_menu(ui, place, value, references, action);
+                field_menu(ui, place, value, menus, action);
             });
         }
         chevron.clicked() || label.clicked()
@@ -1116,10 +1152,12 @@ fn json_view(
                 let segments: Vec<Segment> = ui
                     .data(|data| data.get_temp(clicked_field))
                     .unwrap_or_default();
-                let field = resolve(document, &segments).filter(|_| page.field_menus);
-                let field = field
-                    .as_ref()
-                    .map(|(place, value)| (place, *value, references));
+                let menus = Menus {
+                    kind: page.field_menus,
+                    references,
+                };
+                let field = resolve(document, &segments).filter(|_| menus.kind != FieldMenus::Off);
+                let field = field.as_ref().map(|(place, value)| (place, *value, menus));
                 document_menu(response, document, index, read_only, field, action);
                 if preview.full_len > text.len() {
                     ui.weak(format!(
@@ -1216,12 +1254,17 @@ fn table_view(
                             }
                             let column: Option<String> =
                                 response.ctx.data(|data| data.get_temp(clicked_column));
-                            let field = column.filter(|_| page.field_menus).and_then(|name| {
-                                document.get(&name).map(|value| (Place::root(&name), value))
-                            });
-                            let field = field
-                                .as_ref()
-                                .map(|(place, value)| (place, *value, references));
+                            let menus = Menus {
+                                kind: page.field_menus,
+                                references,
+                            };
+                            let field =
+                                column
+                                    .filter(|_| menus.kind != FieldMenus::Off)
+                                    .and_then(|name| {
+                                        document.get(&name).map(|value| (Place::root(&name), value))
+                                    });
+                            let field = field.as_ref().map(|(place, value)| (place, *value, menus));
                             document_menu(&response, document, index, read_only, field, action);
                         });
                     });
@@ -1340,7 +1383,7 @@ mod tests {
                         results: tab.results.as_ref().unwrap(),
                         scope: egui::Id::unique("test"),
                         page: 0,
-                        field_menus: true,
+                        field_menus: FieldMenus::All,
                     };
                     list_view(ui, &page, false, None, &mut action);
                 },
