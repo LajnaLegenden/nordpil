@@ -10,6 +10,8 @@ pub enum AppCommand {
     GoTo,
     /// The filter, or the script on the Shell panel.
     FocusEditor,
+    CloseTab,
+    Settings,
 }
 
 pub struct Binding {
@@ -24,6 +26,8 @@ const fn command(key: Key) -> KeyboardShortcut {
 
 pub const GO_TO: KeyboardShortcut = command(Key::K);
 pub const FOCUS_EDITOR: KeyboardShortcut = command(Key::L);
+pub const CLOSE_TAB: KeyboardShortcut = command(Key::W);
+pub const SETTINGS: KeyboardShortcut = command(Key::Comma);
 /// Saves a document dialog; handled there.
 pub const SAVE_DOCUMENT: KeyboardShortcut = command(Key::Enter);
 /// In the shell editor; handled there.
@@ -41,6 +45,14 @@ pub const BINDINGS: &[Binding] = &[
     Binding {
         command: AppCommand::FocusEditor,
         keys: &[FOCUS_EDITOR],
+    },
+    Binding {
+        command: AppCommand::CloseTab,
+        keys: &[CLOSE_TAB],
+    },
+    Binding {
+        command: AppCommand::Settings,
+        keys: &[SETTINGS],
     },
 ];
 
