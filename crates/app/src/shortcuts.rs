@@ -11,6 +11,12 @@ pub enum AppCommand {
     /// The filter, or the script on the Shell panel.
     FocusEditor,
     CloseTab,
+    ReopenTab,
+    NextTab,
+    PreviousTab,
+    /// Counted from 0.
+    SelectTab(usize),
+    LastTab,
     Settings,
     SaveScript,
     OpenScript,
@@ -30,6 +36,13 @@ const fn command(key: Key) -> KeyboardShortcut {
 pub const GO_TO: KeyboardShortcut = command(Key::K);
 pub const FOCUS_EDITOR: KeyboardShortcut = command(Key::L);
 pub const CLOSE_TAB: KeyboardShortcut = command(Key::W);
+pub const REOPEN_TAB: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::T);
+/// Control on macOS too, where Cmd+Tab switches apps.
+pub const NEXT_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Tab);
+pub const PREVIOUS_TAB: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::Tab);
+pub const LAST_TAB: KeyboardShortcut = command(Key::Num9);
 pub const SETTINGS: KeyboardShortcut = command(Key::Comma);
 /// Saves a document dialog; handled there.
 pub const SAVE_DOCUMENT: KeyboardShortcut = command(Key::Enter);
@@ -41,6 +54,14 @@ pub const ESCAPE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key:
 pub const SAVE_SCRIPT: KeyboardShortcut = command(Key::S);
 pub const OPEN_SCRIPT: KeyboardShortcut = command(Key::O);
 pub const STOP_SCRIPT: KeyboardShortcut = command(Key::Period);
+
+/// Ctrl+1 to Ctrl+8 go to that tab.
+const fn tab(index: usize, keys: &'static [KeyboardShortcut]) -> Binding {
+    Binding {
+        command: AppCommand::SelectTab(index),
+        keys,
+    }
+}
 
 /// More specific keys come before the ones they contain: Ctrl+Shift+Tab
 /// before Ctrl+Tab, since a match ignores extra Shift.
@@ -56,6 +77,30 @@ pub const BINDINGS: &[Binding] = &[
     Binding {
         command: AppCommand::CloseTab,
         keys: &[CLOSE_TAB],
+    },
+    Binding {
+        command: AppCommand::ReopenTab,
+        keys: &[REOPEN_TAB],
+    },
+    Binding {
+        command: AppCommand::PreviousTab,
+        keys: &[PREVIOUS_TAB],
+    },
+    Binding {
+        command: AppCommand::NextTab,
+        keys: &[NEXT_TAB],
+    },
+    tab(0, &[command(Key::Num1)]),
+    tab(1, &[command(Key::Num2)]),
+    tab(2, &[command(Key::Num3)]),
+    tab(3, &[command(Key::Num4)]),
+    tab(4, &[command(Key::Num5)]),
+    tab(5, &[command(Key::Num6)]),
+    tab(6, &[command(Key::Num7)]),
+    tab(7, &[command(Key::Num8)]),
+    Binding {
+        command: AppCommand::LastTab,
+        keys: &[LAST_TAB],
     },
     Binding {
         command: AppCommand::Settings,

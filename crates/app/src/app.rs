@@ -16,7 +16,7 @@ use crate::connections::{Collections, ConnectionEntry, ConnectionState, Selectio
 use crate::lookup::References;
 use crate::shell::{Body, Ending, FileJob, PageRequest, Running};
 use crate::shortcuts::{self, AppCommand};
-use crate::tabs::{CollectionTab, Panel, build_query, history_entry};
+use crate::tabs::{CollectionTab, Panel, QueryInputs, View, build_query, history_entry};
 use crate::ui::connection_form::{ConnectionForm, FormResult};
 use crate::ui::dialogs::{CreateCollectionDialog, Dialog, DropDialog, PasswordPrompt};
 use crate::ui::document_dialogs::{self, DocumentDialog};
@@ -64,6 +64,49 @@ enum UpdateClick {
 const MAX_NOTIFICATIONS: usize = 5;
 /// Recently opened collections kept for Ctrl+K.
 const MAX_RECENTS: usize = 50;
+/// Closed tabs Ctrl+Shift+T can bring back.
+const MAX_CLOSED: usize = 10;
+
+/// What Ctrl+Shift+T brings back of a closed tab. The shell script comes
+/// back by itself, from the draft saved on close.
+struct ClosedTab {
+    target: Selection,
+    panel: Panel,
+    inputs: QueryInputs,
+    show_options: bool,
+    view: View,
+    page_size: u64,
+}
+
+impl ClosedTab {
+    fn of(tab: &CollectionTab) -> Self {
+        Self {
+            target: tab.target.clone(),
+            panel: tab.panel,
+            inputs: tab.inputs.clone(),
+            show_options: tab.show_options,
+            view: tab.view,
+            page_size: tab.page_size,
+        }
+    }
+}
+
+/// A tab to open once its connection, being connected, is open.
+enum PendingOpen {
+    /// From Ctrl+K: the collection's tab, opened if it has none.
+    Collection(Selection),
+    /// From Ctrl+Shift+T.
+    Reopen(Box<ClosedTab>),
+}
+
+impl PendingOpen {
+    fn connection(&self) -> Uuid {
+        match self {
+            Self::Collection(target) => target.connection,
+            Self::Reopen(closed) => closed.target.connection,
+        }
+    }
+}
 
 pub struct NordpilApp {
     backend: Bridge<Backend>,
@@ -91,7 +134,9 @@ pub struct NordpilApp {
     /// Collection names remembered for saved connections, for Ctrl+K.
     known: Vec<KnownDatabase>,
     /// Opened once its connection, being connected, is open.
-    pending_open: Option<Selection>,
+    pending_open: Option<PendingOpen>,
+    /// Tabs the user closed, newest last, for Ctrl+Shift+T.
+    closed: Vec<ClosedTab>,
     /// Off in development builds and tests.
     updater: Option<Updater>,
 }
@@ -134,6 +179,7 @@ impl NordpilApp {
             recents: Vec::new(),
             known: Vec::new(),
             pending_open: None,
+            closed: Vec::new(),
             updater: None,
         };
         if let Some(error) = settings_error {
@@ -220,11 +266,16 @@ impl NordpilApp {
 
     /// Opens another tab even when the collection has one, and runs `filter`.
     fn push_tab(&mut self, target: Selection, filter: String) {
+        self.add_tab(target, |tab| tab.inputs.filter = filter);
+    }
+
+    /// Opens another tab, lets `setup` change it, then runs its query.
+    fn add_tab(&mut self, target: Selection, setup: impl FnOnce(&mut CollectionTab)) {
         self.load_references(&target);
         self.next_tab_id += 1;
         let mut tab = CollectionTab::new(self.next_tab_id, target);
         tab.panel = self.settings.last_panel;
-        tab.inputs.filter = filter;
+        setup(&mut tab);
         self.backend.send(Command::LoadQueries(tab.namespace()));
         self.backend.send(Command::LoadScripts(tab.namespace()));
         self.backend.send(Command::SampleFields(tab.namespace()));
@@ -362,10 +413,12 @@ impl NordpilApp {
     fn go_to(&mut self, target: Selection) {
         match self.entry(target.connection).map(|entry| &entry.state) {
             Some(ConnectionState::Connected(_)) => self.open_tab(target),
-            Some(ConnectionState::Connecting(_)) => self.pending_open = Some(target),
+            Some(ConnectionState::Connecting(_)) => {
+                self.pending_open = Some(PendingOpen::Collection(target));
+            }
             Some(_) => {
                 let connection = target.connection;
-                self.pending_open = Some(target);
+                self.pending_open = Some(PendingOpen::Collection(target));
                 self.connect(connection, None, false);
             }
             None => {}
@@ -473,9 +526,46 @@ impl NordpilApp {
         }
     }
 
+    /// Closes a tab the user asked to close, keeping it for Ctrl+Shift+T.
     fn close_tab(&mut self, index: usize) {
+        self.closed.push(ClosedTab::of(&self.tabs[index]));
+        if self.closed.len() > MAX_CLOSED {
+            self.closed.remove(0);
+        }
         let id = self.tabs[index].id;
         self.close_tabs(|tab| tab.id == id);
+    }
+
+    /// Brings back the last closed tab whose connection still exists,
+    /// connecting first if needed.
+    fn reopen_tab(&mut self) {
+        while let Some(closed) = self.closed.pop() {
+            let connection = closed.target.connection;
+            match self.entry(connection).map(|entry| &entry.state) {
+                None => continue,
+                Some(ConnectionState::Connected(_)) => self.restore_tab(closed),
+                Some(ConnectionState::Connecting(_)) => {
+                    self.pending_open = Some(PendingOpen::Reopen(Box::new(closed)));
+                }
+                Some(_) => {
+                    self.pending_open = Some(PendingOpen::Reopen(Box::new(closed)));
+                    self.connect(connection, None, false);
+                }
+            }
+            return;
+        }
+    }
+
+    fn restore_tab(&mut self, closed: ClosedTab) {
+        self.record_recent(&closed.target);
+        let target = closed.target.clone();
+        self.add_tab(target, |tab| {
+            tab.panel = closed.panel;
+            tab.inputs = closed.inputs;
+            tab.show_options = closed.show_options;
+            tab.view = closed.view;
+            tab.page_size = closed.page_size;
+        });
     }
 
     fn tab_action(&mut self, index: usize, action: TabAction) {
@@ -1296,8 +1386,13 @@ impl NordpilApp {
                     connection: id,
                     remember,
                 });
-                if let Some(target) = self.pending_open.take_if(|target| target.connection == id) {
-                    self.open_tab(target);
+                match self
+                    .pending_open
+                    .take_if(|pending| pending.connection() == id)
+                {
+                    Some(PendingOpen::Collection(target)) => self.open_tab(target),
+                    Some(PendingOpen::Reopen(closed)) => self.restore_tab(*closed),
+                    None => {}
                 }
             }
             Err(error)
@@ -1321,7 +1416,7 @@ impl NordpilApp {
                 if self
                     .pending_open
                     .as_ref()
-                    .is_some_and(|target| target.connection == id)
+                    .is_some_and(|pending| pending.connection() == id)
                 {
                     self.pending_open = None;
                 }
@@ -2048,6 +2143,24 @@ impl NordpilApp {
                     self.close_tab(index);
                 }
             }
+            AppCommand::ReopenTab => self.reopen_tab(),
+            AppCommand::NextTab | AppCommand::PreviousTab => {
+                let count = self.tabs.len();
+                if let Some(index) = self.active_tab {
+                    let step = if command == AppCommand::NextTab {
+                        1
+                    } else {
+                        count - 1
+                    };
+                    self.active_tab = Some((index + step) % count);
+                }
+            }
+            AppCommand::SelectTab(index) => {
+                if index < self.tabs.len() {
+                    self.active_tab = Some(index);
+                }
+            }
+            AppCommand::LastTab => self.active_tab = self.tabs.len().checked_sub(1),
             AppCommand::Settings => {
                 self.settings_dialog = match self.settings_dialog {
                     Some(_) => None,
@@ -2634,6 +2747,88 @@ mod tests {
         ));
         assert!(on(Panel::Documents, AppCommand::SaveScript).is_none());
         assert!(on(Panel::Indexes, AppCommand::StopScript).is_none());
+    }
+
+    #[test]
+    fn ctrl_tab_cycles_tabs_and_ctrl_digits_jump_to_one() {
+        let mut harness = two_tabs_harness();
+        let target = Selection {
+            collection: "invoices".to_owned(),
+            ..harness.state().tabs[0].target.clone()
+        };
+        harness.state_mut().open_tab(target);
+        harness.run();
+        let mut press = |modifiers, key| {
+            harness.key_press_modifiers(modifiers, key);
+            harness.run();
+            harness.state().active_tab
+        };
+
+        assert_eq!(press(Modifiers::CTRL, Key::Tab), Some(0));
+        assert_eq!(press(Modifiers::CTRL, Key::Tab), Some(1));
+        assert_eq!(press(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab), Some(0));
+        assert_eq!(press(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab), Some(2));
+        assert_eq!(press(Modifiers::COMMAND, Key::Num2), Some(1));
+        assert_eq!(press(Modifiers::COMMAND, Key::Num9), Some(2));
+        assert_eq!(press(Modifiers::COMMAND, Key::Num1), Some(0));
+        assert_eq!(press(Modifiers::COMMAND, Key::Num5), Some(0));
+    }
+
+    #[test]
+    fn ctrl_shift_t_brings_back_a_closed_tab_as_it_was() {
+        let mut harness = two_tabs_harness();
+        let tab = &mut harness.state_mut().tabs[1];
+        tab.inputs.filter = "{ vip: true }".to_owned();
+        tab.inputs.limit = "5".to_owned();
+        tab.show_options = true;
+        tab.view = View::Table;
+        tab.page_size = 50;
+        tab.panel = Panel::Indexes;
+        harness.run();
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::W);
+        harness.run();
+        assert_eq!(harness.state().tabs.len(), 1);
+        harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::T);
+        harness.run();
+
+        let app = harness.state();
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, Some(1));
+        let tab = &app.tabs[1];
+        assert_eq!(tab.target.collection, "customers");
+        assert_eq!(tab.inputs.filter, "{ vip: true }");
+        assert_eq!(tab.inputs.limit, "5");
+        assert!(tab.show_options);
+        assert_eq!(tab.view, View::Table);
+        assert_eq!(tab.page_size, 50);
+        assert_eq!(tab.panel, Panel::Indexes);
+    }
+
+    #[test]
+    fn closed_tabs_keep_the_last_ten_closed_by_the_user() {
+        let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
+        let app = harness.state_mut();
+        let target = app.tabs[0].target.clone();
+        for _ in 0..12 {
+            app.push_tab(target.clone(), String::new());
+            app.close_tab(app.tabs.len() - 1);
+        }
+        assert_eq!(app.closed.len(), MAX_CLOSED);
+
+        // Closing for a drop or a disconnect doesn't count.
+        app.deselect_if(|selection| selection.collection == "orders");
+        assert!(app.tabs.is_empty());
+        assert_eq!(app.closed.len(), MAX_CLOSED);
+
+        // A closed tab of a removed connection is skipped.
+        let mut gone = ClosedTab::of(&CollectionTab::new(99, target.clone()));
+        gone.target.connection = Uuid::new_v4();
+        app.closed.push(gone);
+        app.reopen_tab();
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].target, target);
+        assert_eq!(app.closed.len(), MAX_CLOSED - 1);
     }
 
     #[test]
