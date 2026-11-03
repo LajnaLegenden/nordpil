@@ -80,7 +80,7 @@ pub fn top_bar(ui: &mut Ui) -> TopBarOutput {
             .max_rect(field.shrink2(vec2(7.0, 6.0)))
             .layout(Layout::right_to_left(Align::Center)),
     );
-    kit::keys(&mut keys_ui, &["Ctrl", "K"]);
+    kit::shortcut(&mut keys_ui, &crate::shortcuts::GO_TO);
     response.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Go to collection"));
     output.goto = response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -348,9 +348,12 @@ pub fn welcome(ui: &mut Ui, has_connections: bool) -> bool {
         ui.add_space(4.0);
         ui.label(
             RichText::new(if has_connections {
-                "Pick one in the sidebar, or press Ctrl+K to go to any collection."
+                format!(
+                    "Pick one in the sidebar, or press {} to go to any collection.",
+                    crate::shortcuts::text(ui.ctx(), &crate::shortcuts::GO_TO)
+                )
             } else {
-                "Save a connection to browse databases, run queries and edit documents."
+                "Save a connection to browse databases, run queries and edit documents.".to_owned()
             })
             .size(14.5)
             .color(palette.muted),

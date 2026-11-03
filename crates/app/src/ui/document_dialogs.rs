@@ -129,7 +129,7 @@ impl DocumentDialog {
                                 .color(theme::palette(ui).subtle),
                         );
                         if matches!(self.kind, Kind::Insert | Kind::Edit { .. }) {
-                            kit::keys(ui, &["Ctrl", "Enter"]);
+                            kit::shortcut(ui, &crate::shortcuts::SAVE_DOCUMENT);
                         }
                     }
                 });
