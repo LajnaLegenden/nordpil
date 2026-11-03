@@ -1,6 +1,7 @@
-# Formatting, lints, unit tests and the Docker integration tests, on the
-# commit being checked, optionally with the version bumped first. CI runs it
-# on pull requests; the Release and Publish workflows run it before building.
+# Formatting, lints, unit tests and the Docker integration tests, plus lints
+# on macOS, on the commit being checked, optionally with the version bumped
+# first. CI runs it on pull requests; the Release and Publish workflows run it
+# before building.
 name: Check
 
 on:
@@ -45,3 +46,28 @@ jobs:
       - run: cargo test --workspace --locked
       # The tests marked "needs Docker": MongoDB 8.0 through testcontainers.
       - run: cargo test --workspace --locked -- --ignored
+
+  # The macOS menu bar only compiles there, so the Linux job can't see it.
+  macos:
+    name: macOS clippy
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add clippy
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: check-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: check-${{ runner.os }}-
+      - if: ${{ inputs.version != '' }}
+        env:
+          VERSION: ${{ inputs.version }}
+        run: scripts/bump-version.sh "$VERSION"
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
