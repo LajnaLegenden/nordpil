@@ -55,7 +55,7 @@ pub enum TokenKind {
 impl TokenKind {
     /// Whether this token can end a value. A `/` after such a token would be
     /// division rather than a regex.
-    fn ends_value(&self) -> bool {
+    pub(crate) fn ends_value(&self) -> bool {
         matches!(
             self,
             Self::RBrace
