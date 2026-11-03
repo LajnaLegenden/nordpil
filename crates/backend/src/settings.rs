@@ -52,7 +52,69 @@ pub enum Updates {
     Off,
 }
 
+/// What a collection tab shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Panel {
+    #[default]
+    Documents,
+    Indexes,
+    Shell,
+}
+
+/// Where the shell's results sit relative to its script.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ShellOrientation {
+    /// Script above, results below.
+    #[default]
+    Stacked,
+    /// Script left, results right.
+    SideBySide,
+}
+
+/// How the shell panel splits between script and results.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShellLayout {
+    pub orientation: ShellOrientation,
+    /// The script's share of the height when stacked, from 0 to 1.
+    pub stacked_split: f32,
+    /// The script's share of the width side by side, from 0 to 1.
+    pub side_split: f32,
+}
+
+impl ShellLayout {
+    pub const STACKED_SPLIT: f32 = 0.4;
+    pub const SIDE_SPLIT: f32 = 0.45;
+
+    /// The script's share in the current orientation.
+    pub fn split_mut(&mut self) -> &mut f32 {
+        match self.orientation {
+            ShellOrientation::Stacked => &mut self.stacked_split,
+            ShellOrientation::SideBySide => &mut self.side_split,
+        }
+    }
+
+    pub fn default_split(&self) -> f32 {
+        match self.orientation {
+            ShellOrientation::Stacked => Self::STACKED_SPLIT,
+            ShellOrientation::SideBySide => Self::SIDE_SPLIT,
+        }
+    }
+}
+
+impl Default for ShellLayout {
+    fn default() -> Self {
+        Self {
+            orientation: ShellOrientation::default(),
+            stacked_split: Self::STACKED_SPLIT,
+            side_split: Self::SIDE_SPLIT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub theme: Theme,
@@ -62,6 +124,9 @@ pub struct Settings {
     /// it refers to, in a collection of the same database like `users`.
     pub look_up_references: bool,
     pub updates: Updates,
+    /// The panel the active tab showed last; new tabs open on it.
+    pub last_panel: Panel,
+    pub shell: ShellLayout,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -121,6 +186,12 @@ mod tests {
             goto_scope: GotoScope::OpenOnly,
             look_up_references: true,
             updates: Updates::Notify,
+            last_panel: Panel::Shell,
+            shell: ShellLayout {
+                orientation: ShellOrientation::SideBySide,
+                stacked_split: 0.25,
+                side_split: 0.75,
+            },
         };
         save(&path, settings).unwrap();
 
@@ -129,6 +200,22 @@ mod tests {
         assert!(text.contains("goto_scope = \"open-only\""), "{text}");
         assert!(text.contains("look_up_references = true"), "{text}");
         assert!(text.contains("updates = \"notify\""), "{text}");
+        assert!(text.contains("last_panel = \"shell\""), "{text}");
+        assert!(text.contains("orientation = \"side-by-side\""), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn files_from_before_the_shell_layout_get_defaults() {
+        let dir = std::env::temp_dir().join(format!("nordpil-test-{}", Uuid::new_v4()));
+        let path = dir.join("config.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "version = 1\ntheme = \"dark\"\n").unwrap();
+
+        let settings = load(&path).unwrap();
+        assert_eq!(settings.theme, Theme::Dark);
+        assert_eq!(settings.last_panel, Panel::Documents);
+        assert_eq!(settings.shell, ShellLayout::default());
         let _ = std::fs::remove_dir_all(dir);
     }
 }
