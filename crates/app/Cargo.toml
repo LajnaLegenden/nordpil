@@ -36,6 +36,10 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 uuid = "1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The menu bar: winit's default has only the app menu.
+muda = { version = "0.21", default-features = false }
+
 [package.metadata.deb]
 maintainer = "Linus Jansson <00jansson@gmail.com>"
 copyright = "Linus Jansson"

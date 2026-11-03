@@ -143,6 +143,8 @@ pub struct NordpilApp {
     closed: Vec<ClosedTab>,
     /// Off in development builds and tests.
     updater: Option<Updater>,
+    #[cfg(target_os = "macos")]
+    menu: Option<crate::menu::MacMenu>,
 }
 
 impl NordpilApp {
@@ -186,11 +188,19 @@ impl NordpilApp {
             pending_open: None,
             closed: Vec::new(),
             updater: None,
+            #[cfg(target_os = "macos")]
+            menu: None,
         };
         if let Some(error) = settings_error {
             app.notify(error);
         }
         Ok(app)
+    }
+
+    /// Puts the app's menus in the macOS menu bar.
+    #[cfg(target_os = "macos")]
+    pub fn install_menu(&mut self, ctx: &egui::Context) {
+        self.menu = Some(crate::menu::MacMenu::install(ctx));
     }
 
     /// Checks GitHub for newer releases, as the `updates` setting says.
@@ -2084,6 +2094,18 @@ impl NordpilApp {
     /// App-wide keys; see [`shortcuts::BINDINGS`].
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let mut commands = ctx.input_mut(shortcuts::pressed);
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = &mut self.menu {
+            commands.extend(menu.commands());
+            let on_shell = self
+                .active_tab
+                .is_some_and(|index| self.tabs[index].panel == Panel::Shell);
+            menu.update(crate::menu::MenuState {
+                has_tabs: !self.tabs.is_empty(),
+                can_reopen: !self.closed.is_empty(),
+                on_shell,
+            });
+        }
         if self.escape_stops_script(ctx)
             && ctx.input_mut(|input| input.consume_shortcut(&shortcuts::ESCAPE))
         {
