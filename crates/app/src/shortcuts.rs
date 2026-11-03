@@ -4,6 +4,8 @@
 
 use eframe::egui::{self, Event, FontId, InputState, Key, KeyboardShortcut, Modifiers};
 
+use crate::tabs::Panel;
+
 /// What an app-wide shortcut does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppCommand {
@@ -17,6 +19,9 @@ pub enum AppCommand {
     /// Counted from 0.
     SelectTab(usize),
     LastTab,
+    Panel(Panel),
+    /// Runs the Documents query again, or reloads the indexes.
+    Refresh,
     Settings,
     SaveScript,
     OpenScript,
@@ -43,6 +48,11 @@ pub const NEXT_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Ke
 pub const PREVIOUS_TAB: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::Tab);
 pub const LAST_TAB: KeyboardShortcut = command(Key::Num9);
+pub const DOCUMENTS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Num1);
+pub const INDEXES: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Num2);
+pub const SHELL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Num3);
+pub const REFRESH: KeyboardShortcut = command(Key::R);
+pub const REFRESH_F5: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
 pub const SETTINGS: KeyboardShortcut = command(Key::Comma);
 /// Saves a document dialog; handled there.
 pub const SAVE_DOCUMENT: KeyboardShortcut = command(Key::Enter);
@@ -101,6 +111,22 @@ pub const BINDINGS: &[Binding] = &[
     Binding {
         command: AppCommand::LastTab,
         keys: &[LAST_TAB],
+    },
+    Binding {
+        command: AppCommand::Panel(Panel::Documents),
+        keys: &[DOCUMENTS],
+    },
+    Binding {
+        command: AppCommand::Panel(Panel::Indexes),
+        keys: &[INDEXES],
+    },
+    Binding {
+        command: AppCommand::Panel(Panel::Shell),
+        keys: &[SHELL],
+    },
+    Binding {
+        command: AppCommand::Refresh,
+        keys: &[REFRESH, REFRESH_F5],
     },
     Binding {
         command: AppCommand::Settings,
