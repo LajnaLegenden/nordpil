@@ -301,6 +301,31 @@ fn reads_cursors_in_batches() {
 }
 
 #[test]
+fn reads_cursors_with_array_methods() {
+    let run = run_script(
+        "db.users.find().filter(user => user._id > 1).length\n\
+         db.users.find().reduce((sum, user) => sum + user._id, 0)\n\
+         db.users.find().find(user => user._id === 2).name\n\
+         db.users.find().some(user => user._id === 9)\n\
+         db.users.find().every(user => 'name' in user)\n\
+         db.users.find().flatMap(user => [user._id, user._id]).length",
+    );
+    assert_eq!(run.outcome, Outcome::Finished);
+    let values: Vec<_> = run.results().into_iter().map(|(_, value)| value).collect();
+    assert_eq!(
+        values,
+        [
+            ResultValue::Value(Bson::Int32(2)),
+            ResultValue::Value(Bson::Int32(6)),
+            ResultValue::Value(Bson::String("user 2".to_owned())),
+            ResultValue::Value(Bson::Boolean(false)),
+            ResultValue::Value(Bson::Boolean(true)),
+            ResultValue::Value(Bson::Int32(6)),
+        ]
+    );
+}
+
+#[test]
 fn prints_like_mongosh() {
     let run = run_script("print('a', 1, { b: 'c' })\nprintjson('s')\nconsole.log([1, 2])");
     assert_eq!(run.output(), ["a 1 { b: 'c' }", "'s'", "[ 1, 2 ]"]);

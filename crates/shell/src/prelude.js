@@ -353,6 +353,23 @@
       }
     },
     map(callback) { return this.toArray().map(callback); },
+    // The array methods people reach for, so a cursor needn't go through
+    // toArray() first. The ones that can stop early read only what they need.
+    filter(callback) { return this.toArray().filter(callback); },
+    flatMap(callback) { return this.toArray().flatMap(callback); },
+    reduce(...args) { return this.toArray().reduce(...args); },
+    find(callback) {
+      for (const document of this) if (callback(document)) return document;
+      return undefined;
+    },
+    some(callback) {
+      for (const document of this) if (callback(document)) return true;
+      return false;
+    },
+    every(callback) {
+      for (const document of this) if (!callback(document)) return false;
+      return true;
+    },
     itcount() {
       let count = 0;
       while (this._more()) {
