@@ -139,6 +139,27 @@ impl CodeEditor {
         state.store(ctx, self.id);
     }
 
+    /// Whether the completion popup was open last frame.
+    pub fn popup_open(&self) -> bool {
+        self.popup_open
+    }
+
+    /// Closes the completion popup, as Escape would, before the editor is
+    /// shown this frame.
+    pub fn dismiss_popup(&self, ui: &egui::Ui) {
+        if self.popup_open {
+            ui.input_mut(|input| {
+                input.events.push(Event::Key {
+                    key: Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                });
+            });
+        }
+    }
+
     /// Focuses the editor where its cursor was; the first time, at the end.
     pub fn focus(&self, ctx: &egui::Context, text: &str) {
         let has_cursor = TextEditState::load(ctx, self.id)

@@ -32,7 +32,8 @@ when idle, against roughly 1 GB for Compass.
   shown in the list, JSON or table view with paging. Runs on an embedded QuickJS engine:
   no Node or mongosh needed. Covers reads, writes, cursors, the BSON types, `use` and
   `show`. The first write of a run asks first; read-only connections refuse writes.
-  Ctrl+Enter runs the statement at the cursor, Ctrl+Shift+Enter the whole script.
+  Ctrl+Enter runs the statement at the cursor, Shift+Enter the whole script, and Ctrl+.
+  or Esc stops it. Ctrl+S and Ctrl+O save and open scripts.
   Autocomplete for collections, methods, fields and the script's variables. Drafts,
   history and favorites per collection; open and save `.js` files. Results sit below or
   beside the script, with a divider that drags to give either side more room. With
