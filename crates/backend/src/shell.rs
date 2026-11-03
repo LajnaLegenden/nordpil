@@ -20,7 +20,7 @@ use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use crate::documents::{collation, to_hint};
-use crate::{Backend, BackendError, FoundDocument, Namespace};
+use crate::{Backend, BackendError, Namespace};
 
 /// Like the Documents panel, script queries without a time limit get one.
 pub const SCRIPT_MAX_TIME: Duration = Duration::from_secs(60);
@@ -108,7 +108,7 @@ impl Backend {
         &self,
         namespace: &Namespace,
         query: AggregateQuery,
-    ) -> Result<Vec<FoundDocument>, BackendError> {
+    ) -> Result<Vec<Document>, BackendError> {
         let client = self.session(namespace.connection)?.client;
         let mut pipeline = query.pipeline;
         if query.skip > 0 {
@@ -118,15 +118,14 @@ impl Backend {
             pipeline.push(doc! { "$limit": to_i64(query.limit) });
         }
         let options = aggregate_options(query.options)?;
-        let documents: Vec<Document> = client
+        Ok(client
             .database(&namespace.database)
             .collection::<Document>(&namespace.collection)
             .aggregate(pipeline)
             .with_options(options)
             .await?
             .try_collect()
-            .await?;
-        crate::blocking(move || Ok(documents.into_iter().map(FoundDocument::new).collect())).await
+            .await?)
     }
 }
 

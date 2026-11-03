@@ -610,7 +610,6 @@ mod tests {
 
     use super::*;
     use crate::connections::Selection;
-    use crate::shell::page_of;
     use eframe::egui::{Key, Modifiers};
 
     struct State {
@@ -634,11 +633,7 @@ mod tests {
         tab.shell.results.push(ShellResult {
             title: "db.users.find({}).toArray()".to_owned(),
             elapsed: Duration::from_millis(12),
-            body: Body::Documents {
-                current: page_of(&documents, 0, 20),
-                documents,
-                page: 0,
-            },
+            body: Body::documents(documents, 20),
         });
         tab.shell.output.push("hello".to_owned());
         tab.shell.selected = Some(Selected::Result(0));

@@ -8,12 +8,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bson::{Bson, Document};
+use bson::{Bson, Document, RawDocumentBuf};
 use crossbeam_channel::Receiver;
 use eframe::egui;
 use nordpil_backend::{
-    AggregateQuery, FindQuery, FoundDocument, PREVIEW_BYTES, RequestId, SCRIPT_MAX_TIME,
-    SavedScript, ScriptRun,
+    AggregateQuery, FindQuery, RequestId, SCRIPT_MAX_TIME, SavedScript, ScriptRun,
 };
 use nordpil_query::{FieldHint, ScriptHints, Style, ValueHint};
 use nordpil_shell::{Event, Query, QueryKind, ResultValue, ScriptError};
@@ -95,9 +94,10 @@ pub struct ShellResult {
 pub enum Body {
     /// A cursor: each page re-runs its query.
     Query(Box<QueryPage>),
-    /// Documents the script read; paged in memory.
+    /// Documents the script read; paged in memory. Kept as BSON, since
+    /// parsed they take about eight times the room.
     Documents {
-        documents: Vec<Document>,
+        documents: Vec<RawDocumentBuf>,
         page: u64,
         current: Results,
     },
@@ -232,14 +232,7 @@ impl ShellState {
                                 error: None,
                             }))
                         }
-                        ResultValue::Documents(documents) => {
-                            let current = page_of(&documents, 0, page_size);
-                            Body::Documents {
-                                documents,
-                                page: 0,
-                                current,
-                            }
-                        }
+                        ResultValue::Documents(documents) => Body::documents(documents, page_size),
                         ResultValue::Value(value) => value_body(&value),
                     };
                     self.results.push(ShellResult {
@@ -348,6 +341,25 @@ fn title(statement: &str) -> String {
     }
 }
 
+impl Body {
+    /// Documents paged in memory, showing the first page.
+    pub fn documents(documents: Vec<Document>, page_size: u64) -> Self {
+        let raw: Result<Vec<RawDocumentBuf>, _> =
+            documents.iter().map(RawDocumentBuf::try_from).collect();
+        match raw {
+            Ok(raw) => Self::Documents {
+                current: page_of(&raw, 0, page_size),
+                documents: raw,
+                page: 0,
+            },
+            // Only a key BSON can't hold, such as one with a NUL, gets here.
+            Err(_) => value_body(&Bson::Array(
+                documents.into_iter().map(Bson::Document).collect(),
+            )),
+        }
+    }
+}
+
 fn value_body(value: &Bson) -> Body {
     let text = match value {
         Bson::String(text) => {
@@ -360,32 +372,17 @@ fn value_body(value: &Bson) -> Body {
 }
 
 /// One page of documents held in memory.
-pub fn page_of(documents: &[Document], page: u64, page_size: u64) -> Results {
+pub fn page_of(documents: &[RawDocumentBuf], page: u64, page_size: u64) -> Results {
     let start = usize::try_from(page * page_size).unwrap_or(usize::MAX);
     let end = start.saturating_add(usize::try_from(page_size).unwrap_or(usize::MAX));
     let documents: Vec<Document> = documents
         .get(start.min(documents.len())..end.min(documents.len()))
         .unwrap_or_default()
-        .to_vec();
-    let previews = documents
         .iter()
-        .map(|document| nordpil_query::preview(document, PREVIEW_BYTES))
+        // They were documents when stored, so they read back.
+        .filter_map(|raw| Document::try_from(raw.as_ref()).ok())
         .collect();
-    Results {
-        documents,
-        previews,
-    }
-}
-
-pub fn results_of(found: Vec<FoundDocument>) -> Results {
-    let (documents, previews) = found
-        .into_iter()
-        .map(|found| (found.document, found.preview))
-        .unzip();
-    Results {
-        documents,
-        previews,
-    }
+    Results::new(documents)
 }
 
 impl QueryPage {
@@ -606,7 +603,9 @@ mod tests {
 
     #[test]
     fn pages_documents_in_memory() {
-        let documents: Vec<Document> = (0..5).map(|n| bson::doc! { "n": n }).collect();
+        let documents: Vec<RawDocumentBuf> = (0..5)
+            .map(|n| RawDocumentBuf::try_from(&bson::doc! { "n": n }).unwrap())
+            .collect();
         let page = page_of(&documents, 2, 2);
         assert_eq!(page.documents, [bson::doc! { "n": 4 }]);
         assert!(page_of(&documents, 9, 2).documents.is_empty());

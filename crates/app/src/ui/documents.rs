@@ -712,7 +712,7 @@ fn paging_controls(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabActi
 
     let before = tab.page_size;
     let combo = egui::ComboBox::from_id_salt(("page_size", tab.id))
-        .width(56.0)
+        .width(66.0)
         .selected_text(tab.page_size.to_string())
         .show_ui(ui, |ui| {
             for size in PAGE_SIZES {
@@ -735,7 +735,7 @@ fn paging_width(ui: &egui::Ui, tab: &CollectionTab) -> f32 {
     let range = kit::text_width(ui, &range_text(tab), egui::FontId::proportional(13.0));
     let per_page = kit::text_width(ui, "Per page", egui::FontId::proportional(13.0));
     // Page buttons, the page size box, refresh, and the gaps between them.
-    32.0 * 2.0 + range + per_page + 100.0 + kit::TOOLBAR_HEIGHT + 6.0 + 8.0 + 4.0 * 6.0
+    32.0 * 2.0 + range + per_page + 110.0 + kit::TOOLBAR_HEIGHT + 6.0 + 8.0 + 4.0 * 6.0
 }
 
 /// A bordered square button for paging.
@@ -834,6 +834,10 @@ fn list_view(
         .show(ui, |ui| {
             for (index, document) in results.documents.iter().enumerate() {
                 let id = page.scope.with(("document", page.page, index));
+                let Some(card) = LazyCard::begin(ui, id, |ui| list_card_height(ui, document))
+                else {
+                    continue;
+                };
                 // The scope's click area is registered before the fields, so
                 // the expand arrows inside stay clickable.
                 let response = ui
@@ -875,8 +879,17 @@ fn list_view(
                 }
                 document_menu(&response, document, index, read_only, None, action);
                 ui.add_space(10.0);
+                card.end(ui);
             }
         });
+}
+
+/// A list card's height with its fields collapsed, as they start.
+fn list_card_height(ui: &egui::Ui, document: &Document) -> f32 {
+    let fields = document.len().max(1) as f32;
+    // Rows of 20 with 4 between, the card's margins and stroke, and the
+    // space after it.
+    fields * 20.0 + (fields - 1.0) * 4.0 + 24.0 + 2.0 + ui.spacing().item_spacing.y + 10.0
 }
 
 /// Edit, clone and delete buttons over a hovered card's top right corner.
@@ -1124,9 +1137,14 @@ fn json_view(
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
-            for (index, (preview, document)) in
-                results.previews.iter().zip(&results.documents).enumerate()
-            {
+            for (index, document) in results.documents.iter().enumerate() {
+                let id = page.scope.with(("json", page.page, index));
+                // A laid-out document costs over 100 bytes per character.
+                let Some(card) = LazyCard::begin(ui, id, |ui| estimated_height(ui, document))
+                else {
+                    continue;
+                };
+                let preview = results.preview(index);
                 let (text, spans) = (&preview.text, &preview.spans);
                 let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap: f32| {
                     let mut job = code_editor::layout_job(ui, buffer.as_str(), spans);
@@ -1137,7 +1155,7 @@ fn json_view(
                     .inner_margin(Margin::symmetric(12, 8))
                     .show(ui, |ui| {
                         TextEdit::multiline(&mut text.as_str())
-                            .id_salt(page.scope.with(("json", page.page, index)))
+                            .id_salt(id)
                             .frame(Frame::new())
                             .desired_width(f32::INFINITY)
                             .layouter(&mut layouter)
@@ -1176,8 +1194,87 @@ fn json_view(
                     ));
                 }
                 ui.add_space(10.0);
+                card.end(ui);
             }
         });
+}
+
+/// A card in a scrolling page. One out of view only takes up its height
+/// from the last frame it was shown, or an estimate before that, so a big
+/// page costs only the cards on screen.
+struct LazyCard {
+    id: egui::Id,
+    width: f32,
+    top: f32,
+}
+
+impl LazyCard {
+    /// `None` when the card is out of view and its room was taken.
+    fn begin(
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        estimate: impl FnOnce(&egui::Ui) -> f32,
+    ) -> Option<Self> {
+        let id = id.with("height");
+        let width = ui.available_width();
+        let known = ui
+            .data(|data| data.get_temp::<(f32, f32)>(id))
+            .filter(|(known_width, _)| *known_width == width);
+        let height = known.map_or_else(|| estimate(ui), |(_, height)| height);
+        let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(width, height));
+        if ui.is_rect_visible(rect) {
+            return Some(Self {
+                id,
+                width,
+                top: rect.top(),
+            });
+        }
+        if known.is_none() {
+            ui.data_mut(|data| data.insert_temp(id, (width, height)));
+        }
+        ui.add_space(height);
+        None
+    }
+
+    /// Remembers the height once the card and the space after it are shown.
+    fn end(self, ui: &egui::Ui) {
+        let height = ui.cursor().top() - self.top;
+        ui.data_mut(|data| data.insert_temp(self.id, (self.width, height)));
+    }
+}
+
+/// A JSON card's height without wrapping, which is close for pretty-printed
+/// documents. Counted from the document, so its text needn't exist yet.
+fn estimated_height(ui: &egui::Ui, document: &Document) -> f32 {
+    let lines = document_lines(document) as f32;
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    let (one, two) = ui.fonts_mut(|fonts| {
+        let mut height = |text: &str| {
+            fonts
+                .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::PLACEHOLDER)
+                .size()
+                .y
+        };
+        (height("x"), height("x\nx"))
+    });
+    // Rows, the card's margins and stroke, and the space after it.
+    one + (lines - 1.0) * (two - one) + 16.0 + 2.0 + ui.spacing().item_spacing.y + 10.0
+}
+
+/// Lines in a document's pretty-printed text: a non-empty document or
+/// array opens on its key's line and closes on its own.
+fn document_lines(document: &Document) -> usize {
+    fn lines(value: &Bson) -> usize {
+        match value {
+            Bson::Document(document) => document_lines(document),
+            Bson::Array(items) if !items.is_empty() => 2 + items.iter().map(lines).sum::<usize>(),
+            _ => 1,
+        }
+    }
+    match document.len() {
+        0 => 1,
+        _ => 2 + document.values().map(lines).sum::<usize>(),
+    }
 }
 
 fn human_size(bytes: usize) -> String {
@@ -1380,9 +1477,7 @@ mod tests {
                 collection: "c".to_owned(),
             },
         );
-        tab.set_documents(vec![nordpil_backend::FoundDocument::new(
-            doc! { "_id": 1, "address": { "city": "Oslo" } },
-        )]);
+        tab.set_documents(vec![doc! { "_id": 1, "address": { "city": "Oslo" } }]);
         let mut harness = Harness::builder()
             .with_context_setup(theme::install)
             .build_ui_state(
@@ -1436,9 +1531,7 @@ mod tests {
             },
         );
         tab.inputs.filter = "{ age: { $gt: 3 } }".to_owned();
-        tab.set_documents(vec![nordpil_backend::FoundDocument::new(
-            doc! { "_id": 1, "status": "done" },
-        )]);
+        tab.set_documents(vec![doc! { "_id": 1, "status": "done" }]);
         let mut harness = Harness::builder()
             .with_context_setup(theme::install)
             .build_ui_state(
@@ -1458,6 +1551,20 @@ mod tests {
             harness.state().inputs.filter,
             "{ age: { $gt: 3 }, status: 'done' }"
         );
+    }
+
+    #[test]
+    fn counts_the_lines_of_the_json_text() {
+        let documents = [
+            doc! {},
+            doc! { "_id": 1 },
+            doc! { "a": {}, "b": [], "c": "two\nlines" },
+            doc! { "items": [{ "sku": "A", "tags": ["x", []] }, 2], "nested": { "deep": { "n": 1 } } },
+        ];
+        for document in &documents {
+            let text = format_document(document, Style::Pretty(2));
+            assert_eq!(document_lines(document), text.lines().count(), "{text}");
+        }
     }
 
     #[test]

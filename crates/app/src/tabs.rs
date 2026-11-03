@@ -1,17 +1,18 @@
 //! One open collection: its query inputs, results and view settings.
 
+use std::cell::OnceCell;
 use std::time::Duration;
 
 use bson::{Bson, Document};
 use eframe::egui;
-use nordpil_backend::{FindQuery, FoundDocument, IndexInfo, Namespace, RequestId, SavedQuery};
+use nordpil_backend::{FindQuery, IndexInfo, Namespace, PREVIEW_BYTES, RequestId, SavedQuery};
 use nordpil_query::{FieldHint, Preview, ValueHint};
 
 use crate::connections::Selection;
 use crate::shell::ShellState;
 use crate::widgets::code_editor::{CodeEditor, is_empty_object};
 
-pub const PAGE_SIZES: [u64; 4] = [10, 20, 50, 100];
+pub const PAGE_SIZES: [u64; 7] = [10, 20, 50, 100, 250, 500, 1000];
 const DEFAULT_PAGE_SIZE: u64 = 20;
 /// Like Compass, queries without a max time get one, so a bad filter on a
 /// huge collection can't run forever.
@@ -49,7 +50,23 @@ pub struct AppliedQuery {
 pub struct Results {
     pub documents: Vec<Document>,
     /// Formatted, highlighted text for the JSON view, cut for huge documents.
-    pub previews: Vec<Preview>,
+    /// Made the first time a document is shown, so a big page in the list or
+    /// table view holds none.
+    previews: Vec<OnceCell<Preview>>,
+}
+
+impl Results {
+    pub fn new(documents: Vec<Document>) -> Self {
+        Self {
+            previews: documents.iter().map(|_| OnceCell::new()).collect(),
+            documents,
+        }
+    }
+
+    pub fn preview(&self, index: usize) -> &Preview {
+        self.previews[index]
+            .get_or_init(|| nordpil_query::preview(&self.documents[index], PREVIEW_BYTES))
+    }
 }
 
 pub struct CollectionTab {
@@ -189,16 +206,9 @@ impl CollectionTab {
         }
     }
 
-    pub fn set_documents(&mut self, found: Vec<FoundDocument>) {
-        let (documents, previews): (Vec<Document>, Vec<Preview>) = found
-            .into_iter()
-            .map(|found| (found.document, found.preview))
-            .unzip();
+    pub fn set_documents(&mut self, documents: Vec<Document>) {
         self.values = nordpil_query::value_hints(&documents);
-        self.results = Some(Results {
-            documents,
-            previews,
-        });
+        self.results = Some(Results::new(documents));
     }
 }
 
