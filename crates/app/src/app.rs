@@ -1813,10 +1813,17 @@ impl NordpilApp {
             return;
         }
 
-        let titles: Vec<(String, String)> = self
+        let titles: Vec<chrome::TabTitle> = self
             .tabs
             .iter()
-            .map(|tab| (tab.target.database.clone(), tab.target.collection.clone()))
+            .map(|tab| chrome::TabTitle {
+                database: tab.target.database.clone(),
+                collection: tab.target.collection.clone(),
+                color: self
+                    .entry(tab.target.connection)
+                    .and_then(|entry| entry.saved.color)
+                    .map(sidebar::color32),
+            })
             .collect();
         let bar = ui
             .scope(|ui| {
