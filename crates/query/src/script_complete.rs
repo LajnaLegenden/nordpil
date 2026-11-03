@@ -72,6 +72,12 @@ const CURSOR_METHODS: &[(&str, &str, &str)] = &[
     ("toArray", "toArray()", "→ array"),
     ("forEach", "forEach(|)", "function"),
     ("map", "map(|)", "function → array"),
+    ("filter", "filter(|)", "function → array"),
+    ("flatMap", "flatMap(|)", "function → array"),
+    ("reduce", "reduce(|)", "function, initial → value"),
+    ("find", "find(|)", "function → document"),
+    ("some", "some(|)", "function → boolean"),
+    ("every", "every(|)", "function → boolean"),
     ("next", "next()", "→ document"),
     ("hasNext", "hasNext()", "→ boolean"),
     ("itcount", "itcount()", "→ number"),
@@ -88,6 +94,34 @@ const CURSOR_CHAIN: &[&str] = &[
     "collation",
     "maxTimeMS",
     "batchSize",
+];
+
+const ARRAY_METHODS: &[(&str, &str, &str)] = &[
+    ("length", "length", "→ number"),
+    ("includes", "includes(|)", "value → boolean"),
+    ("indexOf", "indexOf(|)", "value → index"),
+    ("find", "find(|)", "function → element"),
+    ("findIndex", "findIndex(|)", "function → index"),
+    ("filter", "filter(|)", "function → array"),
+    ("map", "map(|)", "function → array"),
+    ("flatMap", "flatMap(|)", "function → array"),
+    ("reduce", "reduce(|)", "function, initial → value"),
+    ("forEach", "forEach(|)", "function"),
+    ("some", "some(|)", "function → boolean"),
+    ("every", "every(|)", "function → boolean"),
+    ("sort", "sort(|)", "compare → array"),
+    ("slice", "slice(|)", "start, end → array"),
+    ("concat", "concat(|)", "arrays → array"),
+    ("join", "join(|)", "separator → string"),
+    ("reverse", "reverse()", "→ array"),
+    ("flat", "flat()", "→ array"),
+    ("at", "at(|)", "index → element"),
+    ("push", "push(|)", "values → length"),
+];
+
+/// Array methods that return an array.
+const ARRAY_CHAIN: &[&str] = &[
+    "filter", "map", "flatMap", "sort", "slice", "concat", "reverse", "flat",
 ];
 
 const DB_METHODS: &[(&str, &str, &str)] =
@@ -113,6 +147,7 @@ enum Target {
     Collection(String),
     /// A cursor over the named collection.
     Cursor(String),
+    Array,
     Other,
 }
 
@@ -147,7 +182,7 @@ pub fn script_target(text: &str, cursor: usize) -> Option<String> {
     let tokens = significant(before);
     match open_call(&tokens)?.target {
         Target::Collection(name) | Target::Cursor(name) => Some(name),
-        Target::Db | Target::Other => None,
+        Target::Db | Target::Array | Target::Other => None,
     }
 }
 
@@ -336,13 +371,11 @@ fn quoted_names<'a>(
 /// Members after a dot: `receiver` is the dotted word before the last dot,
 /// e.g. `db.users` or empty after `find(...)`.
 fn members(tokens: &[Token], receiver: &str, hints: &ScriptHints<'_>) -> Vec<Suggestion> {
-    let target = if receiver.is_empty() {
-        expression_type(tokens, tokens.len(), 0)
-    } else {
-        // The word holds the whole chain, unless it follows a call.
-        let chain: Vec<Token> = significant(receiver);
-        expression_type(&chain, chain.len(), 0)
-    };
+    // The word holds the whole chain, unless it follows a call. The tokens
+    // before it stay in front, for the variables it may name.
+    let mut chain = tokens.to_vec();
+    chain.extend(significant(receiver));
+    let target = expression_type(&chain, chain.len(), 0);
     let prefix = format!("{receiver}.");
     match target {
         Target::Db => {
@@ -363,6 +396,7 @@ fn members(tokens: &[Token], receiver: &str, hints: &ScriptHints<'_>) -> Vec<Sug
         }
         Target::Collection(_) => snippets(COLLECTION_METHODS, &prefix),
         Target::Cursor(_) => snippets(CURSOR_METHODS, &prefix),
+        Target::Array => snippets(ARRAY_METHODS, &prefix),
         Target::Other => Vec::new(),
     }
 }
@@ -466,8 +500,21 @@ fn expression_type(tokens: &[Token], end: usize, depth: usize) -> Target {
             }
         }
         TokenKind::Ident(name) if name == "db" => Target::Db,
+        TokenKind::Ident(name) => variable_type(tokens, end - 1, name, depth + 1),
+        // An array literal, not an index like `a[0]`.
+        TokenKind::RBracket => match matching_open(tokens, end - 1) {
+            Some(open)
+                if tokens[open].kind == TokenKind::LBracket
+                    && (open == 0 || !tokens[open - 1].kind.ends_value()) =>
+            {
+                Target::Array
+            }
+            _ => Target::Other,
+        },
         TokenKind::RParen => {
-            let Some(open) = matching_open(tokens, end - 1) else {
+            let Some(open) = matching_open(tokens, end - 1)
+                .filter(|&open| tokens[open].kind == TokenKind::LParen)
+            else {
                 return Target::Other;
             };
             if open < 2 || !dot_before(open - 1) {
@@ -485,9 +532,12 @@ fn expression_type(tokens: &[Token], end: usize, depth: usize) -> Target {
                     _ => Target::Other,
                 },
                 (Target::Collection(name), "find" | "aggregate") => Target::Cursor(name),
+                (Target::Collection(_), "distinct")
+                | (Target::Cursor(_), "toArray" | "map" | "filter" | "flatMap") => Target::Array,
                 (Target::Cursor(name), method) if CURSOR_CHAIN.contains(&method) => {
                     Target::Cursor(name)
                 }
+                (Target::Array, method) if ARRAY_CHAIN.contains(&method) => Target::Array,
                 _ => Target::Other,
             }
         }
@@ -495,7 +545,52 @@ fn expression_type(tokens: &[Token], end: usize, depth: usize) -> Target {
     }
 }
 
-/// The index of the `(` that the `)` at `close` closes.
+/// What the variable `name` used at `used` holds, from the last `const`,
+/// `let` or `var` before it that gives it a value.
+fn variable_type(tokens: &[Token], used: usize, name: &str, depth: usize) -> Target {
+    let is_ident = |index: usize, words: &[&str]| matches!(&tokens[index].kind, TokenKind::Ident(word) if words.contains(&word.as_str()));
+    let declared = (1..used.saturating_sub(1)).rev().find(|&index| {
+        is_ident(index, &[name])
+            && is_ident(index - 1, &["const", "let", "var"])
+            && matches!(&tokens[index + 1].kind, TokenKind::Operator(op) if op == "=")
+    });
+    let Some(start) = declared.map(|index| index + 2) else {
+        return Target::Other;
+    };
+    let value = &tokens[start..value_end(tokens, start, used)];
+    expression_type(value, value.len(), depth)
+}
+
+/// Where the value that starts at `start` ends: at a `,`, a `;`, a bracket
+/// it didn't open, or a new statement on the next line.
+fn value_end(tokens: &[Token], start: usize, limit: usize) -> usize {
+    let mut depth = 0usize;
+    for index in start..limit {
+        match &tokens[index].kind {
+            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace if depth == 0 => {
+                return index;
+            }
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => depth -= 1,
+            TokenKind::Comma | TokenKind::Semicolon if depth == 0 => return index,
+            // Two values in a row, e.g. `find()` then `print` on the next line.
+            kind if depth == 0
+                && index > start
+                && matches!(
+                    kind,
+                    TokenKind::Ident(_) | TokenKind::String { .. } | TokenKind::Number(_)
+                )
+                && tokens[index - 1].kind.ends_value() =>
+            {
+                return index;
+            }
+            _ => {}
+        }
+    }
+    limit
+}
+
+/// The index of the bracket that the bracket at `close` closes.
 fn matching_open(tokens: &[Token], close: usize) -> Option<usize> {
     let mut depth = 0usize;
     for index in (0..=close).rev() {
@@ -504,7 +599,7 @@ fn matching_open(tokens: &[Token], close: usize) -> Option<usize> {
             TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
                 depth -= 1;
                 if depth == 0 {
-                    return (tokens[index].kind == TokenKind::LParen).then_some(index);
+                    return Some(index);
                 }
             }
             _ => {}
@@ -675,7 +770,7 @@ mod tests {
                 "findOneAndDelete"
             ]
         );
-        assert_eq!(labels("db.users.find({}).so|", &hints), ["sort"]);
+        assert_eq!(labels("db.users.find({}).so|", &hints), ["sort", "some"]);
         assert_eq!(
             labels("db.getCollection('a b').find().limit(1).sk|", &hints),
             ["skip"]
@@ -720,5 +815,61 @@ mod tests {
         assert_eq!(labels("pri|", &hints), ["print", "printjson"]);
         assert_eq!(labels("sh|", &hints), ["show dbs", "show collections"]);
         assert!(labels("x = { sh| }", &hints).is_empty());
+    }
+
+    #[test]
+    fn suggests_array_methods() {
+        let collections = collections();
+        let hints = hints(&collections, &[]);
+        assert_eq!(labels("db.users.find().toArray().fil|", &hints), ["filter"]);
+        assert_eq!(
+            labels("db.users.distinct('name').inc|", &hints),
+            ["includes"]
+        );
+        assert_eq!(
+            labels(
+                "db.users.find().map(u => u.age).filter(Boolean).red|",
+                &hints
+            ),
+            ["reduce"]
+        );
+        assert_eq!(labels("[1, 2].ev|", &hints), ["every"]);
+        assert_eq!(labels("db.users.find().red|", &hints), ["reduce"]);
+        assert_eq!(
+            labels("db.users.find().filter(u => u.age).jo|", &hints),
+            ["join"]
+        );
+        assert!(labels("names[0].inc|", &hints).is_empty());
+        let found = complete_script("[].join", 7, &hints, false);
+        assert_eq!(found[0].insert, ".join()");
+        assert_eq!(found[0].cursor, ".join(".len());
+    }
+
+    #[test]
+    fn follows_variables_to_their_values() {
+        let collections = collections();
+        let fields = fields();
+        let hints = hints(&collections, &fields);
+        assert_eq!(
+            labels("const names = db.users.distinct('name')\nnames.so|", &hints),
+            ["some", "sort"]
+        );
+        assert_eq!(
+            labels("const users = db.users\nusers.find({}).li|", &hints),
+            ["limit"]
+        );
+        assert_eq!(
+            labels(
+                "let docs = db.users.find().toArray(); print(docs)\ndocs.fi|",
+                &hints
+            ),
+            ["find", "findIndex", "filter"]
+        );
+        assert!(labels("const n = 1\nn.so|", &hints).is_empty());
+        assert!(labels("const docs = docs\ndocs.so|", &hints).is_empty());
+        assert_eq!(
+            script_target("const users = db.users\nusers.find({ ", 36).as_deref(),
+            Some("users")
+        );
     }
 }
