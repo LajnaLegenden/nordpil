@@ -41,6 +41,10 @@ when idle, against roughly 1 GB for Compass.
 - **Import and export**: JSON, JSON lines and CSV, streamed with progress and cancel.
 - **Settings**: dark, light or system theme, three text sizes, and whether Ctrl+K searches
   all saved connections or only open ones.
+- **Keyboard**: F1 lists every shortcut. Ctrl+W closes a tab and Ctrl+Shift+T brings it
+  back, Ctrl+Tab and Ctrl+1–9 switch tabs, Alt+1/2/3 switch between Documents, Indexes
+  and Shell, Ctrl+R reruns the query and Ctrl+, opens the settings. Tabs carry their
+  connection's color.
 
 | Go to collection (Ctrl+K) | Values from the results |
 | --- | --- |
@@ -51,6 +55,8 @@ when idle, against roughly 1 GB for Compass.
 | ![Indexes](docs/screenshots/indexes.png) | ![Light theme](docs/screenshots/main-light.png) |
 | **Shell** | **Shell, side by side** |
 | ![Shell](docs/screenshots/shell.png) | ![Shell side by side](docs/screenshots/shell-side-by-side.png) |
+| **Keyboard shortcuts (F1)** | |
+| ![Keyboard shortcuts](docs/screenshots/shortcuts.png) | |
 
 ## Install
 

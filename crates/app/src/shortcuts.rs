@@ -23,15 +23,53 @@ pub enum AppCommand {
     /// Runs the Documents query again, or reloads the indexes.
     Refresh,
     Settings,
+    /// The shortcuts sheet.
+    Shortcuts,
     SaveScript,
     OpenScript,
     StopScript,
+}
+
+/// Where a key is listed in the shortcuts sheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    General,
+    Tabs,
+    Documents,
+    Shell,
+}
+
+impl Group {
+    pub const ALL: [Self; 4] = [Self::General, Self::Tabs, Self::Documents, Self::Shell];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Tabs => "Tabs",
+            Self::Documents => "Documents",
+            Self::Shell => "Shell",
+        }
+    }
 }
 
 pub struct Binding {
     pub command: AppCommand,
     /// The first one is shown in hints and the menu bar.
     pub keys: &'static [KeyboardShortcut],
+    /// For the shortcuts sheet; empty keeps it out of the sheet.
+    pub label: &'static str,
+    pub group: Group,
+}
+
+/// A line of the shortcuts sheet that isn't one binding: keys an editor
+/// handles itself, or several bindings shown as one.
+pub struct SheetLine {
+    pub label: &'static str,
+    pub group: Group,
+    /// Alternatives, shown with "or" between them.
+    pub keys: &'static [KeyboardShortcut],
+    /// Shown instead of the key of `keys`, e.g. "1–8".
+    pub key_text: Option<&'static str>,
 }
 
 const fn command(key: Key) -> KeyboardShortcut {
@@ -64,42 +102,90 @@ pub const ESCAPE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key:
 pub const SAVE_SCRIPT: KeyboardShortcut = command(Key::S);
 pub const OPEN_SCRIPT: KeyboardShortcut = command(Key::O);
 pub const STOP_SCRIPT: KeyboardShortcut = command(Key::Period);
+/// Asks an editor for completions; handled there.
+pub const COMPLETE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Space);
 
-/// Ctrl+1 to Ctrl+8 go to that tab.
-const fn tab(index: usize, keys: &'static [KeyboardShortcut]) -> Binding {
+pub const SHORTCUTS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F1);
+pub const SHORTCUTS_SLASH: KeyboardShortcut = command(Key::Slash);
+
+const fn bind(
+    command: AppCommand,
+    keys: &'static [KeyboardShortcut],
+    label: &'static str,
+    group: Group,
+) -> Binding {
     Binding {
-        command: AppCommand::SelectTab(index),
+        command,
         keys,
+        label,
+        group,
     }
+}
+
+/// Ctrl+1 to Ctrl+8 go to that tab; the sheet shows them as one line.
+const fn tab(index: usize, keys: &'static [KeyboardShortcut]) -> Binding {
+    bind(AppCommand::SelectTab(index), keys, "", Group::Tabs)
 }
 
 /// More specific keys come before the ones they contain: Ctrl+Shift+Tab
 /// before Ctrl+Tab, since a match ignores extra Shift.
 pub const BINDINGS: &[Binding] = &[
-    Binding {
-        command: AppCommand::GoTo,
-        keys: &[GO_TO],
-    },
-    Binding {
-        command: AppCommand::FocusEditor,
-        keys: &[FOCUS_EDITOR],
-    },
-    Binding {
-        command: AppCommand::CloseTab,
-        keys: &[CLOSE_TAB],
-    },
-    Binding {
-        command: AppCommand::ReopenTab,
-        keys: &[REOPEN_TAB],
-    },
-    Binding {
-        command: AppCommand::PreviousTab,
-        keys: &[PREVIOUS_TAB],
-    },
-    Binding {
-        command: AppCommand::NextTab,
-        keys: &[NEXT_TAB],
-    },
+    bind(
+        AppCommand::GoTo,
+        &[GO_TO],
+        "Go to collection",
+        Group::General,
+    ),
+    bind(
+        AppCommand::FocusEditor,
+        &[FOCUS_EDITOR],
+        "Focus the filter, or the script on Shell",
+        Group::General,
+    ),
+    bind(
+        AppCommand::Panel(Panel::Documents),
+        &[DOCUMENTS],
+        "Show Documents",
+        Group::General,
+    ),
+    bind(
+        AppCommand::Panel(Panel::Indexes),
+        &[INDEXES],
+        "Show Indexes",
+        Group::General,
+    ),
+    bind(
+        AppCommand::Panel(Panel::Shell),
+        &[SHELL],
+        "Show Shell",
+        Group::General,
+    ),
+    bind(
+        AppCommand::Settings,
+        &[SETTINGS],
+        "Settings",
+        Group::General,
+    ),
+    bind(
+        AppCommand::Shortcuts,
+        &[SHORTCUTS, SHORTCUTS_SLASH],
+        "Keyboard shortcuts",
+        Group::General,
+    ),
+    bind(AppCommand::CloseTab, &[CLOSE_TAB], "Close tab", Group::Tabs),
+    bind(
+        AppCommand::ReopenTab,
+        &[REOPEN_TAB],
+        "Reopen closed tab",
+        Group::Tabs,
+    ),
+    bind(
+        AppCommand::PreviousTab,
+        &[PREVIOUS_TAB],
+        "Previous tab",
+        Group::Tabs,
+    ),
+    bind(AppCommand::NextTab, &[NEXT_TAB], "Next tab", Group::Tabs),
     tab(0, &[command(Key::Num1)]),
     tab(1, &[command(Key::Num2)]),
     tab(2, &[command(Key::Num3)]),
@@ -108,41 +194,72 @@ pub const BINDINGS: &[Binding] = &[
     tab(5, &[command(Key::Num6)]),
     tab(6, &[command(Key::Num7)]),
     tab(7, &[command(Key::Num8)]),
-    Binding {
-        command: AppCommand::LastTab,
-        keys: &[LAST_TAB],
+    bind(AppCommand::LastTab, &[LAST_TAB], "Last tab", Group::Tabs),
+    bind(
+        AppCommand::Refresh,
+        &[REFRESH, REFRESH_F5],
+        "Run the query again, or reload indexes",
+        Group::Documents,
+    ),
+    // In the sheet with Escape, which the app handles apart.
+    bind(AppCommand::StopScript, &[STOP_SCRIPT], "", Group::Shell),
+    bind(
+        AppCommand::SaveScript,
+        &[SAVE_SCRIPT],
+        "Save the script",
+        Group::Shell,
+    ),
+    bind(
+        AppCommand::OpenScript,
+        &[OPEN_SCRIPT],
+        "Open a script",
+        Group::Shell,
+    ),
+];
+
+/// Sheet lines besides [`BINDINGS`], placed before them in their group.
+pub const SHEET_LINES: &[SheetLine] = &[
+    SheetLine {
+        label: "Go to tab",
+        group: Group::Tabs,
+        keys: &[command(Key::Num1)],
+        key_text: Some("1–8"),
     },
-    Binding {
-        command: AppCommand::Panel(Panel::Documents),
-        keys: &[DOCUMENTS],
+    SheetLine {
+        label: "Run the query",
+        group: Group::Documents,
+        keys: &[KeyboardShortcut::new(Modifiers::NONE, Key::Enter)],
+        key_text: None,
     },
-    Binding {
-        command: AppCommand::Panel(Panel::Indexes),
-        keys: &[INDEXES],
+    SheetLine {
+        label: "Suggest completions",
+        group: Group::Documents,
+        keys: &[COMPLETE],
+        key_text: None,
     },
-    Binding {
-        command: AppCommand::Panel(Panel::Shell),
-        keys: &[SHELL],
+    SheetLine {
+        label: "Save a document being edited",
+        group: Group::Documents,
+        keys: &[SAVE_DOCUMENT],
+        key_text: None,
     },
-    Binding {
-        command: AppCommand::Refresh,
-        keys: &[REFRESH, REFRESH_F5],
+    SheetLine {
+        label: "Run the statement at the cursor",
+        group: Group::Shell,
+        keys: &[RUN_STATEMENT],
+        key_text: None,
     },
-    Binding {
-        command: AppCommand::Settings,
-        keys: &[SETTINGS],
+    SheetLine {
+        label: "Run the whole script",
+        group: Group::Shell,
+        keys: &[RUN_SCRIPT],
+        key_text: None,
     },
-    Binding {
-        command: AppCommand::SaveScript,
-        keys: &[SAVE_SCRIPT],
-    },
-    Binding {
-        command: AppCommand::OpenScript,
-        keys: &[OPEN_SCRIPT],
-    },
-    Binding {
-        command: AppCommand::StopScript,
-        keys: &[STOP_SCRIPT],
+    SheetLine {
+        label: "Stop the script",
+        group: Group::Shell,
+        keys: &[STOP_SCRIPT, ESCAPE],
+        key_text: None,
     },
 ];
 
@@ -257,6 +374,14 @@ mod tests {
         assert_eq!(caps(&shortcut, true, false), ["Shift", "Cmd", "T"]);
         let tab = KeyboardShortcut::new(Modifiers::CTRL, Key::Tab);
         assert_eq!(caps(&tab, true, true), ["⌃", "Tab"]);
+    }
+
+    #[test]
+    fn no_two_bindings_share_a_key() {
+        let keys: Vec<_> = BINDINGS.iter().flat_map(|binding| binding.keys).collect();
+        for (index, key) in keys.iter().enumerate() {
+            assert!(!keys[index + 1..].contains(key), "{key:?} is bound twice");
+        }
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod indexes;
 pub mod mappings_dialog;
 pub mod settings_dialog;
 pub mod shell;
+pub mod shortcuts_dialog;
 pub mod sidebar;
 pub mod transfer_dialog;
 
