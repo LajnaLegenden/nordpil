@@ -39,6 +39,19 @@ pub enum GotoScope {
     OpenOnly,
 }
 
+/// What nordpil does when a newer release is published on GitHub.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Updates {
+    /// Downloads and installs it, then offers a restart.
+    #[default]
+    Automatic,
+    /// Says it is available and installs it on request.
+    Notify,
+    /// Never checks.
+    Off,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -48,6 +61,7 @@ pub struct Settings {
     /// Right-clicking an id field like `userId` offers to open the document
     /// it refers to, in a collection of the same database like `users`.
     pub look_up_references: bool,
+    pub updates: Updates,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -106,6 +120,7 @@ mod tests {
             text_size: TextSize::Large,
             goto_scope: GotoScope::OpenOnly,
             look_up_references: true,
+            updates: Updates::Notify,
         };
         save(&path, settings).unwrap();
 
@@ -113,6 +128,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("goto_scope = \"open-only\""), "{text}");
         assert!(text.contains("look_up_references = true"), "{text}");
+        assert!(text.contains("updates = \"notify\""), "{text}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

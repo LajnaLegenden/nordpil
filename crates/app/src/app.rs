@@ -28,8 +28,15 @@ use crate::ui::settings_dialog::{self, SettingsDialog};
 use crate::ui::shell::ShellAction;
 use crate::ui::transfer_dialog::{self, TransferDialog};
 use crate::ui::{Action, chrome, documents, sidebar};
-use crate::widgets::kit;
+use crate::update::{self, Updater};
+use crate::widgets::kit::{self, Tone};
 use crate::{icons, theme};
+
+enum UpdateClick {
+    Install,
+    Restart,
+    Dismiss,
+}
 
 /// Older notifications are dropped beyond this many.
 const MAX_NOTIFICATIONS: usize = 5;
@@ -63,6 +70,8 @@ pub struct NordpilApp {
     known: Vec<KnownDatabase>,
     /// Opened once its connection, being connected, is open.
     pending_open: Option<Selection>,
+    /// Off in development builds and tests.
+    updater: Option<Updater>,
 }
 
 impl NordpilApp {
@@ -103,11 +112,17 @@ impl NordpilApp {
             recents: Vec::new(),
             known: Vec::new(),
             pending_open: None,
+            updater: None,
         };
         if let Some(error) = settings_error {
             app.notify(error);
         }
         Ok(app)
+    }
+
+    /// Checks GitHub for newer releases, as the `updates` setting says.
+    pub fn enable_updates(&mut self, ctx: &egui::Context) {
+        self.updater = Some(Updater::new(ctx.clone()));
     }
 
     fn entry(&self, id: Uuid) -> Option<&ConnectionEntry> {
@@ -1584,6 +1599,121 @@ impl NordpilApp {
         }
     }
 
+    fn show_update(&mut self, ui: &mut egui::Ui) {
+        let Some(updater) = &mut self.updater else {
+            return;
+        };
+        if !updater.visible() {
+            return;
+        }
+        let palette = theme::palette(ui);
+        let (message, release, error) = match updater.state() {
+            update::State::Available(release) => (
+                format!("nordpil {} is available.", release.version),
+                release,
+                None,
+            ),
+            update::State::Installing(release) => (
+                format!("Installing nordpil {}…", release.version),
+                release,
+                None,
+            ),
+            update::State::Installed(release) => (
+                format!(
+                    "nordpil {} is installed. Restart to use it.",
+                    release.version
+                ),
+                release,
+                None,
+            ),
+            update::State::Failed(release, error) => (
+                format!("Could not update to nordpil {}.", release.version),
+                release,
+                Some(error.clone()),
+            ),
+            update::State::Idle | update::State::Checking => return,
+        };
+        let page = release.page.clone();
+        let installable = updater.can_install() && release.download.is_some();
+        let state = updater.state().clone();
+        let mut clicked = None;
+        egui::Panel::bottom("update")
+            .show_separator_line(false)
+            .frame(
+                Frame::new()
+                    .fill(palette.main)
+                    .inner_margin(Margin::symmetric(16, 10)),
+            )
+            .show(ui, |ui| {
+                Frame::new()
+                    .fill(palette.accent_soft)
+                    .stroke(Stroke::new(1.0, palette.accent.gamma_multiply(0.35)))
+                    .corner_radius(10)
+                    .inner_margin(Margin::symmetric(12, 6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            if matches!(state, update::State::Installing(_)) {
+                                ui.spinner();
+                            } else {
+                                ui.label(
+                                    RichText::new(icons::DOWNLOAD)
+                                        .size(16.0)
+                                        .color(palette.accent_text),
+                                );
+                            }
+                            let label = ui.label(RichText::new(&message).color(palette.text));
+                            if let Some(error) = &error {
+                                label.on_hover_text(error);
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if !matches!(state, update::State::Installing(_))
+                                        && kit::icon_button(ui, icons::X, "Dismiss", 26.0).clicked()
+                                    {
+                                        clicked = Some(UpdateClick::Dismiss);
+                                    }
+                                    let height = 28.0;
+                                    let primary = match &state {
+                                        update::State::Available(_) if installable => {
+                                            Some(("Install", UpdateClick::Install))
+                                        }
+                                        update::State::Installed(_) => {
+                                            Some(("Restart", UpdateClick::Restart))
+                                        }
+                                        update::State::Failed(..) if installable => {
+                                            Some(("Retry", UpdateClick::Install))
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some((label, click)) = primary
+                                        && kit::button(ui, Tone::Primary, None, label, height)
+                                            .clicked()
+                                    {
+                                        clicked = Some(click);
+                                    }
+                                    let link = if installable {
+                                        "Release notes"
+                                    } else {
+                                        "Download"
+                                    };
+                                    if kit::button(ui, Tone::Ghost, None, link, height).clicked() {
+                                        ui.ctx().open_url(egui::OpenUrl::new_tab(&page));
+                                    }
+                                },
+                            );
+                        });
+                    });
+            });
+        match clicked {
+            Some(UpdateClick::Install) => updater.install(),
+            Some(UpdateClick::Restart) => updater.restart(),
+            Some(UpdateClick::Dismiss) => updater.dismiss(),
+            None => {}
+        }
+    }
+
     fn show_notifications(&mut self, ui: &mut egui::Ui) {
         if self.notifications.is_empty() {
             return;
@@ -1820,6 +1950,9 @@ impl NordpilApp {
 
     /// Applies the backend results that arrived since the last frame.
     pub fn process_events(&mut self) {
+        if let Some(updater) = &mut self.updater {
+            updater.poll(self.settings.updates);
+        }
         let events: Vec<_> = self.backend.drain().collect();
         for event in events {
             match event.outcome {
@@ -1879,6 +2012,7 @@ impl NordpilApp {
                     &mut actions,
                 );
             });
+        self.show_update(ui);
         self.show_notifications(ui);
         egui::CentralPanel::no_frame()
             .frame(Frame::new().fill(palette.main))

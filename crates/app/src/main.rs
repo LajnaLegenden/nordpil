@@ -10,6 +10,7 @@ mod shell;
 mod tabs;
 mod theme;
 mod ui;
+mod update;
 mod widgets;
 
 use eframe::egui;
@@ -36,7 +37,12 @@ fn main() -> eframe::Result {
             let store_path = ConnectionStore::default_path()
                 .ok_or_else(|| std::io::Error::other("Could not find a home directory."))?;
             let backend = Backend::new(ConnectionStore::new(store_path), Keyring);
-            Ok(Box::new(app::NordpilApp::new(&cc.egui_ctx, backend)?))
+            let mut app = app::NordpilApp::new(&cc.egui_ctx, backend)?;
+            // Development builds aren't replaced by releases.
+            if !cfg!(debug_assertions) {
+                app.enable_updates(&cc.egui_ctx);
+            }
+            Ok(Box::new(app))
         }),
     )
 }
