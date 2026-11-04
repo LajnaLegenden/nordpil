@@ -85,6 +85,9 @@ impl Backend {
         if let Err(error) = self.forget_scripts(id).await {
             tracing::warn!(%id, %error, detail = ?error.detail, "could not delete saved scripts");
         }
+        if let Err(error) = self.forget_pipelines(id).await {
+            tracing::warn!(%id, %error, detail = ?error.detail, "could not delete saved pipelines");
+        }
         if let Err(error) = self.forget_mappings(id).await {
             tracing::warn!(%id, %error, detail = ?error.detail, "could not delete linked fields");
         }
