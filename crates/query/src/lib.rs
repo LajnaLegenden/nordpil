@@ -13,13 +13,14 @@ mod format;
 mod highlight;
 pub mod lexer;
 pub mod parser;
+pub mod pipeline;
 mod script;
 mod script_complete;
 mod values;
 
 use bson::{Bson, Document};
 
-pub use complete::{FieldHint, Mode, Suggestion, complete, is_word_char};
+pub use complete::{FieldHint, Hints, Mode, Suggestion, complete, complete_with, is_word_char};
 pub use fields::{FilterEdit, Segment, path_at, set_field};
 pub use format::{Style, format_document, format_value};
 pub use highlight::{Highlight, highlight};

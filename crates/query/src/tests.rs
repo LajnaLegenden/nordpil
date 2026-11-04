@@ -157,6 +157,25 @@ proptest! {
         let _ = highlight(&text);
     }
 
+    /// Pipeline completion and splitting never panic, at any cursor.
+    #[test]
+    fn pipeline_tools_never_panic(text in "([a-z.(){}\\[\\]'\"/\n $:,]|\\$group|\\$lookup|\\$match|pipeline|from|\\PC){0,50}") {
+        let _ = crate::pipeline::split_pipeline(&text);
+        let collections = ["users".to_owned()];
+        let hints = crate::Hints { collections: &collections, ..crate::Hints::default() };
+        let modes = [
+            crate::Mode::Pipeline,
+            crate::Mode::Stage(crate::pipeline::stage("$group").unwrap()),
+            crate::Mode::Stage(crate::pipeline::stage("$lookup").unwrap()),
+            crate::Mode::Stage(crate::pipeline::stage("$unwind").unwrap()),
+        ];
+        for (cursor, _) in text.char_indices().chain([(text.len(), ' ')]) {
+            for mode in modes {
+                let _ = crate::complete_with(&text, cursor, mode, &hints, true);
+            }
+        }
+    }
+
     /// Statements of any script are in order, apart, inside the text and on
     /// char boundaries; highlighting and completion never panic.
     #[test]

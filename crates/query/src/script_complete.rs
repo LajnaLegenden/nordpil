@@ -3,9 +3,10 @@
 //! names the script declares.
 
 use crate::complete::{
-    CONSTRUCTORS, FieldHint, Mode, Suggestion, at_value, complete, escape, is_word_char, rank,
+    CONSTRUCTORS, FieldHint, Hints, Mode, Suggestion, at_value, complete_with, escape,
+    is_word_char, rank,
 };
-use crate::lexer::{Token, TokenKind, lex, lex_script};
+use crate::lexer::{Token, TokenKind, lex_script};
 use crate::script::declared_names;
 use crate::values::ValueHint;
 
@@ -270,20 +271,17 @@ fn in_query(
     hints: &ScriptHints<'_>,
     explicit: bool,
 ) -> Vec<Suggestion> {
-    let args_start = query.call.args_start;
-    let (start, mode) = match query.argument {
-        Argument::Query(mode) => (args_start, mode),
-        _ => pipeline_stage(text, args_start, cursor - word.len())
-            .unwrap_or((args_start, Mode::Document)),
+    let start = query.call.args_start;
+    let mode = match query.argument {
+        Argument::Query(mode) => mode,
+        _ => Mode::Pipeline,
     };
-    let mut list = complete(
-        &text[start..],
-        cursor - start,
-        mode,
-        hints.fields,
-        hints.values,
-        explicit,
-    );
+    let completion = Hints {
+        fields: hints.fields,
+        values: hints.values,
+        collections: hints.collections,
+    };
+    let mut list = complete_with(&text[start..], cursor - start, mode, &completion, explicit);
     let before_word = &text[start..cursor - word.len()];
     let typed = !word.is_empty() || explicit;
     let plain = !query.quoted && !word.starts_with('$') && !word.contains('.');
@@ -294,47 +292,6 @@ fn in_query(
         list.truncate(MAX_SUGGESTIONS);
     }
     list
-}
-
-/// Inside `aggregate([...])`: the innermost `$match`, `$sort` or `$project`
-/// object around the cursor, as the start of its `{` and the mode for it.
-fn pipeline_stage(text: &str, args_start: usize, end: usize) -> Option<(usize, Mode)> {
-    let region = text.get(args_start..end)?;
-    // Each open bracket: whether it is an object, where it starts, and the
-    // key it is the value of.
-    let mut stack: Vec<(bool, usize, Option<String>)> = Vec::new();
-    let mut key: Option<String> = None;
-    let tokens = lex(region);
-    for (index, token) in tokens.iter().enumerate() {
-        match &token.kind {
-            TokenKind::LBrace | TokenKind::LBracket => {
-                stack.push((
-                    token.kind == TokenKind::LBrace,
-                    args_start + token.span.start,
-                    key.take(),
-                ));
-            }
-            TokenKind::RBrace | TokenKind::RBracket => {
-                stack.pop();
-                key = None;
-            }
-            TokenKind::Comma => key = None,
-            TokenKind::Ident(name) | TokenKind::String { value: name, .. }
-                if tokens.get(index + 1).map(|token| &token.kind) == Some(&TokenKind::Colon) =>
-            {
-                key = Some(name.clone());
-            }
-            _ => {}
-        }
-    }
-    stack
-        .iter()
-        .rev()
-        .find_map(|(object, start, key)| match key.as_deref() {
-            Some("$match") if *object => Some((*start, Mode::Filter)),
-            Some("$sort" | "$project") if *object => Some((*start, Mode::Fields)),
-            _ => None,
-        })
 }
 
 /// Names in quotes, closing the quote. Before a quote is typed, only on
@@ -793,6 +750,14 @@ mod tests {
         assert_eq!(
             labels("db.users.aggregate([{ $match: { na| } }])", &hints),
             ["name"]
+        );
+        assert_eq!(
+            labels("db.users.aggregate([{ $unw| }])", &hints),
+            ["$unwind"]
+        );
+        assert_eq!(
+            labels("db.users.aggregate([{ $group: { _id: '$na|' } }])", &hints),
+            ["$name"]
         );
         assert_eq!(labels("db.users.distinct('a|')", &hints), ["age"]);
         assert_eq!(
