@@ -9,6 +9,7 @@ mod error;
 mod fields;
 mod indexes;
 pub mod navigation;
+mod pipelines;
 mod queries;
 pub mod references;
 mod scripts;
@@ -34,6 +35,8 @@ pub use fields::FieldInfo;
 pub use indexes::IndexInfo;
 use mongodb::Client;
 use navigation::{KnownDatabase, Navigation, NavigationStore, Recent};
+use pipelines::PipelineStore;
+pub use pipelines::{PipelineText, Pipelines, SavedPipeline, StageText};
 use queries::QueryStore;
 pub use queries::{QueryText, SavedQuery};
 use references::{DatabaseMappings, ReferenceStore};
@@ -254,6 +257,26 @@ pub enum Command {
         namespace: Namespace,
         query: Box<PipelineQuery>,
     },
+    LoadPipelines(Namespace),
+    /// Adds a pipeline to the collection's history, or moves it to the top.
+    RecordPipeline {
+        namespace: Namespace,
+        pipeline: Box<PipelineText>,
+    },
+    SetPipelineFavorite {
+        namespace: Namespace,
+        id: Uuid,
+        favorite: bool,
+    },
+    DeletePipeline {
+        namespace: Namespace,
+        id: Uuid,
+    },
+    /// Keeps the aggregation builder's pipeline; an empty one forgets it.
+    SavePipelineDraft {
+        namespace: Namespace,
+        pipeline: Box<PipelineText>,
+    },
 }
 
 /// Results of [`Command`]s, with enough context to act on them.
@@ -350,6 +373,11 @@ pub enum Response {
     Explained(Result<mongodb::bson::Document, BackendError>),
     /// After a pipeline wrote with `$out` or `$merge`.
     AggregateWritten(Result<(), BackendError>),
+    /// The collection's pipelines after a pipeline command.
+    Pipelines {
+        namespace: Namespace,
+        result: Result<Pipelines, BackendError>,
+    },
 }
 
 /// An open connection.
@@ -366,6 +394,7 @@ pub struct Backend {
     navigation: Arc<tokio::sync::Mutex<NavigationStore>>,
     references: Arc<tokio::sync::Mutex<ReferenceStore>>,
     scripts: Arc<tokio::sync::Mutex<ScriptStore>>,
+    pipelines: Arc<tokio::sync::Mutex<PipelineStore>>,
     settings_path: std::path::PathBuf,
     secrets: Arc<dyn SecretStore>,
     sessions: Mutex<HashMap<Uuid, Session>>,
@@ -381,6 +410,7 @@ impl Backend {
         let navigation = NavigationStore::new(dir);
         let references = ReferenceStore::new(dir.join("references.toml"));
         let scripts = ScriptStore::new(dir.join("scripts.toml"));
+        let pipelines = PipelineStore::new(dir.join("pipelines.toml"));
         let settings_path = store.path().with_file_name("config.toml");
         Self {
             store: Arc::new(tokio::sync::Mutex::new(store)),
@@ -388,6 +418,7 @@ impl Backend {
             navigation: Arc::new(tokio::sync::Mutex::new(navigation)),
             references: Arc::new(tokio::sync::Mutex::new(references)),
             scripts: Arc::new(tokio::sync::Mutex::new(scripts)),
+            pipelines: Arc::new(tokio::sync::Mutex::new(pipelines)),
             settings_path,
             secrets: Arc::new(secrets),
             sessions: Mutex::default(),
@@ -440,6 +471,14 @@ impl Backend {
     ) -> Result<T, BackendError> {
         let scripts = Arc::clone(&self.scripts).lock_owned().await;
         blocking(move || f(&scripts)).await
+    }
+
+    async fn with_pipelines<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&PipelineStore) -> Result<T, BackendError> + Send + 'static,
+    ) -> Result<T, BackendError> {
+        let pipelines = Arc::clone(&self.pipelines).lock_owned().await;
+        blocking(move || f(&pipelines)).await
     }
 
     async fn with_secrets<T: Send + 'static>(
@@ -703,6 +742,35 @@ impl Handler for Backend {
             Command::WriteAggregate { namespace, query } => {
                 Response::AggregateWritten(self.aggregate_write(&namespace, *query).await)
             }
+            Command::LoadPipelines(namespace) => Response::Pipelines {
+                result: self.load_pipelines(namespace.clone()).await,
+                namespace,
+            },
+            Command::RecordPipeline {
+                namespace,
+                pipeline,
+            } => Response::Pipelines {
+                result: self.record_pipeline(namespace.clone(), *pipeline).await,
+                namespace,
+            },
+            Command::SetPipelineFavorite {
+                namespace,
+                id,
+                favorite,
+            } => Response::Pipelines {
+                result: self
+                    .set_pipeline_favorite(namespace.clone(), id, favorite)
+                    .await,
+                namespace,
+            },
+            Command::DeletePipeline { namespace, id } => Response::Pipelines {
+                result: self.delete_pipeline(namespace.clone(), id).await,
+                namespace,
+            },
+            Command::SavePipelineDraft {
+                namespace,
+                pipeline,
+            } => Response::Stored(self.save_pipeline_draft(namespace, *pipeline).await),
         }
     }
 }
