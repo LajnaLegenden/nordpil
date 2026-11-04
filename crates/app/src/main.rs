@@ -1,5 +1,6 @@
 //! nordpil: a lightweight, native MongoDB GUI.
 
+mod aggregate;
 mod app;
 mod connections;
 mod icons;

@@ -8,6 +8,7 @@ use eframe::egui;
 use nordpil_backend::{FindQuery, IndexInfo, Namespace, PREVIEW_BYTES, RequestId, SavedQuery};
 use nordpil_query::{FieldHint, Preview, ValueHint};
 
+use crate::aggregate::AggregateState;
 use crate::connections::Selection;
 use crate::shell::ShellState;
 use crate::widgets::code_editor::{CodeEditor, is_empty_object};
@@ -16,7 +17,7 @@ pub const PAGE_SIZES: [u64; 7] = [10, 20, 50, 100, 250, 500, 1000];
 const DEFAULT_PAGE_SIZE: u64 = 20;
 /// Like Compass, queries without a max time get one, so a bad filter on a
 /// huge collection can't run forever.
-const DEFAULT_MAX_TIME: Duration = Duration::from_secs(60);
+pub const DEFAULT_MAX_TIME: Duration = Duration::from_secs(60);
 
 pub use nordpil_backend::settings::Panel;
 
@@ -101,6 +102,7 @@ pub struct CollectionTab {
     pub indexes: Option<Result<Vec<IndexInfo>, String>>,
     pub indexes_request: Option<RequestId>,
     pub shell: ShellState,
+    pub aggregate: AggregateState,
 }
 
 impl CollectionTab {
@@ -138,6 +140,7 @@ impl CollectionTab {
             indexes: None,
             indexes_request: None,
             shell: ShellState::new(id),
+            aggregate: AggregateState::new(id),
         }
     }
 

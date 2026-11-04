@@ -209,7 +209,7 @@ impl Menus<'_> {
         match (self.kind, self.references) {
             // An array of ids can be looked up or linked; an object can't.
             (FieldMenus::All, Some(_)) => matches!(value, Bson::Array(_)),
-            (FieldMenus::Lookups, Some(references)) => {
+            (FieldMenus::Lookups | FieldMenus::Pipeline, Some(references)) => {
                 matches!(value, Bson::Array(_)) && !lookups(place, value, references).is_empty()
             }
             _ => false,
@@ -228,15 +228,21 @@ fn field_menu(
     action: &mut Option<TabAction>,
 ) -> bool {
     let all = menus.kind == FieldMenus::All;
-    let leaf = all && !matches!(value, Bson::Document(_) | Bson::Array(_));
+    let filters = all || menus.kind == FieldMenus::Pipeline;
+    let leaf = filters && !matches!(value, Bson::Document(_) | Bson::Array(_));
+    let (add, exclude) = if all {
+        ("Add to filter", "Exclude from filter")
+    } else {
+        ("Add to $match", "Exclude in $match")
+    };
     if leaf {
-        if ui.button("Add to filter").clicked() {
+        if ui.button(add).clicked() {
             *action = Some(TabAction::AddToFilter {
                 path: place.path.clone(),
                 value: value.clone(),
             });
         }
-        if ui.button("Exclude from filter").clicked() {
+        if ui.button(exclude).clicked() {
             *action = Some(TabAction::AddToFilter {
                 path: place.path.clone(),
                 value: Bson::Document(doc! { "$ne": value.clone() }),
@@ -790,6 +796,8 @@ pub enum FieldMenus {
     Lookups,
     /// Add to filter, exclude from filter, lookups and linking.
     All,
+    /// Lookups, and adding to the pipeline's last `$match`.
+    Pipeline,
 }
 
 /// A page of documents to show, and where its widget state lives.

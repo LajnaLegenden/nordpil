@@ -282,7 +282,7 @@ fn parse_documents(text: &str) -> Result<Vec<Document>, String> {
 }
 
 /// The first parse error, with its line and column.
-fn describe(text: &str, errors: Vec<nordpil_query::ParseError>) -> String {
+pub fn describe(text: &str, errors: Vec<nordpil_query::ParseError>) -> String {
     let Some(error) = errors.first() else {
         return String::new();
     };

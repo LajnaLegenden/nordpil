@@ -303,7 +303,7 @@ pub fn find_statement(collection: &str, filter: &Document) -> String {
 
 /// `db.<collection>`, or `db.getCollection('<collection>')` for names that
 /// aren't identifiers.
-fn collection_expression(collection: &str) -> String {
+pub fn collection_expression(collection: &str) -> String {
     let mut chars = collection.chars();
     let identifier = chars
         .next()

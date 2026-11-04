@@ -27,6 +27,7 @@ pub struct MenuState {
     pub has_tabs: bool,
     pub can_reopen: bool,
     pub on_shell: bool,
+    pub on_aggregate: bool,
 }
 
 impl MacMenu {
@@ -93,8 +94,9 @@ impl MacMenu {
         let documents = item("Documents", AppCommand::Panel(Panel::Documents));
         let indexes = item("Indexes", AppCommand::Panel(Panel::Indexes));
         let shell = item("Shell", AppCommand::Panel(Panel::Shell));
+        let aggregate = item("Aggregation", AppCommand::Panel(Panel::Aggregate));
         let refresh = item("Refresh", AppCommand::Refresh);
-        let stop = item("Stop Script", AppCommand::StopScript);
+        let stop = item("Stop", AppCommand::StopScript);
         let view = submenu(
             "View",
             &[
@@ -104,6 +106,7 @@ impl MacMenu {
                 &documents,
                 &indexes,
                 &shell,
+                &aggregate,
                 &separator(),
                 &refresh,
                 &stop,
@@ -176,9 +179,8 @@ impl MacMenu {
                 | AppCommand::Panel(_)
                 | AppCommand::Refresh => state.has_tabs,
                 AppCommand::ReopenTab => state.can_reopen,
-                AppCommand::SaveScript | AppCommand::OpenScript | AppCommand::StopScript => {
-                    state.on_shell
-                }
+                AppCommand::SaveScript | AppCommand::OpenScript => state.on_shell,
+                AppCommand::StopScript => state.on_shell || state.on_aggregate,
                 AppCommand::GoTo | AppCommand::Settings | AppCommand::Shortcuts => true,
             };
             item.set_enabled(enabled);

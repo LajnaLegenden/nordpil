@@ -37,10 +37,17 @@ pub enum Group {
     Tabs,
     Documents,
     Shell,
+    Aggregation,
 }
 
 impl Group {
-    pub const ALL: [Self; 4] = [Self::General, Self::Tabs, Self::Documents, Self::Shell];
+    pub const ALL: [Self; 5] = [
+        Self::General,
+        Self::Tabs,
+        Self::Documents,
+        Self::Shell,
+        Self::Aggregation,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -48,6 +55,7 @@ impl Group {
             Self::Tabs => "Tabs",
             Self::Documents => "Documents",
             Self::Shell => "Shell",
+            Self::Aggregation => "Aggregation",
         }
     }
 }
@@ -89,6 +97,7 @@ pub const LAST_TAB: KeyboardShortcut = command(Key::Num9);
 pub const DOCUMENTS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Num1);
 pub const INDEXES: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Num2);
 pub const SHELL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Num3);
+pub const AGGREGATE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Num4);
 pub const REFRESH: KeyboardShortcut = command(Key::R);
 pub const REFRESH_F5: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
 pub const SETTINGS: KeyboardShortcut = command(Key::Comma);
@@ -139,7 +148,7 @@ pub const BINDINGS: &[Binding] = &[
     bind(
         AppCommand::FocusEditor,
         &[FOCUS_EDITOR],
-        "Focus the filter, or the script on Shell",
+        "Focus the filter, script or first stage",
         Group::General,
     ),
     bind(
@@ -158,6 +167,12 @@ pub const BINDINGS: &[Binding] = &[
         AppCommand::Panel(Panel::Shell),
         &[SHELL],
         "Show Shell",
+        Group::General,
+    ),
+    bind(
+        AppCommand::Panel(Panel::Aggregate),
+        &[AGGREGATE],
+        "Show Aggregation",
         Group::General,
     ),
     bind(
@@ -198,7 +213,7 @@ pub const BINDINGS: &[Binding] = &[
     bind(
         AppCommand::Refresh,
         &[REFRESH, REFRESH_F5],
-        "Run the query again, or reload indexes",
+        "Run the query or pipeline again, or reload indexes",
         Group::Documents,
     ),
     // In the sheet with Escape, which the app handles apart.
@@ -259,6 +274,24 @@ pub const SHEET_LINES: &[SheetLine] = &[
         label: "Stop the script",
         group: Group::Shell,
         keys: &[STOP_SCRIPT, ESCAPE],
+        key_text: None,
+    },
+    SheetLine {
+        label: "Run the pipeline, from any stage",
+        group: Group::Aggregation,
+        keys: &[RUN_STATEMENT],
+        key_text: None,
+    },
+    SheetLine {
+        label: "Stop the pipeline",
+        group: Group::Aggregation,
+        keys: &[STOP_SCRIPT, ESCAPE],
+        key_text: None,
+    },
+    SheetLine {
+        label: "Suggest stages, operators and fields",
+        group: Group::Aggregation,
+        keys: &[COMPLETE],
         key_text: None,
     },
 ];
