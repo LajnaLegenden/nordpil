@@ -4,6 +4,7 @@
 //! the current results.
 
 use crate::lexer::{TokenKind, lex};
+use crate::pipeline::{EXPRESSION_OPERATORS, STAGES, SYSTEM_VARIABLES, Stage, Value};
 use crate::values::ValueHint;
 
 /// Which query input is being completed.
@@ -15,6 +16,21 @@ pub enum Mode {
     Collation,
     /// A whole document being written: only values are completed.
     Document,
+    /// The value of one aggregation stage, e.g. `{ _id: '$city' }` of a `$group`.
+    Stage(&'static Stage),
+    /// A whole pipeline: an array of stages.
+    Pipeline,
+}
+
+/// What completion knows besides the text.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Hints<'a> {
+    /// Field paths seen in the collection.
+    pub fields: &'a [FieldHint],
+    /// Values seen in the current results, suggested for their field.
+    pub values: &'a [ValueHint],
+    /// Collections of the database, e.g. for `$lookup`'s `from`.
+    pub collections: &'a [String],
 }
 
 /// A field path seen in the collection, e.g. `address.city`.
@@ -157,8 +173,70 @@ enum Owner {
     ElemMatch(String),
     /// The array of `$in`, `$nin` or `$all` on a field: its values.
     Values(String),
-    /// Anything else, e.g. `$expr` or an array of values.
+    /// Anything else, e.g. an array of values.
     Other,
+    /// An aggregation expression, e.g. in `$expr` or a `$group` output.
+    Expression,
+    /// Field paths as keys, e.g. a `$sort`.
+    Keys,
+    /// Names the user picks, each set to an expression.
+    Outputs,
+    /// A stage's document of options, e.g. `$lookup`'s.
+    Stage(&'static Stage),
+    /// A document in a pipeline: its key is the stage name.
+    StageDoc,
+    /// An array of stages.
+    Pipeline,
+    /// Plain values of one kind, e.g. field names.
+    Scalar(Value),
+}
+
+impl Owner {
+    /// What owns a value of this kind.
+    fn of(value: Value) -> Self {
+        match value {
+            Value::Expression => Self::Expression,
+            Value::Filter => Self::Filter,
+            Value::Keys => Self::Keys,
+            Value::Outputs => Self::Outputs,
+            Value::Pipeline => Self::Pipeline,
+            Value::Collection | Value::Field | Value::Bool | Value::Other => Self::Scalar(value),
+        }
+    }
+
+    /// What owns `stage`'s value, an object or an array.
+    fn of_stage(stage: &'static Stage, array: bool) -> Self {
+        let plain = stage.keys.is_empty() && !stage.field_keys && stage.other_keys == Value::Other;
+        if array || plain {
+            Self::of(stage.value)
+        } else {
+            Self::Stage(stage)
+        }
+    }
+
+    /// What a value at `key` in an object owned by this holds, for owners
+    /// in a pipeline. `None` for filters.
+    fn value_at(&self, key: &str) -> Option<Value> {
+        match self {
+            Self::Filter if key == "$expr" => Some(Value::Expression),
+            Self::Stage(stage) => Some(stage.key_value(key)),
+            Self::StageDoc => Some(crate::pipeline::stage(key).map_or(Value::Other, |s| s.value)),
+            Self::Expression | Self::Outputs => Some(Value::Expression),
+            Self::Keys => Some(Value::Keys),
+            Self::Scalar(_) => Some(Value::Other),
+            _ => None,
+        }
+    }
+
+    /// What the elements of an array owned by this hold, for owners in a
+    /// pipeline.
+    fn element(&self) -> Option<Value> {
+        match self {
+            Self::Expression | Self::Outputs => Some(Value::Expression),
+            Self::Scalar(value) => Some(*value),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -184,6 +262,22 @@ pub fn complete(
     values: &[ValueHint],
     explicit: bool,
 ) -> Vec<Suggestion> {
+    let hints = Hints {
+        fields,
+        values,
+        collections: &[],
+    };
+    complete_with(text, cursor, mode, &hints, explicit)
+}
+
+/// [`complete`] with collection names too, for pipelines.
+pub fn complete_with(
+    text: &str,
+    cursor: usize,
+    mode: Mode,
+    hints: &Hints<'_>,
+    explicit: bool,
+) -> Vec<Suggestion> {
     let (Some(before), Some(after)) = (text.get(..cursor), text.get(cursor..)) else {
         return Vec::new();
     };
@@ -199,34 +293,48 @@ pub fn complete(
         return Vec::new();
     }
     let context_end = word_start - quote.map_or(0, char::len_utf8);
-    let stack = frames(&before[..context_end]);
-    let context = Context { quote, after };
+    let stack = frames(&before[..context_end], mode);
+    let context = Context { quote, after, word };
 
     let mut candidates = match stack.last() {
         Some(Frame::Object {
             owner,
             in_value: false,
             ..
-        }) => key_suggestions(mode, owner, fields, &context),
+        }) => key_suggestions(mode, owner, hints.fields, &context),
         Some(Frame::Object {
             owner,
             key: Some(key),
             in_value: true,
-        }) => {
-            let path = value_path(owner, key);
-            let mut list = field_values(path.as_deref(), values, &context);
-            list.extend(value_suggestions(key, &context));
-            list
-        }
+        }) => match owner.value_at(key) {
+            Some(value) => values_of(value, hints, &context),
+            None => {
+                let path = value_path(owner, key);
+                let mut list = field_values(path.as_deref(), hints.values, &context);
+                list.extend(value_suggestions(key, &context));
+                list
+            }
+        },
         Some(Frame::Array {
             owner: Owner::Values(path),
         }) => {
-            let mut list = field_values(Some(path), values, &context);
+            let mut list = field_values(Some(path), hints.values, &context);
             list.extend(value_suggestions("", &context));
             list
         }
-        Some(Frame::Array { owner }) if *owner != Owner::Logical => value_suggestions("", &context),
+        Some(Frame::Array {
+            owner: Owner::Pipeline,
+        }) => stage_values(&context),
+        Some(Frame::Array { owner }) => match owner.element() {
+            Some(value) => values_of(value, hints, &context),
+            None if *owner != Owner::Logical => value_suggestions("", &context),
+            None => Vec::new(),
+        },
         Some(Frame::Call) => Vec::new(),
+        None => match mode {
+            Mode::Stage(stage) => values_of(stage.value, hints, &context),
+            _ => Vec::new(),
+        },
         _ => Vec::new(),
     };
     rank(&mut candidates, word);
@@ -240,6 +348,8 @@ struct Context<'a> {
     quote: Option<char>,
     /// The text after the cursor.
     after: &'a str,
+    /// The word before the cursor.
+    word: &'a str,
 }
 
 impl Context<'_> {
@@ -287,7 +397,7 @@ fn value_path(owner: &Owner, key: &str) -> Option<String> {
 /// Outside any brackets counts as a value.
 pub(crate) fn at_value(text: &str) -> bool {
     !matches!(
-        frames(text).last(),
+        frames(text, Mode::Filter).last(),
         Some(Frame::Object {
             in_value: false,
             ..
@@ -295,12 +405,12 @@ pub(crate) fn at_value(text: &str) -> bool {
     )
 }
 
-fn frames(text: &str) -> Vec<Frame> {
+fn frames(text: &str, mode: Mode) -> Vec<Frame> {
     let mut stack: Vec<Frame> = Vec::new();
     for token in lex(text) {
         match token.kind {
             TokenKind::LBrace => {
-                let owner = owner_of_next_value(&stack);
+                let owner = owner_of_next_value(&stack, mode, false);
                 stack.push(Frame::Object {
                     owner,
                     key: None,
@@ -308,7 +418,7 @@ fn frames(text: &str) -> Vec<Frame> {
                 });
             }
             TokenKind::LBracket => {
-                let owner = owner_of_next_value(&stack);
+                let owner = owner_of_next_value(&stack, mode, true);
                 stack.push(Frame::Array { owner });
             }
             TokenKind::LParen => stack.push(Frame::Call),
@@ -344,12 +454,39 @@ fn frames(text: &str) -> Vec<Frame> {
     stack
 }
 
-fn owner_of_next_value(stack: &[Frame]) -> Owner {
+/// What owns an object, or an `array`, that opens next.
+fn owner_of_next_value(stack: &[Frame], mode: Mode, array: bool) -> Owner {
     match stack.last() {
-        None => Owner::Filter,
+        None => match mode {
+            Mode::Pipeline if array => Owner::Pipeline,
+            Mode::Pipeline => Owner::StageDoc,
+            Mode::Stage(stage) => Owner::of_stage(stage, array),
+            _ => Owner::Filter,
+        },
         Some(Frame::Array {
             owner: Owner::Logical,
         }) => Owner::Filter,
+        Some(Frame::Array {
+            owner: Owner::Pipeline,
+        }) => Owner::StageDoc,
+        Some(Frame::Array {
+            owner: Owner::Expression | Owner::Outputs,
+        }) => Owner::Expression,
+        Some(Frame::Object {
+            owner: Owner::StageDoc,
+            key: Some(key),
+            in_value: true,
+        }) => crate::pipeline::stage(key)
+            .map_or(Owner::Expression, |stage| Owner::of_stage(stage, array)),
+        Some(Frame::Object {
+            owner,
+            key: Some(key),
+            in_value: true,
+        }) if let Some(value) = owner.value_at(key) => match owner {
+            Owner::Stage(_) => Owner::of(value),
+            Owner::Scalar(_) => Owner::Scalar(Value::Other),
+            _ => Owner::Expression,
+        },
         Some(Frame::Object {
             owner,
             key: Some(key),
@@ -385,6 +522,7 @@ fn key_suggestions(
     fields: &[FieldHint],
     context: &Context<'_>,
 ) -> Vec<Suggestion> {
+    let filters = matches!(mode, Mode::Filter | Mode::Stage(_) | Mode::Pipeline);
     let field_keys = |prefix: &str| {
         fields
             .iter()
@@ -405,20 +543,43 @@ fn key_suggestions(
             .map(|&(name, detail)| key(name, detail, context))
             .collect::<Vec<_>>()
     };
-    match (mode, owner) {
-        (Mode::Filter, Owner::Filter) => {
-            let mut list = field_keys("");
-            list.extend(operators(ROOT_OPERATORS));
-            list
-        }
-        (Mode::Filter, Owner::Field(_)) => operators(FIELD_OPERATORS),
-        (Mode::Filter, Owner::ElemMatch(path)) => {
+    match owner {
+        Owner::Filter => match mode {
+            Mode::Fields => field_keys(""),
+            Mode::Collation => operators(COLLATION_KEYS),
+            Mode::Document => Vec::new(),
+            Mode::Filter | Mode::Stage(_) | Mode::Pipeline => {
+                let mut list = field_keys("");
+                list.extend(operators(ROOT_OPERATORS));
+                list
+            }
+        },
+        Owner::Field(_) if filters => operators(FIELD_OPERATORS),
+        Owner::ElemMatch(path) if filters => {
             let mut list = field_keys(path);
             list.extend(operators(FIELD_OPERATORS));
             list
         }
-        (Mode::Fields, Owner::Filter) => field_keys(""),
-        (Mode::Collation, Owner::Filter) => operators(COLLATION_KEYS),
+        Owner::Keys => field_keys(""),
+        Owner::Stage(stage) => {
+            let mut list: Vec<Suggestion> = stage
+                .keys
+                .iter()
+                .map(|key| key_with(key.name, key.detail, context, key.template))
+                .collect();
+            if stage.field_keys {
+                list.extend(field_keys(""));
+            }
+            list
+        }
+        Owner::StageDoc => STAGES
+            .iter()
+            .map(|stage| key_with(stage.name, stage.detail, context, stage.template))
+            .collect(),
+        Owner::Expression => EXPRESSION_OPERATORS
+            .iter()
+            .map(|&(name, template, detail)| key_with(name, detail, context, template))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -426,6 +587,17 @@ fn key_suggestions(
 /// A key suggestion, quoted when needed, followed by `: ` and, for operators
 /// that take an array or object, the brackets with the cursor inside.
 fn key(name: &str, detail: &str, context: &Context<'_>) -> Suggestion {
+    let template = match name {
+        "$in" | "$nin" | "$all" => "[|]",
+        "$and" | "$or" | "$nor" => "[{ | }]",
+        "$elemMatch" | "$not" | "$expr" => "{ | }",
+        _ => "|",
+    };
+    key_with(name, detail, context, template)
+}
+
+/// A key suggestion followed by `: ` and `template`, whose `|` marks the cursor.
+fn key_with(name: &str, detail: &str, context: &Context<'_>, template: &str) -> Suggestion {
     let mut suggestion = match context.quote {
         Some(_) => Suggestion::new(name, name, detail),
         None if needs_quotes(name) => Suggestion::new(name, &format!("'{name}'"), detail),
@@ -437,15 +609,111 @@ fn key(name: &str, detail: &str, context: &Context<'_>) -> Suggestion {
     if rest.trim_start().starts_with(':') {
         return suggestion;
     }
-    let (snippet, cursor_from_end) = match name {
-        "$in" | "$nin" | "$all" => (": []", 1),
-        "$and" | "$or" | "$nor" => (": [{  }]", 3),
-        "$elemMatch" | "$not" | "$expr" => (": {  }", 2),
-        _ => (": ", 0),
-    };
-    suggestion.insert.push_str(snippet);
-    suggestion.cursor = suggestion.insert.len() - cursor_from_end;
+    let (before, after) = template.split_once('|').unwrap_or((template, ""));
+    suggestion.insert.push_str(": ");
+    suggestion.insert.push_str(before);
+    suggestion.cursor = suggestion.insert.len();
+    suggestion.insert.push_str(after);
     suggestion
+}
+
+/// Suggestions for a value of this kind, in a pipeline.
+fn values_of(value: Value, hints: &Hints<'_>, context: &Context<'_>) -> Vec<Suggestion> {
+    match value {
+        Value::Expression | Value::Outputs => expression_values(hints.fields, context),
+        Value::Collection => names(
+            hints.collections.iter().map(String::as_str),
+            "collection",
+            context,
+        ),
+        Value::Field => names(
+            hints.fields.iter().map(|field| field.path.as_str()),
+            "field",
+            context,
+        ),
+        Value::Bool if context.quote.is_none() => ["true", "false"]
+            .map(|value| Suggestion::new(value, value, "boolean"))
+            .into(),
+        Value::Keys if context.quote.is_none() => [("1", "ascending"), ("-1", "descending")]
+            .map(|(value, detail)| Suggestion::new(value, value, detail))
+            .into(),
+        _ => value_suggestions("", context),
+    }
+}
+
+/// Names in quotes: in the open quote, closing it, or with quotes added.
+fn names<'a>(
+    names: impl Iterator<Item = &'a str>,
+    detail: &str,
+    context: &Context<'_>,
+) -> Vec<Suggestion> {
+    names
+        .map(|name| match context.quote {
+            Some(quote) => {
+                let mut suggestion = Suggestion::new(name, &escape(name, quote), detail);
+                context.close_quote(&mut suggestion);
+                suggestion
+            }
+            None => Suggestion::new(name, &format!("'{}'", escape(name, '\'')), detail),
+        })
+        .collect()
+}
+
+/// An expression: field references like `'$age'`, system variables,
+/// operators in braces and constructors. In quotes, only references, and
+/// only once a `$` is typed, so plain strings stay quiet.
+fn expression_values(fields: &[FieldHint], context: &Context<'_>) -> Vec<Suggestion> {
+    if context.quote.is_some() && !context.word.starts_with('$') {
+        return Vec::new();
+    }
+    let references = fields
+        .iter()
+        .map(|field| (format!("${}", field.path), field.detail.as_str()))
+        .chain(
+            SYSTEM_VARIABLES
+                .iter()
+                .map(|&(name, detail)| (name.to_owned(), detail)),
+        );
+    let mut list: Vec<Suggestion> = references
+        .map(|(reference, detail)| match context.quote {
+            Some(quote) => {
+                let mut suggestion =
+                    Suggestion::new(&reference, &escape(&reference, quote), detail);
+                context.close_quote(&mut suggestion);
+                suggestion
+            }
+            None => Suggestion::new(
+                &reference,
+                &format!("'{}'", escape(&reference, '\'')),
+                detail,
+            ),
+        })
+        .collect();
+    if context.quote.is_none() {
+        list.extend(
+            EXPRESSION_OPERATORS
+                .iter()
+                .map(|&(name, template, detail)| {
+                    Suggestion::snippet(name, &format!("{{ {name}: {template} }}"), detail)
+                }),
+        );
+        list.extend(value_suggestions("", context));
+    }
+    list
+}
+
+/// Whole stages, where a pipeline's array wants its next element.
+fn stage_values(context: &Context<'_>) -> Vec<Suggestion> {
+    if context.quote.is_some() {
+        return Vec::new();
+    }
+    STAGES
+        .iter()
+        .map(|stage| {
+            let insert = format!("{{ {}: {} }}", stage.name, stage.template);
+            Suggestion::snippet(stage.name, &insert, stage.detail)
+        })
+        .collect()
 }
 
 fn needs_quotes(name: &str) -> bool {
@@ -731,5 +999,138 @@ mod tests {
     #[test]
     fn nothing_after_a_closing_quote() {
         assert!(suggestions("{ status: 'shipped'| }", false).is_empty());
+    }
+
+    /// Completes at `|` in a pipeline `mode`, with two collections.
+    fn pipeline(text: &str, mode: Mode) -> Vec<Suggestion> {
+        let cursor = text.find('|').unwrap();
+        let text = text.replace('|', "");
+        let collections = ["orders".to_owned(), "users".to_owned()];
+        let fields = fields();
+        let hints = Hints {
+            fields: &fields,
+            values: &[],
+            collections: &collections,
+        };
+        complete_with(&text, cursor, mode, &hints, true)
+    }
+
+    fn pipeline_labels(text: &str, mode: Mode) -> Vec<String> {
+        pipeline(text, mode).into_iter().map(|s| s.label).collect()
+    }
+
+    /// The first suggestion's insert with `|` at its cursor.
+    fn pipeline_first(text: &str, mode: Mode) -> String {
+        let suggestion = pipeline(text, mode).remove(0);
+        let mut insert = suggestion.insert;
+        insert.insert(suggestion.cursor, '|');
+        insert
+    }
+
+    fn stage(name: &str) -> Mode {
+        Mode::Stage(crate::pipeline::stage(name).unwrap())
+    }
+
+    #[test]
+    fn suggests_stage_names_in_a_pipeline() {
+        assert_eq!(
+            pipeline_labels("[{ $gr|", Mode::Pipeline),
+            ["$group", "$graphLookup"]
+        );
+        assert_eq!(pipeline_first("[{ $lim|", Mode::Pipeline), "$limit: 10|");
+        assert_eq!(
+            pipeline_first("[{ $match: {} }, $mat|", Mode::Pipeline),
+            "{ $match: { | } }"
+        );
+    }
+
+    #[test]
+    fn stage_values_complete_like_their_stage() {
+        assert_eq!(
+            pipeline_labels("[{ $match: { na|", Mode::Pipeline),
+            ["name"]
+        );
+        assert_eq!(pipeline_labels("[{ $sort: { ag|", Mode::Pipeline), ["age"]);
+        assert_eq!(pipeline_labels("{ ag|", stage("$sort")), ["age"]);
+        assert_eq!(pipeline_labels("{ na|", stage("$match")), ["name"]);
+        assert_eq!(pipeline_labels("{ na|", stage("$project")), ["name"]);
+    }
+
+    #[test]
+    fn suggests_expression_operators() {
+        assert_eq!(
+            pipeline_labels("{ total: { $su|", stage("$group"))[0],
+            "$sum"
+        );
+        assert_eq!(
+            pipeline_labels("{ name: { $toU|", stage("$project")),
+            ["$toUpper"]
+        );
+        assert_eq!(
+            pipeline_first("{ total: $su|", stage("$group")),
+            "{ $sum: | }"
+        );
+        assert_eq!(
+            pipeline_first("{ day: { $dateToStr|", stage("$project")),
+            "$dateToString: { format: '%Y-%m-%d', date: | }"
+        );
+        assert_eq!(
+            pipeline_labels("{ n: { $add: [{ $mul|", stage("$set")),
+            ["$multiply"]
+        );
+    }
+
+    #[test]
+    fn suggests_field_references_once_a_dollar_is_typed() {
+        assert_eq!(
+            pipeline_labels("{ _id: '$add|' }", stage("$group")),
+            ["$address.city", "$address.zip"]
+        );
+        assert_eq!(
+            pipeline_first("{ _id: '$na|' }", stage("$group")),
+            "$name'|"
+        );
+        assert!(pipeline_labels("{ _id: 'na|' }", stage("$group")).is_empty());
+        assert_eq!(
+            pipeline_labels("'$items.s|", stage("$unwind")),
+            ["$items.sku"]
+        );
+        assert_eq!(pipeline_labels("{ x: '$$RO|' }", stage("$set")), ["$$ROOT"]);
+        assert_eq!(
+            pipeline_labels("{ $expr: { $eq: ['$ag|", Mode::Filter),
+            ["$age"]
+        );
+    }
+
+    #[test]
+    fn lookup_knows_its_keys_collections_and_fields() {
+        assert_eq!(pipeline_first("{ pip|", stage("$lookup")), "pipeline: [|]");
+        assert_eq!(
+            pipeline_labels("{ from: '|' }", stage("$lookup")),
+            ["orders", "users"]
+        );
+        assert_eq!(
+            pipeline_labels("{ localField: 'add|' }", stage("$lookup")),
+            ["address.city", "address.zip"]
+        );
+        assert_eq!(
+            pipeline_labels("{ pipeline: [{ $match: { na|", stage("$lookup")),
+            ["name"]
+        );
+        assert_eq!(
+            pipeline_labels("{ coll: 'or|", stage("$unionWith")),
+            ["orders"]
+        );
+        assert_eq!(pipeline_labels("'us|", stage("$out")), ["users"]);
+    }
+
+    #[test]
+    fn plain_values_of_known_kinds() {
+        assert_eq!(
+            pipeline_labels("{ preserveNullAndEmptyArrays: t|", stage("$unwind")),
+            ["true"]
+        );
+        assert_eq!(pipeline_labels("{ age: |", stage("$sort")), ["1", "-1"]);
+        assert_eq!(pipeline_labels("['na|", stage("$unset")), ["name"]);
     }
 }
