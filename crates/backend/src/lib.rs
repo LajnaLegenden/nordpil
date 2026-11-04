@@ -1,5 +1,6 @@
 //! Background runtime and database access for nordpil.
 
+mod aggregation;
 mod bridge;
 mod connections;
 mod databases;
@@ -24,6 +25,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+pub use aggregation::{AggregatePage, CursorKey, PREVIEW_TIME_LIMIT, PipelineQuery};
 pub use bridge::{Bridge, Event, Handler, Outcome, RequestId};
 pub use databases::{CollectionInfo, CollectionKind, DatabaseInfo};
 pub use documents::{FindQuery, Namespace, PREVIEW_BYTES};
@@ -227,6 +229,31 @@ pub enum Command {
         namespace: Namespace,
         text: String,
     },
+    /// `count` documents of an aggregation from `offset` on, read from the
+    /// run's open server cursor while it is there.
+    AggregatePage {
+        namespace: Namespace,
+        key: CursorKey,
+        query: Box<PipelineQuery>,
+        offset: u64,
+        count: u64,
+    },
+    /// Closes a run's cursor on the server.
+    CloseCursor(CursorKey),
+    /// Counts an aggregation's documents, giving up after a few seconds.
+    CountAggregate {
+        namespace: Namespace,
+        query: Box<PipelineQuery>,
+    },
+    ExplainAggregate {
+        namespace: Namespace,
+        query: Box<PipelineQuery>,
+    },
+    /// Runs a pipeline that ends in `$out` or `$merge`.
+    WriteAggregate {
+        namespace: Namespace,
+        query: Box<PipelineQuery>,
+    },
 }
 
 /// Results of [`Command`]s, with enough context to act on them.
@@ -318,6 +345,11 @@ pub enum Response {
         namespace: Namespace,
         result: Result<Scripts, BackendError>,
     },
+    /// Matched to its run through the request id.
+    AggregatePage(Result<AggregatePage, BackendError>),
+    Explained(Result<mongodb::bson::Document, BackendError>),
+    /// After a pipeline wrote with `$out` or `$merge`.
+    AggregateWritten(Result<(), BackendError>),
 }
 
 /// An open connection.
@@ -337,6 +369,7 @@ pub struct Backend {
     settings_path: std::path::PathBuf,
     secrets: Arc<dyn SecretStore>,
     sessions: Mutex<HashMap<Uuid, Session>>,
+    cursors: aggregation::Cursors,
 }
 
 impl Backend {
@@ -358,6 +391,7 @@ impl Backend {
             settings_path,
             secrets: Arc::new(secrets),
             sessions: Mutex::default(),
+            cursors: aggregation::Cursors::default(),
         }
     }
 
@@ -453,6 +487,7 @@ impl Handler for Backend {
             },
             Command::Disconnect(id) => {
                 self.lock_sessions().remove(&id);
+                self.cursors.close_connection(id);
                 Response::Disconnected(id)
             }
             Command::ListDatabases(connection) => Response::Databases {
@@ -644,6 +679,29 @@ impl Handler for Backend {
             },
             Command::SaveDraft { namespace, text } => {
                 Response::Stored(self.save_draft(namespace, text).await)
+            }
+            Command::AggregatePage {
+                namespace,
+                key,
+                query,
+                offset,
+                count,
+            } => Response::AggregatePage(
+                self.aggregate_page(&namespace, key, *query, offset, count)
+                    .await,
+            ),
+            Command::CloseCursor(key) => {
+                self.cursors.close(key);
+                Response::Stored(Ok(()))
+            }
+            Command::CountAggregate { namespace, query } => {
+                Response::Count(self.aggregate_count(&namespace, *query).await)
+            }
+            Command::ExplainAggregate { namespace, query } => {
+                Response::Explained(self.explain_aggregate(&namespace, *query).await)
+            }
+            Command::WriteAggregate { namespace, query } => {
+                Response::AggregateWritten(self.aggregate_write(&namespace, *query).await)
             }
         }
     }

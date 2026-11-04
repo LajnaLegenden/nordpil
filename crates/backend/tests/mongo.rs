@@ -7,8 +7,8 @@ use mongodb::bson::{Document, doc};
 use nordpil_backend::secrets::MemorySecrets;
 use nordpil_backend::store::{ConnectionStore, SavedConnection};
 use nordpil_backend::{
-    Backend, CancellationToken, Command, ErrorKind, FindQuery, Handler, Namespace, PasswordChange,
-    Response,
+    AggregatePage, Backend, CancellationToken, Command, ErrorKind, FindQuery, Handler, Namespace,
+    PasswordChange, PipelineQuery, Response,
 };
 use testcontainers_modules::mongo::Mongo;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -113,6 +113,20 @@ async fn read_only_connection_rejects_writes() {
         panic!("unexpected response");
     };
 
+    assert_eq!(result.unwrap_err().kind, ErrorKind::ReadOnly);
+    assert!(collection_names(&backend, id, "shop").await.is_empty());
+
+    let write = Command::WriteAggregate {
+        namespace: Namespace {
+            connection: id,
+            database: "shop".to_owned(),
+            collection: "orders".to_owned(),
+        },
+        query: Box::new(pipeline(vec![doc! { "$out": "copy" }])),
+    };
+    let Response::AggregateWritten(result) = send(&backend, write).await else {
+        panic!("unexpected response");
+    };
     assert_eq!(result.unwrap_err().kind, ErrorKind::ReadOnly);
     assert!(collection_names(&backend, id, "shop").await.is_empty());
 }
@@ -659,4 +673,248 @@ async fn stopping_a_script_stops_its_query_on_the_server() {
     };
     assert_eq!(outcome.unwrap(), nordpil_shell::Outcome::Cancelled);
     wait_for_running(&client, 0, Duration::from_secs(3)).await;
+}
+
+fn pipeline(stages: Vec<Document>) -> PipelineQuery {
+    PipelineQuery {
+        stages,
+        ..PipelineQuery::default()
+    }
+}
+
+/// `shop.items` with documents `{ n: 0 }` to `{ n: count - 1 }`.
+async fn numbered_items(uri: &str, connection: Uuid, count: i32) -> (mongodb::Client, Namespace) {
+    let client = mongodb::Client::with_uri_str(uri).await.unwrap();
+    client
+        .database("shop")
+        .collection::<Document>("items")
+        .insert_many((0..count).map(|n| doc! { "n": n }))
+        .await
+        .unwrap();
+    let namespace = Namespace {
+        connection,
+        database: "shop".to_owned(),
+        collection: "items".to_owned(),
+    };
+    (client, namespace)
+}
+
+async fn aggregate_page(
+    backend: &Backend,
+    namespace: &Namespace,
+    key: u64,
+    stages: &[Document],
+    offset: u64,
+) -> AggregatePage {
+    let page = Command::AggregatePage {
+        namespace: namespace.clone(),
+        key,
+        query: Box::new(pipeline(stages.to_vec())),
+        offset,
+        count: 10,
+    };
+    let Response::AggregatePage(result) = send(backend, page).await else {
+        panic!("unexpected response");
+    };
+    result.unwrap()
+}
+
+fn numbers(page: &AggregatePage) -> Vec<i32> {
+    page.documents
+        .iter()
+        .map(|document| document.get_i32("n").unwrap())
+        .collect()
+}
+
+/// The ids of the server's idle cursors on `shop.items`.
+async fn idle_cursors(client: &mongodb::Client) -> Vec<i64> {
+    let cursors: Vec<Document> = client
+        .database("admin")
+        .aggregate([
+            doc! { "$currentOp": { "idleCursors": true } },
+            doc! { "$match": { "type": "idleCursor", "ns": "shop.items" } },
+        ])
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    cursors
+        .iter()
+        .map(|op| {
+            op.get_document("cursor")
+                .unwrap()
+                .get_i64("cursorId")
+                .unwrap()
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker"]
+async fn pages_an_aggregation_from_its_open_cursor() {
+    let (_mongo, backend, id, uri) = connected_backend(false).await;
+    let (client, namespace) = numbered_items(&uri, id, 25).await;
+    let stages = [
+        doc! { "$match": { "n": { "$gte": 0 } } },
+        doc! { "$sort": { "n": 1 } },
+    ];
+
+    let first = aggregate_page(&backend, &namespace, 1, &stages, 0).await;
+    assert_eq!(numbers(&first), (0..10).collect::<Vec<_>>());
+    assert!(!first.exhausted);
+    let open = idle_cursors(&client).await;
+    assert_eq!(open.len(), 1);
+
+    let second = aggregate_page(&backend, &namespace, 1, &stages, 10).await;
+    assert_eq!(numbers(&second), (10..20).collect::<Vec<_>>());
+    // The same cursor went on.
+    assert_eq!(idle_cursors(&client).await, open);
+
+    let last = aggregate_page(&backend, &namespace, 1, &stages, 20).await;
+    assert_eq!(numbers(&last), (20..25).collect::<Vec<_>>());
+    assert!(last.exhausted);
+    assert!(idle_cursors(&client).await.is_empty());
+
+    // A page the cursor isn't at runs the pipeline again from there.
+    let again = aggregate_page(&backend, &namespace, 1, &stages, 5).await;
+    assert_eq!(numbers(&again), (5..15).collect::<Vec<_>>());
+    send(&backend, Command::CloseCursor(1)).await;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !idle_cursors(&client).await.is_empty() {
+        assert!(Instant::now() < deadline, "the cursor is still open");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker"]
+async fn resumes_when_the_server_dropped_the_cursor() {
+    let (_mongo, backend, id, uri) = connected_backend(false).await;
+    let (client, namespace) = numbered_items(&uri, id, 25).await;
+    let stages = [doc! { "$sort": { "n": 1 } }];
+
+    aggregate_page(&backend, &namespace, 7, &stages, 0).await;
+    let open = idle_cursors(&client).await;
+    assert_eq!(open.len(), 1);
+    client
+        .database("shop")
+        .run_command(doc! { "killCursors": "items", "cursors": open })
+        .await
+        .unwrap();
+
+    let next = aggregate_page(&backend, &namespace, 7, &stages, 10).await;
+    assert_eq!(numbers(&next), (10..20).collect::<Vec<_>>());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker"]
+async fn counts_explains_and_writes_aggregations() {
+    let (_mongo, backend, id, uri) = connected_backend(false).await;
+    let (client, namespace) = numbered_items(&uri, id, 25).await;
+
+    for (stages, expected) in [
+        (vec![], 25),
+        (vec![doc! { "$match": { "n": { "$lt": 5 } } }], 5),
+        (vec![doc! { "$match": { "n": -1 } }], 0),
+    ] {
+        let count = Command::CountAggregate {
+            namespace: namespace.clone(),
+            query: Box::new(pipeline(stages)),
+        };
+        let Response::Count(result) = send(&backend, count).await else {
+            panic!("unexpected response");
+        };
+        assert_eq!(result.unwrap(), Some(expected));
+    }
+
+    let explain = Command::ExplainAggregate {
+        namespace: namespace.clone(),
+        query: Box::new(pipeline(vec![doc! { "$match": { "n": 3 } }])),
+    };
+    let Response::Explained(result) = send(&backend, explain).await else {
+        panic!("unexpected response");
+    };
+    let plan = result.unwrap();
+    assert!(plan.contains_key("queryPlanner") || plan.contains_key("stages"));
+
+    let writing = vec![
+        doc! { "$match": { "n": { "$lt": 3 } } },
+        doc! { "$out": "copy" },
+    ];
+    let page = Command::AggregatePage {
+        namespace: namespace.clone(),
+        key: 1,
+        query: Box::new(pipeline(writing.clone())),
+        offset: 0,
+        count: 10,
+    };
+    let Response::AggregatePage(result) = send(&backend, page).await else {
+        panic!("unexpected response");
+    };
+    assert!(result.unwrap_err().message.contains("$out or $merge"));
+    assert!(
+        !collection_names(&backend, id, "shop")
+            .await
+            .contains(&"copy".to_owned())
+    );
+
+    let write = Command::WriteAggregate {
+        namespace,
+        query: Box::new(pipeline(writing)),
+    };
+    let Response::AggregateWritten(result) = send(&backend, write).await else {
+        panic!("unexpected response");
+    };
+    result.unwrap();
+    let copied = client
+        .database("shop")
+        .collection::<Document>("copy")
+        .count_documents(doc! {})
+        .await
+        .unwrap();
+    assert_eq!(copied, 3);
+}
+
+/// A stage that sleeps 50 ms on every document of [`slow_collection`].
+fn slow_stage() -> Document {
+    doc! { "$match": { "$expr": { "$function": { "body": SLOW_FILTER, "args": [], "lang": "js" } } } }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker"]
+async fn stopping_an_aggregation_stops_it_on_the_server() {
+    let (_mongo, backend, id, uri) = connected_backend(false).await;
+    let (client, namespace) = slow_collection(&uri, id).await;
+
+    let page = Command::AggregatePage {
+        namespace: namespace.clone(),
+        key: 1,
+        query: Box::new(pipeline(vec![slow_stage()])),
+        offset: 0,
+        count: 20,
+    };
+    stop_once_running(&backend, &client, page).await;
+
+    let count = Command::CountAggregate {
+        namespace,
+        query: Box::new(pipeline(vec![slow_stage()])),
+    };
+    stop_once_running(&backend, &client, count).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker"]
+async fn a_slow_aggregate_count_gives_up() {
+    let (_mongo, backend, id, uri) = connected_backend(false).await;
+    let (_client, namespace) = slow_collection(&uri, id).await;
+
+    let count = Command::CountAggregate {
+        namespace,
+        query: Box::new(pipeline(vec![slow_stage()])),
+    };
+    let Response::Count(result) = send(&backend, count).await else {
+        panic!("unexpected response");
+    };
+    assert_eq!(result.unwrap(), None);
 }
