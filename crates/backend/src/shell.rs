@@ -133,7 +133,7 @@ fn to_i64(n: u64) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-fn aggregate_options(
+pub(crate) fn aggregate_options(
     options: nordpil_shell::AggregateOptions,
 ) -> Result<AggregateOptions, BackendError> {
     let mut driver = AggregateOptions::default();

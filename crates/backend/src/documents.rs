@@ -10,10 +10,10 @@ use uuid::Uuid;
 use crate::{Backend, BackendError};
 
 /// Counting stops after this long; the UI then shows "many".
-const COUNT_TIME_LIMIT: Duration = Duration::from_secs(5);
+pub(crate) const COUNT_TIME_LIMIT: Duration = Duration::from_secs(5);
 
 /// Server error code when `maxTimeMS` runs out.
-const MAX_TIME_EXPIRED: i32 = 50;
+pub(crate) const MAX_TIME_EXPIRED: i32 = 50;
 
 /// Documents bigger than this, as text, are cut in the preview.
 pub const PREVIEW_BYTES: usize = 1 << 20;
@@ -89,14 +89,17 @@ impl Backend {
         };
         match result {
             Ok(count) => Ok(Some(count)),
-            Err(error)
-                if matches!(error.kind.as_ref(),
-                    mongodb::error::ErrorKind::Command(command) if command.code == MAX_TIME_EXPIRED) =>
-            {
-                Ok(None)
-            }
+            Err(error) if server_code(&error) == Some(MAX_TIME_EXPIRED) => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+}
+
+/// The server's error code, for errors from a command.
+pub(crate) fn server_code(error: &mongodb::error::Error) -> Option<i32> {
+    match error.kind.as_ref() {
+        mongodb::error::ErrorKind::Command(command) => Some(command.code),
+        _ => None,
     }
 }
 
