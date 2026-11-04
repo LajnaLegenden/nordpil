@@ -240,7 +240,7 @@ impl Backend {
 
 /// Paging, counting or explaining would write, so writing pipelines only run
 /// through [`Backend::aggregate_write`].
-fn refuse_writes(stages: &[Document]) -> Result<(), BackendError> {
+pub(crate) fn refuse_writes(stages: &[Document]) -> Result<(), BackendError> {
     let writes = stages.iter().any(|stage| {
         stage
             .keys()

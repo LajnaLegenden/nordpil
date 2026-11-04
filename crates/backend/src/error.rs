@@ -13,6 +13,8 @@ pub enum ErrorKind {
     ReadOnly,
     /// The document changed or was deleted since it was loaded.
     Conflict,
+    /// The query ran out of its time limit (`maxTimeMS`).
+    TimedOut,
     Other,
 }
 
@@ -84,6 +86,9 @@ impl From<mongodb::error::Error> for BackendError {
                 ErrorKind::Other,
                 format!("Not authorized: {}", command.message),
             ),
+            DriverErrorKind::Command(command) if command.code == MAX_TIME_EXPIRED => {
+                (ErrorKind::TimedOut, command.message.clone())
+            }
             DriverErrorKind::Command(command) => (ErrorKind::Other, command.message.clone()),
             DriverErrorKind::Io(io) => (ErrorKind::Other, format!("Network error: {io}")),
             _ => (ErrorKind::Other, error.to_string()),
@@ -94,3 +99,5 @@ impl From<mongodb::error::Error> for BackendError {
 
 /// Server error code for a missing privilege.
 const UNAUTHORIZED: i32 = 13;
+/// Server error code when `maxTimeMS` runs out.
+const MAX_TIME_EXPIRED: i32 = 50;

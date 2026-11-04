@@ -60,6 +60,7 @@ pub enum Panel {
     Documents,
     Indexes,
     Shell,
+    Aggregate,
 }
 
 /// Where the shell's results sit relative to its script.
@@ -114,6 +115,30 @@ impl Default for ShellLayout {
     }
 }
 
+/// The aggregation panel's layout and previews.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AggregateSettings {
+    /// The stages' share of the width, from 0 to 1.
+    pub split: f32,
+    /// Previews read at most this many documents while sampling is on.
+    pub sample_size: u64,
+}
+
+impl AggregateSettings {
+    pub const SPLIT: f32 = 0.45;
+    pub const SAMPLE_SIZE: u64 = 100_000;
+}
+
+impl Default for AggregateSettings {
+    fn default() -> Self {
+        Self {
+            split: Self::SPLIT,
+            sample_size: Self::SAMPLE_SIZE,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -127,6 +152,7 @@ pub struct Settings {
     /// The panel the active tab showed last; new tabs open on it.
     pub last_panel: Panel,
     pub shell: ShellLayout,
+    pub aggregate: AggregateSettings,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -192,6 +218,10 @@ mod tests {
                 stacked_split: 0.25,
                 side_split: 0.75,
             },
+            aggregate: AggregateSettings {
+                split: 0.3,
+                sample_size: 500,
+            },
         };
         save(&path, settings).unwrap();
 
@@ -202,6 +232,7 @@ mod tests {
         assert!(text.contains("updates = \"notify\""), "{text}");
         assert!(text.contains("last_panel = \"shell\""), "{text}");
         assert!(text.contains("orientation = \"side-by-side\""), "{text}");
+        assert!(text.contains("sample_size = 500"), "{text}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -216,6 +247,7 @@ mod tests {
         assert_eq!(settings.theme, Theme::Dark);
         assert_eq!(settings.last_panel, Panel::Documents);
         assert_eq!(settings.shell, ShellLayout::default());
+        assert_eq!(settings.aggregate, AggregateSettings::default());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -13,6 +13,14 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RequestId(u64);
 
+impl RequestId {
+    /// For tests that stand in for a bridge.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
+
 /// Executes commands on the background runtime.
 pub trait Handler: Send + Sync + 'static {
     type Command: Send + 'static;

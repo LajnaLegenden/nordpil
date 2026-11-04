@@ -311,7 +311,9 @@ async fn creates_hides_lists_and_drops_indexes() {
 async fn exports_and_imports_every_format() {
     use std::sync::Arc;
 
-    use nordpil_backend::transfer::{ExportJob, Format, ImportJob, JsonMode, Progress};
+    use nordpil_backend::transfer::{
+        ExportJob, ExportQuery, Format, ImportJob, JsonMode, Progress,
+    };
 
     let (_mongo, backend, id, uri) = connected_backend(false).await;
     let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
@@ -344,10 +346,10 @@ async fn exports_and_imports_every_format() {
         let path = dir.join(file);
         let export = ExportJob {
             namespace: namespace("orders"),
-            query: FindQuery {
+            query: ExportQuery::Find(Box::new(FindQuery {
                 sort: Some(doc! { "_id": 1 }),
                 ..FindQuery::default()
-            },
+            })),
             path: path.clone(),
             format,
             json_mode: JsonMode::Canonical,
@@ -850,6 +852,42 @@ async fn counts_explains_and_writes_aggregations() {
         count: 10,
     };
     let Response::AggregatePage(result) = send(&backend, page).await else {
+        panic!("unexpected response");
+    };
+    assert!(result.unwrap_err().message.contains("$out or $merge"));
+    assert!(
+        !collection_names(&backend, id, "shop")
+            .await
+            .contains(&"copy".to_owned())
+    );
+
+    let dir = std::env::temp_dir().join(format!("nordpil-it-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let export = |query, file: &str| {
+        Command::Export(Box::new(nordpil_backend::transfer::ExportJob {
+            namespace: namespace.clone(),
+            query: nordpil_backend::transfer::ExportQuery::Pipeline(Box::new(query)),
+            path: dir.join(file),
+            format: nordpil_backend::transfer::Format::Ndjson,
+            json_mode: nordpil_backend::transfer::JsonMode::Relaxed,
+            fields: Vec::new(),
+            progress: std::sync::Arc::default(),
+        }))
+    };
+    let sorted = pipeline(vec![
+        doc! { "$match": { "n": { "$gte": 20 } } },
+        doc! { "$project": { "_id": 0, "n": 1 } },
+        doc! { "$sort": { "n": 1 } },
+    ]);
+    let Response::Exported(result) = send(&backend, export(sorted, "out.ndjson")).await else {
+        panic!("unexpected response");
+    };
+    assert_eq!(result.unwrap(), 5);
+    let text = std::fs::read_to_string(dir.join("out.ndjson")).unwrap();
+    assert_eq!(text.lines().next(), Some(r#"{"n":20}"#));
+    let Response::Exported(result) =
+        send(&backend, export(pipeline(writing.clone()), "no.ndjson")).await
+    else {
         panic!("unexpected response");
     };
     assert!(result.unwrap_err().message.contains("$out or $merge"));

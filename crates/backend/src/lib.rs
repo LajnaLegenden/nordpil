@@ -31,7 +31,7 @@ pub use bridge::{Bridge, Event, Handler, Outcome, RequestId};
 pub use databases::{CollectionInfo, CollectionKind, DatabaseInfo};
 pub use documents::{FindQuery, Namespace, PREVIEW_BYTES};
 pub use error::{BackendError, ErrorKind};
-pub use fields::FieldInfo;
+pub use fields::{FieldInfo, field_paths};
 pub use indexes::IndexInfo;
 use mongodb::Client;
 use navigation::{KnownDatabase, Navigation, NavigationStore, Recent};

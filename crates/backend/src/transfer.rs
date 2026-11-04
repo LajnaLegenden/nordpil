@@ -11,7 +11,7 @@ use futures_util::TryStreamExt as _;
 use mongodb::bson::{Bson, Document};
 use mongodb::options::{FindOptions, InsertManyOptions};
 
-use crate::{Backend, BackendError, FindQuery, Namespace};
+use crate::{Backend, BackendError, FindQuery, Namespace, PipelineQuery};
 
 const INSERT_BATCH: usize = 1000;
 
@@ -52,11 +52,19 @@ pub struct Progress {
     pub total: AtomicU64,
 }
 
+/// What an export reads.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExportQuery {
+    /// Filter, projection, sort, skip and limit; `max_time` is ignored.
+    Find(Box<FindQuery>),
+    /// An aggregation's results; it may not write.
+    Pipeline(Box<PipelineQuery>),
+}
+
 #[derive(Debug)]
 pub struct ExportJob {
     pub namespace: Namespace,
-    /// Filter, projection, sort, skip and limit; `max_time` is ignored.
-    pub query: FindQuery,
+    pub query: ExportQuery,
     pub path: PathBuf,
     pub format: Format,
     pub json_mode: JsonMode,
@@ -89,31 +97,44 @@ impl Backend {
         let collection = client
             .database(&job.namespace.database)
             .collection::<Document>(&job.namespace.collection);
-        if let Ok(Some(count)) = self
-            .count(
-                &job.namespace,
-                job.query.filter.clone(),
-                job.query.hint.clone(),
-            )
-            .await
-        {
-            let after_skip = count.saturating_sub(job.query.skip);
-            let total = match u64::try_from(job.query.limit) {
-                Ok(limit) if limit > 0 => after_skip.min(limit),
-                _ => after_skip,
-            };
-            job.progress.total.store(total, Ordering::Relaxed);
-        }
-
-        let mut options = FindOptions::default();
-        options.projection = job.query.projection;
-        options.sort = job.query.sort;
-        options.skip = (job.query.skip > 0).then_some(job.query.skip);
-        options.limit = (job.query.limit > 0).then_some(job.query.limit);
-        let mut cursor = collection
-            .find(job.query.filter)
-            .with_options(options)
-            .await?;
+        let mut cursor = match job.query {
+            ExportQuery::Find(query) => {
+                if let Ok(Some(count)) = self
+                    .count(&job.namespace, query.filter.clone(), query.hint.clone())
+                    .await
+                {
+                    let after_skip = count.saturating_sub(query.skip);
+                    let total = match u64::try_from(query.limit) {
+                        Ok(limit) if limit > 0 => after_skip.min(limit),
+                        _ => after_skip,
+                    };
+                    job.progress.total.store(total, Ordering::Relaxed);
+                }
+                let query = *query;
+                let mut options = FindOptions::default();
+                options.projection = query.projection;
+                options.sort = query.sort;
+                options.skip = (query.skip > 0).then_some(query.skip);
+                options.limit = (query.limit > 0).then_some(query.limit);
+                collection.find(query.filter).with_options(options).await?
+            }
+            ExportQuery::Pipeline(query) => {
+                crate::aggregation::refuse_writes(&query.stages)?;
+                if let Ok(Some(total)) =
+                    self.aggregate_count(&job.namespace, (*query).clone()).await
+                {
+                    job.progress.total.store(total, Ordering::Relaxed);
+                }
+                let query = *query;
+                let mut options = crate::shell::aggregate_options(query.options)?;
+                // A big export can take longer than a query should.
+                options.max_time = None;
+                collection
+                    .aggregate(query.stages)
+                    .with_options(options)
+                    .await?
+            }
+        };
 
         let file = PartFile::create(&job.path)?;
         let mut writer = Writer::new(
