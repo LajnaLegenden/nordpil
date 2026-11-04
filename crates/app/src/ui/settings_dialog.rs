@@ -106,6 +106,20 @@ impl SettingsDialog {
                 });
                 ui.end_row();
 
+                described(ui, "Preview sample", "Aggregation stage previews");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut settings.aggregate.sample_size)
+                            .range(100..=10_000_000)
+                            .speed(1000.0),
+                    )
+                    .on_hover_text(
+                        "While sampling is on, previews read at most this many documents.",
+                    );
+                    ui.label(RichText::new("documents").size(13.0).weak());
+                });
+                ui.end_row();
+
                 described(ui, "Updates", "From GitHub releases");
                 kit::segmented(
                     ui,

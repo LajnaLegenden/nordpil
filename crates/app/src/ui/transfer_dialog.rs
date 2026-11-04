@@ -7,8 +7,10 @@ use std::time::Duration;
 
 use crossbeam_channel::Receiver;
 use eframe::egui::{self, Button, TextEdit};
-use nordpil_backend::transfer::{ExportJob, Format, ImportJob, ImportSummary, JsonMode, Progress};
-use nordpil_backend::{BackendError, Command, FindQuery, Namespace, RequestId};
+use nordpil_backend::transfer::{
+    ExportJob, ExportQuery, Format, ImportJob, ImportSummary, JsonMode, Progress,
+};
+use nordpil_backend::{BackendError, Command, FindQuery, Namespace, PipelineQuery, RequestId};
 
 use crate::widgets::kit::{self, Tone};
 
@@ -16,6 +18,8 @@ pub enum Kind {
     Export {
         /// The tab's current query; `None` when no query has run yet.
         query: Option<Box<FindQuery>>,
+        /// The aggregation panel's pipeline, exported instead of `query`.
+        pipeline: Option<Box<PipelineQuery>>,
         whole_collection: bool,
         json_mode: JsonMode,
         /// CSV columns and whether each is included.
@@ -47,6 +51,24 @@ pub enum Outcome {
 
 impl TransferDialog {
     pub fn export(namespace: Namespace, query: Option<FindQuery>, field_paths: &[String]) -> Self {
+        Self::export_of(namespace, query, None, field_paths)
+    }
+
+    /// Exports an aggregation's results, or the whole collection.
+    pub fn export_pipeline(
+        namespace: Namespace,
+        pipeline: PipelineQuery,
+        field_paths: &[String],
+    ) -> Self {
+        Self::export_of(namespace, None, Some(pipeline), field_paths)
+    }
+
+    fn export_of(
+        namespace: Namespace,
+        query: Option<FindQuery>,
+        pipeline: Option<PipelineQuery>,
+        field_paths: &[String],
+    ) -> Self {
         // Leaves only: `address.city`, not `address` as well.
         let fields = field_paths
             .iter()
@@ -61,8 +83,9 @@ impl TransferDialog {
             path: default_path(&namespace, "json"),
             namespace,
             kind: Kind::Export {
-                whole_collection: query.is_none(),
+                whole_collection: query.is_none() && pipeline.is_none(),
                 query: query.map(Box::new),
+                pipeline: pipeline.map(Box::new),
                 json_mode: JsonMode::Relaxed,
                 fields,
             },
@@ -225,15 +248,20 @@ impl TransferDialog {
         match &mut self.kind {
             Kind::Export {
                 query,
+                pipeline,
                 whole_collection,
                 json_mode,
                 fields,
             } => {
                 ui.horizontal(|ui| {
                     ui.label("Documents");
-                    ui.add_enabled_ui(query.is_some(), |ui| {
-                        ui.radio_value(whole_collection, false, "Current query");
-                    });
+                    if pipeline.is_some() {
+                        ui.radio_value(whole_collection, false, "Current pipeline");
+                    } else {
+                        ui.add_enabled_ui(query.is_some(), |ui| {
+                            ui.radio_value(whole_collection, false, "Current query");
+                        });
+                    }
                     ui.radio_value(whole_collection, true, "Whole collection");
                 });
                 if self.format == Format::Csv {
@@ -299,15 +327,16 @@ impl TransferDialog {
         let command = match &self.kind {
             Kind::Export {
                 query,
+                pipeline,
                 whole_collection,
                 json_mode,
                 fields,
             } => Command::Export(Box::new(ExportJob {
                 namespace: self.namespace.clone(),
-                query: if *whole_collection {
-                    FindQuery::default()
-                } else {
-                    query.as_deref().cloned().unwrap_or_default()
+                query: match (pipeline, *whole_collection) {
+                    (_, true) => ExportQuery::Find(Box::default()),
+                    (Some(pipeline), false) => ExportQuery::Pipeline(pipeline.clone()),
+                    (None, false) => ExportQuery::Find(query.clone().unwrap_or_default()),
                 },
                 path,
                 format: self.format,

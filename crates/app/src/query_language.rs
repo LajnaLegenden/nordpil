@@ -2,7 +2,7 @@
 //! completion from the cursor context, the collection's sampled fields and
 //! the values in the current results.
 
-use nordpil_query::{FieldHint, Mode, ValueHint};
+use nordpil_query::{FieldHint, Hints, Mode, ValueHint};
 
 use crate::widgets::code_editor::{Completion, Language, Span};
 
@@ -10,6 +10,8 @@ pub struct QueryLanguage<'a> {
     pub mode: Mode,
     pub fields: &'a [FieldHint],
     pub values: &'a [ValueHint],
+    /// The database's collections, e.g. for `$lookup`'s `from`.
+    pub collections: &'a [String],
 }
 
 impl<'a> QueryLanguage<'a> {
@@ -18,7 +20,13 @@ impl<'a> QueryLanguage<'a> {
             mode,
             fields,
             values,
+            collections: &[],
         }
+    }
+
+    pub fn collections(mut self, collections: &'a [String]) -> Self {
+        self.collections = collections;
+        self
     }
 }
 
@@ -32,7 +40,12 @@ impl Language for QueryLanguage<'_> {
     }
 
     fn complete(&self, text: &str, cursor: usize, explicit: bool) -> Vec<Completion> {
-        nordpil_query::complete(text, cursor, self.mode, self.fields, self.values, explicit)
+        let hints = Hints {
+            fields: self.fields,
+            values: self.values,
+            collections: self.collections,
+        };
+        nordpil_query::complete_with(text, cursor, self.mode, &hints, explicit)
             .into_iter()
             .map(|suggestion| Completion {
                 label: suggestion.label,

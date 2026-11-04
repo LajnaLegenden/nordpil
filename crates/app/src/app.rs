@@ -17,6 +17,7 @@ use crate::lookup::References;
 use crate::shell::{Body, Ending, FileJob, PageRequest, Running};
 use crate::shortcuts::{self, AppCommand};
 use crate::tabs::{CollectionTab, Panel, QueryInputs, Results, View, build_query, history_entry};
+use crate::ui::aggregate::AggregateAction;
 use crate::ui::connection_form::{ConnectionForm, FormResult};
 use crate::ui::dialogs::{CreateCollectionDialog, Dialog, DropDialog, PasswordPrompt};
 use crate::ui::document_dialogs::{self, DocumentDialog};
@@ -268,6 +269,13 @@ impl NordpilApp {
                     text,
                 });
             }
+            tab.aggregate.close(&mut self.backend);
+            if let Some(pipeline) = tab.aggregate.draft_to_save(true) {
+                self.backend.send(Command::SavePipelineDraft {
+                    namespace: tab.namespace(),
+                    pipeline: Box::new(pipeline),
+                });
+            }
         }
         self.tabs.retain(|tab| !matches(tab));
         self.active_tab = active_id
@@ -303,6 +311,7 @@ impl NordpilApp {
         setup(&mut tab);
         self.backend.send(Command::LoadQueries(tab.namespace()));
         self.backend.send(Command::LoadScripts(tab.namespace()));
+        self.backend.send(Command::LoadPipelines(tab.namespace()));
         self.backend.send(Command::SampleFields(tab.namespace()));
         self.tabs.push(tab);
         let index = self.tabs.len() - 1;
@@ -578,6 +587,7 @@ impl NordpilApp {
             }
             Panel::Indexes => self.index_action(index, IndexAction::Refresh),
             Panel::Shell => {}
+            Panel::Aggregate => self.aggregate_action(index, AggregateAction::Refresh),
         }
     }
 
@@ -884,6 +894,122 @@ impl NordpilApp {
                     let receiver = crate::shell::pick_file(ctx, job, shell.text.clone());
                     shell.picker = Some((job, receiver));
                 }
+            }
+        }
+    }
+
+    fn aggregate_action(&mut self, index: usize, action: AggregateAction) {
+        let namespace = self.tabs[index].namespace();
+        let page_size = self.tabs[index].page_size;
+        let state = &mut self.tabs[index].aggregate;
+        match action {
+            AggregateAction::Run => state.start(&mut self.backend, &namespace, page_size),
+            AggregateAction::Stop => state.stop(&mut self.backend),
+            AggregateAction::Refresh => {
+                if state.run.is_some() {
+                    state.refresh(&mut self.backend, &namespace, page_size);
+                }
+            }
+            AggregateAction::Page(page) => {
+                state.show_page(&mut self.backend, &namespace, page, page_size);
+            }
+            AggregateAction::Remove(stage) => state.remove(stage, &mut self.backend),
+            AggregateAction::Apply(pipeline) => state.set_text(pipeline, &mut self.backend),
+            AggregateAction::SetFavorite { id, favorite } => {
+                self.backend.send(Command::SetPipelineFavorite {
+                    namespace,
+                    id,
+                    favorite,
+                });
+            }
+            AggregateAction::Delete(id) => {
+                self.backend.send(Command::DeletePipeline { namespace, id });
+            }
+            AggregateAction::Confirm(true) => state.write(&mut self.backend, &namespace),
+            AggregateAction::Confirm(false) => state.confirm = None,
+            AggregateAction::OpenWritten => {
+                let Some(written) = &state.written else {
+                    return;
+                };
+                let (database, collection) = written.target.clone();
+                let target = Selection {
+                    connection: namespace.connection,
+                    database,
+                    collection,
+                };
+                self.ensure_collections(&target);
+                self.open_tab(target);
+            }
+            AggregateAction::Paste(text) => match state.paste(&text, &mut self.backend) {
+                Ok(()) => state.paste = None,
+                Err(error) => {
+                    if let Some(paste) = &mut state.paste {
+                        paste.error = Some(error);
+                    }
+                }
+            },
+            AggregateAction::OpenInShell => {
+                let tab = &mut self.tabs[index];
+                tab.shell.queued = Some(tab.aggregate.shell_statement(&tab.target.collection));
+                tab.panel = Panel::Shell;
+                if let Some(statement) = tab.shell.append_queued() {
+                    self.run_script(index, statement);
+                }
+            }
+            AggregateAction::Explain => state.explain(&mut self.backend, &namespace),
+            AggregateAction::Export => {
+                let query = state.query().ok();
+                let fields = state.result_fields().unwrap_or_else(|| {
+                    self.tabs[index]
+                        .fields
+                        .iter()
+                        .map(|f| f.path.clone())
+                        .collect()
+                });
+                match query {
+                    Some(query) => {
+                        self.transfer_dialog =
+                            Some(TransferDialog::export_pipeline(namespace, query, &fields));
+                    }
+                    None => {
+                        self.notify(BackendError::new(
+                            "Fix the pipeline's stages before exporting its results.",
+                        ));
+                    }
+                }
+            }
+            AggregateAction::SaveLayout => {
+                self.backend.send(Command::SaveSettings(self.settings));
+            }
+            AggregateAction::Lookup { collection, filter } => {
+                self.tab_action(index, TabAction::Lookup { collection, filter });
+            }
+        }
+    }
+
+    /// Each frame: drafts to save, and the active tab's previews.
+    fn poll_aggregates(&mut self, ctx: &egui::Context) {
+        for index in 0..self.tabs.len() {
+            let namespace = self.tabs[index].namespace();
+            let active = self.active_tab == Some(index);
+            let tab = &mut self.tabs[index];
+            if active && tab.panel == Panel::Aggregate {
+                let sample = self.settings.aggregate.sample_size;
+                if let Some(wait) =
+                    tab.aggregate
+                        .poll_previews(&mut self.backend, &namespace, sample)
+                {
+                    ctx.request_repaint_after(wait);
+                }
+            }
+            if tab.aggregate.draft_pending() {
+                ctx.request_repaint_after(crate::shell::DRAFT_DELAY);
+            }
+            if let Some(pipeline) = tab.aggregate.draft_to_save(false) {
+                self.backend.send(Command::SavePipelineDraft {
+                    namespace,
+                    pipeline: Box::new(pipeline),
+                });
             }
         }
     }
@@ -1205,6 +1331,14 @@ impl NordpilApp {
                     .iter_mut()
                     .find(|t| t.pending_find == Some(request))
                 else {
+                    if let Some(tab) = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.aggregate.owns_preview(request))
+                    {
+                        tab.aggregate.preview_arrived(request, result);
+                        return;
+                    }
                     self.shell_page_arrived(request, result);
                     return;
                 };
@@ -1345,6 +1479,11 @@ impl NordpilApp {
                     .iter_mut()
                     .find(|t| t.pending_count == Some(request))
                 else {
+                    for tab in &mut self.tabs {
+                        if tab.aggregate.count_arrived(request, result.clone()) {
+                            return;
+                        }
+                    }
                     return;
                 };
                 tab.pending_count = None;
@@ -1390,6 +1529,43 @@ impl NordpilApp {
                     }
                     for (index, statement) in queued {
                         self.run_script(index, statement);
+                    }
+                }
+                Err(error) => self.notify(error),
+            },
+            Response::AggregatePage(result) => {
+                for tab in &mut self.tabs {
+                    let page_size = tab.page_size;
+                    if tab
+                        .aggregate
+                        .page_arrived(request, result.clone(), page_size)
+                    {
+                        return;
+                    }
+                }
+            }
+            Response::Explained(result) => {
+                for tab in &mut self.tabs {
+                    if tab.aggregate.explain_arrived(request, result.clone()) {
+                        return;
+                    }
+                }
+            }
+            Response::AggregateWritten(result) => {
+                for tab in &mut self.tabs {
+                    if tab.aggregate.write_arrived(request, result.clone()) {
+                        return;
+                    }
+                }
+            }
+            Response::Pipelines { namespace, result } => match result {
+                Ok(pipelines) => {
+                    for tab in &mut self.tabs {
+                        if tab.namespace() == namespace {
+                            tab.aggregate.history = pipelines.history.clone();
+                            tab.aggregate
+                                .load_draft(pipelines.draft.clone(), &mut self.backend);
+                        }
                     }
                 }
                 Err(error) => self.notify(error),
@@ -1560,6 +1736,7 @@ impl NordpilApp {
             if let Some(page) = tab.shell.result_for_request(request) {
                 page.pending = None;
             }
+            tab.aggregate.cancelled(request);
         }
         if let Some(index) = self.running_tab(request) {
             self.finish_script(index, Some(Ending::Stopped));
@@ -2110,6 +2287,32 @@ impl NordpilApp {
                             self.shell_action(ui.ctx(), index, action);
                         }
                     }
+                    Panel::Aggregate => {
+                        let target = self.tabs[index].target.clone();
+                        self.ensure_collections(&target);
+                        let collections =
+                            self.collection_names(target.connection, &target.database);
+                        self.load_references(&target);
+                        let references = self.references(index);
+                        let surroundings = crate::ui::aggregate::Surroundings {
+                            collections: &collections,
+                            settings: &mut self.settings.aggregate,
+                            references: references.as_ref(),
+                            read_only,
+                        };
+                        if let Some(action) =
+                            crate::ui::aggregate::show(ui, &mut self.tabs[index], surroundings)
+                        {
+                            self.aggregate_action(index, action);
+                        }
+                        // Edits this frame make previews due later.
+                        if let Some(wait) = self.tabs[index].aggregate.preview_wait() {
+                            ui.ctx().request_repaint_after(wait);
+                        }
+                        if self.tabs[index].aggregate.draft_pending() {
+                            ui.ctx().request_repaint_after(crate::shell::DRAFT_DELAY);
+                        }
+                    }
                 }
             });
     }
@@ -2120,13 +2323,12 @@ impl NordpilApp {
         #[cfg(target_os = "macos")]
         if let Some(menu) = &mut self.menu {
             commands.extend(menu.commands());
-            let on_shell = self
-                .active_tab
-                .is_some_and(|index| self.tabs[index].panel == Panel::Shell);
+            let panel = self.active_tab.map(|index| self.tabs[index].panel);
             menu.update(crate::menu::MenuState {
                 has_tabs: !self.tabs.is_empty(),
                 can_reopen: !self.closed.is_empty(),
-                on_shell,
+                on_shell: panel == Some(Panel::Shell),
+                on_aggregate: panel == Some(Panel::Aggregate),
             });
         }
         if self.escape_stops_script(ctx)
@@ -2145,11 +2347,19 @@ impl NordpilApp {
         let Some(tab) = self.active_tab.map(|index| &self.tabs[index]) else {
             return false;
         };
-        tab.panel == Panel::Shell
-            && tab.shell.running.is_some()
-            && !tab.shell.editor.popup_open()
-            && !egui::Popup::is_any_open(ctx)
-            && self.open_modal().is_none()
+        let running = match tab.panel {
+            Panel::Shell => tab.shell.running.is_some() && !tab.shell.editor.popup_open(),
+            Panel::Aggregate => {
+                tab.aggregate.running()
+                    && !tab
+                        .aggregate
+                        .stages
+                        .iter()
+                        .any(|card| card.editor.popup_open())
+            }
+            Panel::Documents | Panel::Indexes => false,
+        };
+        running && !egui::Popup::is_any_open(ctx) && self.open_modal().is_none()
     }
 
     /// Which modal is open. App-wide keys wait while one is, except the key
@@ -2161,6 +2371,10 @@ impl NordpilApp {
                 .as_ref()
                 .is_some_and(|running| running.run.pending_write().is_some())
         });
+        let aggregate_dialog = self.active_tab.is_some_and(|index| {
+            let state = &self.tabs[index].aggregate;
+            state.confirm.is_some() || state.explain.is_some() || state.paste.is_some()
+        });
         if self.form.is_some()
             || self.dialog.is_some()
             || self.document_dialog.is_some()
@@ -2168,6 +2382,7 @@ impl NordpilApp {
             || self.transfer_dialog.is_some()
             || self.mappings_dialog.is_some()
             || write_waits
+            || aggregate_dialog
         {
             Some(Modal::Other)
         } else if self.settings_dialog.is_some() {
@@ -2203,8 +2418,13 @@ impl NordpilApp {
                     return;
                 };
                 let tab = &mut self.tabs[index];
+                let first_stage = tab.aggregate.stages.first();
                 if tab.panel == Panel::Shell {
                     tab.shell.editor.focus(ctx, &tab.shell.text);
+                } else if tab.panel == Panel::Aggregate
+                    && let Some(card) = first_stage
+                {
+                    card.editor.focus(ctx, &card.body);
                 } else {
                     tab.panel = Panel::Documents;
                     tab.editors
@@ -2256,6 +2476,10 @@ impl NordpilApp {
                 let Some(index) = self.active_tab else {
                     return;
                 };
+                if command == AppCommand::StopScript && self.tabs[index].panel == Panel::Aggregate {
+                    self.aggregate_action(index, AggregateAction::Stop);
+                    return;
+                }
                 if let Some(action) = script_action(self.tabs[index].panel, command) {
                     self.shell_action(ctx, index, action);
                 }
@@ -2319,6 +2543,7 @@ impl NordpilApp {
         let mut actions = Vec::new();
         let ctx = ui.ctx().clone();
         self.poll_shells(&ctx);
+        self.poll_aggregates(&ctx);
         self.shortcuts(&ctx);
         let palette = theme::palette(ui);
 
@@ -2928,6 +3153,7 @@ mod tests {
             harness.state().tabs[0].panel
         };
 
+        assert_eq!(press(Key::Num4), Panel::Aggregate);
         assert_eq!(press(Key::Num3), Panel::Shell);
         assert_eq!(press(Key::Num2), Panel::Indexes);
         assert_eq!(press(Key::Num1), Panel::Documents);
@@ -3156,6 +3382,164 @@ mod tests {
         )
         .parse()
         .unwrap()
+    }
+
+    /// Opens the Aggregation panel on `test.<collection>` once its draft has
+    /// loaded, and puts in `pipeline`.
+    fn aggregation_harness(
+        port: u16,
+        collection: &str,
+        pipeline: &str,
+    ) -> Harness<'static, NordpilApp> {
+        let mut harness = connected_shell_harness(port);
+        if collection != "items" {
+            let target = Selection {
+                collection: collection.to_owned(),
+                ..harness.state().tabs[0].target.clone()
+            };
+            harness.state_mut().push_tab(target, String::new());
+        }
+        harness.key_press_modifiers(Modifiers::ALT, Key::Num4);
+        harness.run();
+        let index = harness.state().tabs.len() - 1;
+        assert_eq!(harness.state().tabs[index].panel, Panel::Aggregate);
+        run_until(&mut harness, |app| app.tabs[index].aggregate.loaded);
+        let app = harness.state_mut();
+        app.tabs[index]
+            .aggregate
+            .paste(pipeline, &mut app.backend)
+            .unwrap();
+        // Previews may keep a spinner going, so this doesn't wait to settle.
+        harness.step();
+        harness
+    }
+
+    fn aggregate(app: &NordpilApp) -> &crate::aggregate::AggregateState {
+        &app.tabs[app.tabs.len() - 1].aggregate
+    }
+
+    #[test]
+    #[ignore = "needs Docker"]
+    fn aggregation_previews_runs_and_pages() {
+        use crate::aggregate::Preview;
+
+        let mongo = Mongo::default().with_tag("8.0").start().unwrap();
+        let port = mongo.get_host_port_ipv4(27017).unwrap();
+        mongosh(
+            &mongo,
+            "db.getSiblingDB('test').items.insertMany(Array.from({ length: 45 }, (_, n) => ({ n, even: n % 2 === 0 })))",
+        );
+        let mut harness = aggregation_harness(
+            port,
+            "items",
+            "[{ $match: { even: true } }, { $sort: { n: -1 } }]",
+        );
+
+        run_until(&mut harness, |app| {
+            matches!(
+                &aggregate(app).stages[1].preview,
+                Preview::Documents { documents, sampled: true, .. } if documents.len() == 10
+            )
+        });
+        assert_eq!(harness.query_all_by_label("10 documents").count(), 2);
+
+        harness.get_by_role_and_label(Role::Button, "Run").click();
+        run_until(&mut harness, |app| {
+            aggregate(app)
+                .run
+                .as_ref()
+                .is_some_and(|run| run.current.is_some() && run.count == Some(Some(23)))
+        });
+        assert!(harness.query_by_label("1–20 of 23").is_some());
+        assert_eq!(harness.state().tabs[0].aggregate.history.len(), 1);
+
+        harness.get_by_label("Next page").click();
+        run_until(&mut harness, |app| {
+            aggregate(app).run.as_ref().is_some_and(|run| {
+                run.page == 1 && run.current.as_ref().is_some_and(|r| r.documents.len() == 3)
+            })
+        });
+        let run = aggregate(harness.state()).run.as_ref().unwrap();
+        assert_eq!(
+            run.current.as_ref().unwrap().documents[0]
+                .get_i32("n")
+                .unwrap(),
+            4
+        );
+        assert!(!run.has_next(20));
+
+        // Going back reads nothing from the server.
+        harness.get_by_label("Previous page").click();
+        harness.run();
+        let run = aggregate(harness.state()).run.as_ref().unwrap();
+        assert_eq!(run.page, 0);
+        assert!(!run.loading());
+        assert_eq!(
+            run.current.as_ref().unwrap().documents[0]
+                .get_i32("n")
+                .unwrap(),
+            44
+        );
+    }
+
+    #[test]
+    #[ignore = "needs Docker"]
+    fn stopping_an_aggregation_ends_it_on_the_server() {
+        use crate::aggregate::Preview;
+
+        let mongo = Mongo::default().with_tag("8.0").start().unwrap();
+        let port = mongo.get_host_port_ipv4(27017).unwrap();
+        mongosh(
+            &mongo,
+            "db.getSiblingDB('test').slow.insertMany(Array.from({ length: 2000 }, (_, n) => ({ n })))",
+        );
+        let running = |mongo| {
+            mongosh(
+                mongo,
+                "db.getSiblingDB('admin').aggregate([{ $currentOp: {} }, { $match: { ns: 'test.slow' } }]).toArray().length",
+            )
+            .parse::<u32>()
+            .unwrap()
+        };
+        // Sleeps 50 ms per document: over a minute for the collection.
+        let mut harness = aggregation_harness(
+            port,
+            "slow",
+            "[{ $match: { $expr: { $function: { body: 'function () { sleep(50); return false; }', args: [], lang: 'js' } } } }]",
+        );
+        // The preview gives up after its 5 s limit.
+        run_until(&mut harness, |app| {
+            matches!(aggregate(app).stages[0].preview, Preview::TimedOut)
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while running(&mongo) > 0 {
+            assert!(Instant::now() < deadline, "the preview still runs");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        harness.get_by_role_and_label(Role::Button, "Run").click();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running(&mongo) < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "the page and count never started"
+            );
+            harness.step();
+        }
+        harness.step();
+        harness.get_by_role_and_label(Role::Button, "Stop").click();
+        harness.step();
+        harness.step();
+        assert!(!aggregate(harness.state()).running());
+        assert!(harness.query_by_label("Stopped.").is_some());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while running(&mongo) > 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the pipeline still runs on the server"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]
@@ -3688,6 +4072,39 @@ mod screenshots {
         harness.run();
         save(&mut harness, "shell-side-by-side");
         harness.state_mut().settings.shell = Default::default();
+
+        {
+            use bson::doc;
+            let app = harness.state_mut();
+            let tab = &mut app.tabs[0];
+            tab.panel = Panel::Aggregate;
+            tab.aggregate.loaded = true;
+            tab.aggregate
+                .paste(
+                    "[\n  { $match: { status: 'shipped' } },\n  { $group: {\n    _id: '$customer',\n    orders: { $sum: 1 },\n    total: { $sum: '$total' }\n  } },\n  { $sort: { total: -1 } }\n]",
+                    &mut app.backend,
+                )
+                .unwrap();
+            let shipped: Vec<_> = tab
+                .results
+                .as_ref()
+                .map(|results| results.documents.clone())
+                .unwrap_or_default();
+            let grouped: Vec<_> = [("Ada", 4, 812.5), ("Linus", 2, 120.0), ("Grace", 3, 1530.25)]
+                .into_iter()
+                .map(|(customer, orders, total)| doc! { "_id": customer, "orders": orders, "total": total })
+                .collect();
+            let mut sorted = grouped.clone();
+            sorted.sort_by(|a, b| {
+                b.get_f64("total")
+                    .unwrap()
+                    .total_cmp(&a.get_f64("total").unwrap())
+            });
+            tab.aggregate
+                .show_sample(vec![shipped, grouped, sorted.clone()], sorted, 3);
+        }
+        harness.run();
+        save(&mut harness, "aggregate");
         harness.state_mut().tabs[0].panel = Panel::Documents;
 
         harness.state_mut().tab_action(0, TabAction::Export);

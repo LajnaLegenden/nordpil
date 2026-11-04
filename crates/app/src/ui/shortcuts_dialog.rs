@@ -20,7 +20,10 @@ pub fn show(ctx: &egui::Context) -> bool {
                 if ui.available_width() >= 700.0 {
                     ui.columns(2, |columns| {
                         groups(&mut columns[0], &[Group::General, Group::Tabs]);
-                        groups(&mut columns[1], &[Group::Documents, Group::Shell]);
+                        groups(
+                            &mut columns[1],
+                            &[Group::Documents, Group::Shell, Group::Aggregation],
+                        );
                     });
                 } else {
                     groups(ui, &Group::ALL);
