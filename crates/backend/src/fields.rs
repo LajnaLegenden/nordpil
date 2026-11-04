@@ -39,7 +39,7 @@ impl Backend {
 
 /// Paths in first-seen order. Array elements share their array's path, so
 /// `items.sku` covers `items: [{ sku }]`.
-pub(crate) fn field_paths(documents: &[Document]) -> Vec<FieldInfo> {
+pub fn field_paths(documents: &[Document]) -> Vec<FieldInfo> {
     let mut fields: Vec<FieldInfo> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
     for document in documents {
