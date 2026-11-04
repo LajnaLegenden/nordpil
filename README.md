@@ -40,12 +40,21 @@ when idle, against roughly 1 GB for Compass.
   history and favorites per collection; open and save `.js` files. Results sit below or
   beside the script, with a divider that drags to give either side more room. With
   lookups on, right-clicking an id in a result runs a `find` for it in a new tab's shell.
+- **Aggregation**: build a pipeline stage by stage, like Compass. Pick a stage, type its
+  value with completion for stage keys, expression operators, `'$field'` references
+  (from the stage before's output) and collection names. Each stage previews its first
+  10 documents as you type, on a sample of the collection by default. Turn stages off,
+  drag them into another order, or paste a pipeline from mongosh. Run reads the results
+  page by page from one server cursor, so Next doesn't rerun the pipeline; a count shows
+  the total. Stop (Ctrl+. or Esc) ends it on the server too. `$out` and `$merge` ask before
+  writing. Export the results, explain the pipeline, copy it as shell code or open it in
+  the Shell. Drafts, history and favorites per collection.
 - **Import and export**: JSON, JSON lines and CSV, streamed with progress and cancel.
 - **Settings**: dark, light or system theme, three text sizes, and whether Ctrl+K searches
   all saved connections or only open ones.
 - **Keyboard**: F1 lists every shortcut. Ctrl+W closes a tab and Ctrl+Shift+T brings it
-  back, Ctrl+Tab and Ctrl+1–9 switch tabs, Alt+1/2/3 switch between Documents, Indexes
-  and Shell, Ctrl+R reruns the query and Ctrl+, opens the settings. On macOS the keys use
+  back, Ctrl+Tab and Ctrl+1–9 switch tabs, Alt+1/2/3/4 switch between Documents, Indexes,
+  Shell and Aggregation, Ctrl+R reruns the query or pipeline and Ctrl+, opens the settings. On macOS the keys use
   ⌘ and the same commands sit in the menu bar. Tabs carry their connection's color.
 
 | Go to collection (Ctrl+K) | Values from the results |
@@ -57,8 +66,8 @@ when idle, against roughly 1 GB for Compass.
 | ![Indexes](docs/screenshots/indexes.png) | ![Light theme](docs/screenshots/main-light.png) |
 | **Shell** | **Shell, side by side** |
 | ![Shell](docs/screenshots/shell.png) | ![Shell side by side](docs/screenshots/shell-side-by-side.png) |
-| **Keyboard shortcuts (F1)** | |
-| ![Keyboard shortcuts](docs/screenshots/shortcuts.png) | |
+| **Aggregation** | **Keyboard shortcuts (F1)** |
+| ![Aggregation](docs/screenshots/aggregate.png) | ![Keyboard shortcuts](docs/screenshots/shortcuts.png) |
 
 ## Install
 
