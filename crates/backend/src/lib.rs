@@ -1,6 +1,7 @@
 //! Background runtime and database access for nordpil.
 
 mod aggregation;
+pub mod ai;
 mod bridge;
 mod connections;
 mod databases;
@@ -277,6 +278,8 @@ pub enum Command {
         namespace: Namespace,
         pipeline: Box<PipelineText>,
     },
+    /// Runs a command-line agent to write a query. Cancelling stops it.
+    AskAgent(Box<ai::AgentRequest>),
 }
 
 /// Results of [`Command`]s, with enough context to act on them.
@@ -378,6 +381,8 @@ pub enum Response {
         namespace: Namespace,
         result: Result<Pipelines, BackendError>,
     },
+    /// Matched to its request through the request id; values still masked.
+    AgentAnswer(Result<ai::AgentAnswer, BackendError>),
 }
 
 /// An open connection.
@@ -771,6 +776,7 @@ impl Handler for Backend {
                 namespace,
                 pipeline,
             } => Response::Stored(self.save_pipeline_draft(namespace, *pipeline).await),
+            Command::AskAgent(request) => Response::AgentAnswer(ai::ask(&request).await),
         }
     }
 }
