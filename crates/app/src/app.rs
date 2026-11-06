@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Frame, Margin, RichText, Stroke};
+use nordpil_backend::ai::{Agent, AgentRequest, LinkedCollection, Prompt, Surface, Turn};
 use nordpil_backend::navigation::{KnownDatabase, Recent};
 use nordpil_backend::references::{DatabaseMappings, Mapping};
-use nordpil_backend::settings::{GotoScope, Settings};
+use nordpil_backend::settings::{AiAgent, GotoScope, Settings};
 use nordpil_backend::store::SavedConnection;
 use nordpil_backend::{
     Backend, BackendError, Bridge, Command, DatabaseInfo, ErrorKind, Outcome, Password, RequestId,
@@ -12,12 +13,14 @@ use nordpil_backend::{
 };
 use uuid::Uuid;
 
+use crate::ai::{AskAi, Preview, Rejected};
 use crate::connections::{Collections, ConnectionEntry, ConnectionState, Selection};
 use crate::lookup::References;
 use crate::shell::{Body, Ending, FileJob, PageRequest, Running};
 use crate::shortcuts::{self, AppCommand};
 use crate::tabs::{CollectionTab, Panel, QueryInputs, Results, View, build_query, history_entry};
 use crate::ui::aggregate::AggregateAction;
+use crate::ui::ai_dialog;
 use crate::ui::connection_form::{ConnectionForm, FormResult};
 use crate::ui::dialogs::{CreateCollectionDialog, Dialog, DropDialog, PasswordPrompt};
 use crate::ui::document_dialogs::{self, DocumentDialog};
@@ -143,6 +146,7 @@ pub struct NordpilApp {
     mappings: Vec<DatabaseMappings>,
     mappings_dialog: Option<MappingsDialog>,
     goto: Option<GotoPalette>,
+    ask_ai: Option<AskAi>,
     /// Newest first.
     recents: Vec<Recent>,
     /// Collection names remembered for saved connections, for Ctrl+K.
@@ -194,6 +198,7 @@ impl NordpilApp {
             mappings: Vec::new(),
             mappings_dialog: None,
             goto: None,
+            ask_ai: None,
             recents: Vec::new(),
             known: Vec::new(),
             pending_open: None,
@@ -752,6 +757,7 @@ impl NordpilApp {
             }
             // `documents::show` puts the field into the filter itself.
             TabAction::AddToFilter { .. } => {}
+            TabAction::AskAi => self.open_ask_ai(index),
             TabAction::LinkField(key) => {
                 let Selection {
                     connection,
@@ -986,6 +992,297 @@ impl NordpilApp {
             AggregateAction::Lookup { collection, filter } => {
                 self.tab_action(index, TabAction::Lookup { collection, filter });
             }
+            AggregateAction::AskAi => self.open_ask_ai(index),
+        }
+    }
+
+    /// Opens Ask AI for the tab's Documents query or pipeline.
+    fn open_ask_ai(&mut self, index: usize) {
+        if self.settings.ai.agent == AiAgent::Off || self.ask_ai.is_some() {
+            return;
+        }
+        let tab = &self.tabs[index];
+        let surface = match tab.panel {
+            Panel::Documents => Surface::Find,
+            Panel::Aggregate => Surface::Pipeline,
+            Panel::Indexes | Panel::Shell => return,
+        };
+        let namespace = tab.namespace();
+        let target = tab.target.clone();
+        let ask = AskAi::new(
+            tab.id,
+            surface,
+            self.settings.ai.agent,
+            tab.ai_prompt.clone(),
+        );
+        if tab.indexes.is_none() && tab.indexes_request.is_none() {
+            self.load_indexes(&namespace);
+        }
+        // For collections named in the request.
+        self.ensure_collections(&target);
+        self.ask_ai = Some(ask);
+    }
+
+    fn ask_ai_tab(&self) -> Option<usize> {
+        let ask = self.ask_ai.as_ref()?;
+        self.tabs.iter().position(|tab| tab.id == ask.tab_id)
+    }
+
+    /// Stops a running request and keeps the prompt for next time.
+    fn close_ask_ai(&mut self) {
+        let Some(ask) = self.ask_ai.take() else {
+            return;
+        };
+        if let Some(request) = ask.pending.and_then(|pending| pending.request) {
+            self.backend.cancel(request);
+        }
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == ask.tab_id) {
+            tab.ai_prompt = ask.prompt;
+        }
+    }
+
+    /// Sends a waiting request once the indexes and linked collections'
+    /// fields are in, or after [`crate::ai::GATHER_TIME`] without them.
+    fn poll_ask_ai(&mut self, ctx: &egui::Context) {
+        let Some(index) = self.ask_ai_tab() else {
+            self.close_ask_ai();
+            return;
+        };
+        let Some(ask) = &self.ask_ai else {
+            return;
+        };
+        let Some(pending) = ask
+            .pending
+            .as_ref()
+            .filter(|pending| pending.request.is_none())
+        else {
+            return;
+        };
+        let tab = &self.tabs[index];
+        let target = tab.target.clone();
+        let collections = self.collection_names(target.connection, &target.database);
+        let mappings = self.database_mappings(target.connection, &target.database);
+        let words = format!("{} {}", ask.prompt, pending.text);
+        let linked = crate::ai::linked_collections(
+            &target.collection,
+            &tab.fields,
+            mappings,
+            &collections,
+            &words,
+        );
+        let missing: Vec<String> = linked
+            .iter()
+            .map(|(name, _)| name.clone())
+            .filter(|name| !tab.shell.fields.contains_key(name))
+            .collect();
+        let waiting = tab.indexes.is_none() || tab.fields.is_empty() || !missing.is_empty();
+        if waiting && pending.since.elapsed() < crate::ai::GATHER_TIME {
+            let tab = &mut self.tabs[index];
+            for collection in missing {
+                if tab.shell.sampling.insert(collection.clone()) {
+                    self.backend
+                        .send(Command::SampleFields(nordpil_backend::Namespace {
+                            collection,
+                            ..tab.namespace()
+                        }));
+                }
+            }
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        }
+        self.send_ask_ai(index, linked);
+    }
+
+    fn send_ask_ai(&mut self, index: usize, linked: Vec<(String, Vec<(String, String)>)>) {
+        let read_only = self
+            .entry(self.tabs[index].target.connection)
+            .is_none_or(|entry| entry.saved.read_only);
+        let tab = &self.tabs[index];
+        let schema = crate::ai::schema(&tab.fields);
+        let indexes = match &tab.indexes {
+            Some(Ok(indexes)) => nordpil_backend::ai::index_keys(indexes),
+            _ => Vec::new(),
+        };
+        let linked: Vec<LinkedCollection> = linked
+            .into_iter()
+            .map(|(name, via)| LinkedCollection {
+                fields: tab
+                    .shell
+                    .fields
+                    .get(&name)
+                    .map(|fields| crate::ai::schema(fields))
+                    .unwrap_or_default(),
+                name,
+                via,
+            })
+            .collect();
+        let tab_query = match tab.panel {
+            Panel::Aggregate => Preview {
+                pipeline_kind: true,
+                pipeline: tab.aggregate.pipeline_text(),
+                ..Preview::default()
+            },
+            _ => Preview {
+                filter: tab.inputs.filter.clone(),
+                project: tab.inputs.project.clone(),
+                sort: tab.inputs.sort.clone(),
+                limit: tab.inputs.limit.clone(),
+                ..Preview::default()
+            },
+        };
+        let Some(ask) = &mut self.ask_ai else {
+            return;
+        };
+        let Some(agent) = Agent::from_settings(&self.settings.ai, ask.agent) else {
+            ask.pending = None;
+            ask.error = Some("Choose an agent.".to_owned());
+            return;
+        };
+        let masks = ask.masks.get_or_insert_with(|| {
+            let paths = schema
+                .iter()
+                .chain(linked.iter().flat_map(|linked| &linked.fields))
+                .map(|field| field.path.as_str());
+            nordpil_query::mask::Masks::new(paths)
+        });
+        let current = crate::ai::masked_current(masks, ask.preview.as_ref().unwrap_or(&tab_query));
+        let Some(pending) = &mut ask.pending else {
+            return;
+        };
+        let prompt = Prompt {
+            surface: ask.surface,
+            schema,
+            indexes,
+            linked,
+            current,
+            turns: ask.turns.clone(),
+            request: pending.text.clone(),
+            read_only,
+            now: bson::DateTime::now()
+                .try_to_rfc3339_string()
+                .unwrap_or_default(),
+        };
+        let (system, user) = nordpil_backend::ai::build_prompt(&prompt);
+        ask.sent = Some(format!("{system}\n\n{user}"));
+        let timeout = Duration::from_secs(self.settings.ai.timeout_secs.max(10));
+        pending.since = std::time::Instant::now();
+        pending.request = Some(self.backend.send(Command::AskAgent(Box::new(AgentRequest {
+            agent,
+            timeout,
+            prompt,
+        }))));
+    }
+
+    fn agent_answered(&mut self, result: Result<nordpil_backend::ai::AgentAnswer, BackendError>) {
+        let read_only = self
+            .ask_ai_tab()
+            .and_then(|index| self.entry(self.tabs[index].target.connection))
+            .is_none_or(|entry| entry.saved.read_only);
+        let Some(ask) = &mut self.ask_ai else {
+            return;
+        };
+        let Some(pending) = ask.pending.take() else {
+            return;
+        };
+        let answer = match result {
+            Ok(answer) => answer,
+            Err(error) => {
+                ask.error = Some(match error.detail {
+                    Some(detail) if !detail.is_empty() => format!("{}\n{detail}", error.message),
+                    _ => error.message,
+                });
+                return;
+            }
+        };
+        let masks = ask.masks.clone().unwrap_or_default();
+        ask.explanation = answer.explanation.clone();
+        let checked = crate::ai::check_answer(&answer, &masks, read_only);
+        ask.turns.push(Turn {
+            request: pending.text.clone(),
+            answer: answer.clone(),
+        });
+        match checked {
+            Ok(preview) => {
+                ask.preview = Some(preview);
+                ask.refine.clear();
+            }
+            Err(Rejected::Retry(message)) if !pending.retry => {
+                ask.queue(crate::ai::retry_request(&message, &pending.text), true);
+            }
+            Err(Rejected::Retry(message)) => {
+                ask.preview = Some(crate::ai::raw_preview(&answer, &masks));
+                ask.error = Some(message);
+            }
+            Err(Rejected::Final { message, preview }) => {
+                ask.preview = Some(*preview);
+                ask.error = Some(message);
+            }
+        }
+    }
+
+    /// Puts the answer in the tab: the find query, run, or the pipeline.
+    fn apply_ask_ai(&mut self, open_in_aggregate: bool) {
+        let Some(index) = self.ask_ai_tab() else {
+            return;
+        };
+        let Some(ask) = &mut self.ask_ai else {
+            return;
+        };
+        let Some(preview) = ask.preview.clone() else {
+            return;
+        };
+        if preview.pipeline_kind {
+            let tab = &mut self.tabs[index];
+            match tab.aggregate.paste(&preview.pipeline, &mut self.backend) {
+                Ok(()) => {
+                    if open_in_aggregate {
+                        tab.panel = Panel::Aggregate;
+                    }
+                    self.close_ask_ai();
+                }
+                Err(error) => ask.error = Some(error),
+            }
+            return;
+        }
+        let inputs = QueryInputs {
+            filter: preview.filter,
+            project: preview.project,
+            sort: preview.sort,
+            limit: preview.limit.trim().to_owned(),
+            ..self.tabs[index].inputs.clone()
+        };
+        match build_query(&inputs) {
+            Ok(_) => {
+                self.close_ask_ai();
+                self.tab_action(index, TabAction::Apply(inputs));
+            }
+            Err(errors) => ask.error = Some(errors.join(" ")),
+        }
+    }
+
+    fn show_ask_ai(&mut self, ctx: &egui::Context) {
+        let Some(index) = self.ask_ai_tab() else {
+            return;
+        };
+        let target = self.tabs[index].target.clone();
+        let collections = self.collection_names(target.connection, &target.database);
+        let Some(ask) = &mut self.ask_ai else {
+            return;
+        };
+        let tab = &self.tabs[index];
+        let outcome = ai_dialog::show(ctx, ask, &target.collection, &tab.fields, &collections);
+        match outcome {
+            None => {}
+            Some(ai_dialog::Outcome::Start) => ask.start(),
+            Some(ai_dialog::Outcome::Refine) => ask.refine(),
+            Some(ai_dialog::Outcome::Stop) => {
+                if let Some(request) = ask.pending.take().and_then(|pending| pending.request) {
+                    self.backend.cancel(request);
+                }
+            }
+            Some(ai_dialog::Outcome::Apply) => self.apply_ask_ai(false),
+            Some(ai_dialog::Outcome::OpenInAggregate) => self.apply_ask_ai(true),
+            Some(ai_dialog::Outcome::Close) => self.close_ask_ai(),
         }
     }
 
@@ -1572,7 +1869,16 @@ impl NordpilApp {
                 }
                 Err(error) => self.notify(error),
             },
-            // Nothing asks an agent yet.
+            Response::AgentAnswer(result)
+                if self.ask_ai.as_ref().is_some_and(|ask| {
+                    ask.pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.request == Some(request))
+                }) =>
+            {
+                self.agent_answered(result);
+            }
+            // From a dialog closed since.
             Response::AgentAnswer(_) => {}
             Response::DatabaseDropped {
                 connection,
@@ -1723,6 +2029,14 @@ impl NordpilApp {
     }
 
     fn cancelled(&mut self, request: RequestId) {
+        if let Some(ask) = &mut self.ask_ai
+            && ask
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.request == Some(request))
+        {
+            ask.pending = None;
+        }
         if let Some(dialog) = &mut self.transfer_dialog
             && dialog.running.as_ref().is_some_and(|(r, _)| *r == request)
         {
@@ -2249,6 +2563,7 @@ impl NordpilApp {
                             &mut self.tabs[index],
                             read_only,
                             references.as_ref(),
+                            self.settings.ai.agent != AiAgent::Off,
                         ) {
                             self.tab_action(index, action);
                         }
@@ -2303,6 +2618,7 @@ impl NordpilApp {
                             settings: &mut self.settings.aggregate,
                             references: references.as_ref(),
                             read_only,
+                            ai: self.settings.ai.agent != AiAgent::Off,
                         };
                         if let Some(action) =
                             crate::ui::aggregate::show(ui, &mut self.tabs[index], surroundings)
@@ -2385,6 +2701,7 @@ impl NordpilApp {
             || self.index_dialog.is_some()
             || self.transfer_dialog.is_some()
             || self.mappings_dialog.is_some()
+            || self.ask_ai.is_some()
             || write_waits
             || aggregate_dialog
         {
@@ -2472,10 +2789,15 @@ impl NordpilApp {
             AppCommand::Settings => {
                 self.settings_dialog = match self.settings_dialog {
                     Some(_) => None,
-                    None => Some(SettingsDialog),
+                    None => Some(SettingsDialog::default()),
                 };
             }
             AppCommand::Shortcuts => self.shortcuts_sheet = !self.shortcuts_sheet,
+            AppCommand::AskAi => {
+                if let Some(index) = self.active_tab {
+                    self.open_ask_ai(index);
+                }
+            }
             AppCommand::SaveScript | AppCommand::OpenScript | AppCommand::StopScript => {
                 let Some(index) = self.active_tab else {
                     return;
@@ -2524,7 +2846,12 @@ impl NordpilApp {
         let mut settings = self.settings.clone();
         match dialog.show(ctx, &mut settings) {
             settings_dialog::Outcome::Open => {}
-            settings_dialog::Outcome::Close => self.settings_dialog = None,
+            settings_dialog::Outcome::Close => {
+                self.settings_dialog = None;
+                if settings != self.settings {
+                    self.set_settings(ctx, settings);
+                }
+            }
             settings_dialog::Outcome::Changed => self.set_settings(ctx, settings),
         }
     }
@@ -2548,6 +2875,7 @@ impl NordpilApp {
         let ctx = ui.ctx().clone();
         self.poll_shells(&ctx);
         self.poll_aggregates(&ctx);
+        self.poll_ask_ai(&ctx);
         self.shortcuts(&ctx);
         let palette = theme::palette(ui);
 
@@ -2570,7 +2898,7 @@ impl NordpilApp {
             self.goto = Some(GotoPalette::new());
         }
         if top.inner.settings {
-            self.settings_dialog = Some(SettingsDialog);
+            self.settings_dialog = Some(SettingsDialog::default());
         }
 
         egui::Panel::left("sidebar")
@@ -2623,6 +2951,7 @@ impl NordpilApp {
         }
         self.show_mappings_dialog(&ctx);
         self.show_goto(&ctx);
+        self.show_ask_ai(&ctx);
         self.show_write_confirmation(&ctx);
 
         for action in actions {
@@ -3682,6 +4011,161 @@ mod tests {
         ));
         assert_eq!(app.recents[0].collection, "orders");
     }
+
+    /// A tab on `orders` whose Ask AI runs `script` as a custom agent.
+    #[cfg(unix)]
+    fn ai_harness(script: &str) -> Harness<'static, NordpilApp> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("nordpil-agent-ui-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("agent.sh");
+        std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut harness = lookup_harness(&["orders", "users"], bson::doc! { "_id": 1 });
+        let app = harness.state_mut();
+        app.settings.ai.agent = AiAgent::Custom;
+        app.settings.ai.custom.program = program.display().to_string();
+        let tab = &mut app.tabs[0];
+        tab.fields = ["status", "total", "createdAt"]
+            .map(|path| nordpil_query::FieldHint {
+                path: path.to_owned(),
+                detail: "String".to_owned(),
+            })
+            .to_vec();
+        tab.indexes = Some(Ok(Vec::new()));
+        tab.inputs.filter = "{ status: 'paid' }".to_owned();
+        harness.run();
+        harness
+    }
+
+    #[cfg(unix)]
+    fn ask(harness: &mut Harness<'_, NordpilApp>, request: &str) {
+        harness
+            .get_by_role_and_label(Role::MultilineTextInput, "Request")
+            .type_text(request);
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Generate")
+            .click();
+        // A spinner shows while the agent runs, so step instead of run.
+        harness.step();
+        run_until(harness, |app| {
+            app.ask_ai.as_ref().is_some_and(|ask| {
+                ask.pending.is_none() && (ask.preview.is_some() || ask.error.is_some())
+            })
+        });
+    }
+
+    /// Answers with the first masked string it was sent, so the app has to
+    /// put the value back.
+    #[cfg(unix)]
+    const FIND_AGENT: &str = r#"input=$(cat)
+value=$(printf '%s' "$input" | grep -o '__v[0-9]*_String__' | head -1)
+printf '{"kind":"find","filter":"{ status: %s, total: { $gt: 100 } }","projection":"","sort":"{ createdAt: -1 }","limit":"5","pipeline":"","explanation":"Paid orders over 100."}\n' "'$value'""#;
+
+    #[test]
+    #[cfg(unix)]
+    fn ask_ai_writes_and_runs_a_find_query_without_sending_values() {
+        let mut harness = ai_harness(FIND_AGENT);
+        harness
+            .get_by_role_and_label(Role::Button, "Ask AI")
+            .click();
+        harness.run();
+        ask(&mut harness, "paid ones over 100");
+
+        let ask_ai = harness.state().ask_ai.as_ref().unwrap();
+        assert_eq!(ask_ai.error, None);
+        let sent = ask_ai.sent.clone().unwrap();
+        assert!(!sent.contains("paid'"), "{sent}");
+        assert!(
+            sent.contains("filter: { status: '__v1_String__' }"),
+            "{sent}"
+        );
+        assert!(
+            !sent.contains("orders"),
+            "the collection name was sent: {sent}"
+        );
+        assert_eq!(ask_ai.explanation, "Paid orders over 100.");
+
+        harness
+            .get_by_role_and_label(Role::Button, "Apply and run")
+            .click();
+        harness.step();
+        let app = harness.state();
+        assert!(app.ask_ai.is_none());
+        let inputs = &app.tabs[0].inputs;
+        assert_eq!(inputs.filter, "{ status: 'paid', total: { $gt: 100 } }");
+        assert_eq!(inputs.sort, "{ createdAt: -1 }");
+        assert_eq!(inputs.limit, "5");
+        assert_eq!(app.tabs[0].ai_prompt, "paid ones over 100");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_pipeline_answer_opens_in_aggregation() {
+        let mut harness = ai_harness(
+            r#"cat > /dev/null
+echo '{"kind":"pipeline","filter":"","projection":"","sort":"","limit":"","pipeline":"[{ $group: { _id: \"$status\", n: { $sum: 1 } } }, { $sort: { n: -1 } }]","explanation":"Counts per status."}'"#,
+        );
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::I);
+        harness.run();
+        ask(&mut harness, "count per status");
+        harness
+            .get_by_role_and_label(Role::Button, "Open in Aggregation")
+            .click();
+        harness.step();
+        let tab = &harness.state().tabs[0];
+        assert_eq!(tab.panel, Panel::Aggregate);
+        let names: Vec<_> = tab
+            .aggregate
+            .stages
+            .iter()
+            .map(|stage| stage.name.as_str())
+            .collect();
+        assert_eq!(names, ["$group", "$sort"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unusable_answer_is_asked_again_once() {
+        let mut harness = ai_harness(
+            r#"cat > "$(dirname "$0")/stdin-$(ls "$(dirname "$0")" | wc -l).txt"
+if [ -e "$(dirname "$0")/asked" ]; then
+  echo '{"kind":"pipeline","filter":"","projection":"","sort":"","limit":"","pipeline":"[{ $limit: 3 }]","explanation":"Three."}'
+else
+  touch "$(dirname "$0")/asked"
+  echo '{"kind":"pipeline","filter":"","projection":"","sort":"","limit":"","pipeline":"[{ $limit: ","explanation":""}'
+fi"#,
+        );
+        harness.state_mut().tabs[0].panel = Panel::Aggregate;
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::I);
+        harness.run();
+        ask(&mut harness, "three documents");
+        let ask_ai = harness.state().ask_ai.as_ref().unwrap();
+        assert_eq!(ask_ai.error, None);
+        assert_eq!(ask_ai.turns.len(), 2);
+        assert!(ask_ai.sent.as_ref().unwrap().contains("could not be used"));
+        harness
+            .get_by_role_and_label(Role::Button, "Replace stages")
+            .click();
+        harness.step();
+        let tab = &harness.state().tabs[0];
+        assert!(harness.state().ask_ai.is_none());
+        assert_eq!(tab.aggregate.stages.len(), 1);
+        assert_eq!(tab.aggregate.stages[0].name, "$limit");
+    }
+
+    #[test]
+    fn ask_ai_is_hidden_while_off() {
+        let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
+        assert!(harness.query_by_label("Ask AI").is_none());
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::I);
+        harness.run();
+        assert!(harness.state().ask_ai.is_none());
+    }
 }
 
 #[cfg(all(test, feature = "screenshots"))]
@@ -3925,9 +4409,13 @@ mod screenshots {
         harness.run();
         assert!(harness.state().goto.is_none());
 
-        harness.state_mut().settings_dialog = Some(SettingsDialog);
+        harness.state_mut().settings_dialog = Some(SettingsDialog::default());
         harness.run();
         save(&mut harness, "settings");
+        harness.state_mut().settings.ai.agent = AiAgent::Custom;
+        harness.run();
+        save(&mut harness, "settings-ai");
+        harness.state_mut().settings.ai.agent = AiAgent::Off;
         harness.key_press(egui::Key::Escape);
         harness.run();
 
@@ -4111,6 +4599,33 @@ mod screenshots {
         harness.run();
         save(&mut harness, "aggregate");
         harness.state_mut().tabs[0].panel = Panel::Documents;
+
+        {
+            let app = harness.state_mut();
+            app.settings.ai.agent = AiAgent::Claude;
+            let tab = &app.tabs[0];
+            let mut ask = AskAi::new(
+                tab.id,
+                Surface::Find,
+                AiAgent::Claude,
+                "paid orders over 100 from last week, newest first".to_owned(),
+            );
+            ask.focus = false;
+            ask.preview = Some(Preview {
+                filter: "{\n  status: 'paid',\n  total: { $gt: 100 },\n  createdAt: { $gte: ISODate('2026-10-30T00:00:00Z') }\n}".to_owned(),
+                sort: "{ createdAt: -1 }".to_owned(),
+                ..Preview::default()
+            });
+            ask.explanation =
+                "Paid orders over 100 from the last seven days, newest first.".to_owned();
+            ask.sent = Some(String::new());
+            app.ask_ai = Some(ask);
+        }
+        harness.run();
+        save(&mut harness, "ask-ai");
+        harness.state_mut().close_ask_ai();
+        harness.state_mut().settings.ai.agent = AiAgent::Off;
+        harness.run();
 
         harness.state_mut().tab_action(0, TabAction::Export);
         harness.run();

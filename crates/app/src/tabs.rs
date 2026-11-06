@@ -103,6 +103,8 @@ pub struct CollectionTab {
     pub indexes_request: Option<RequestId>,
     pub shell: ShellState,
     pub aggregate: AggregateState,
+    /// The last Ask AI request, offered again next time.
+    pub ai_prompt: String,
 }
 
 impl CollectionTab {
@@ -141,6 +143,7 @@ impl CollectionTab {
             indexes_request: None,
             shell: ShellState::new(id),
             aggregate: AggregateState::new(id),
+            ai_prompt: String::new(),
         }
     }
 

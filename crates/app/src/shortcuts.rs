@@ -28,6 +28,8 @@ pub enum AppCommand {
     SaveScript,
     OpenScript,
     StopScript,
+    /// Ask AI for the Documents query or the pipeline.
+    AskAi,
 }
 
 /// Where a key is listed in the shortcuts sheet.
@@ -101,6 +103,7 @@ pub const AGGREGATE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Ke
 pub const REFRESH: KeyboardShortcut = command(Key::R);
 pub const REFRESH_F5: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
 pub const SETTINGS: KeyboardShortcut = command(Key::Comma);
+pub const ASK_AI: KeyboardShortcut = command(Key::I);
 /// Saves a document dialog; handled there.
 pub const SAVE_DOCUMENT: KeyboardShortcut = command(Key::Enter);
 /// In the shell editor; handled there.
@@ -173,6 +176,12 @@ pub const BINDINGS: &[Binding] = &[
         AppCommand::Panel(Panel::Aggregate),
         &[AGGREGATE],
         "Show Aggregation",
+        Group::General,
+    ),
+    bind(
+        AppCommand::AskAi,
+        &[ASK_AI],
+        "Ask AI for a query or pipeline",
         Group::General,
     ),
     bind(

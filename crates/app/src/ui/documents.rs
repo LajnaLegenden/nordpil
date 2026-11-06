@@ -61,6 +61,8 @@ pub enum TabAction {
     },
     /// Link fields named this to a collection, or edit their link.
     LinkField(String),
+    /// Open Ask AI for the query.
+    AskAi,
 }
 
 /// The table shows at most this many columns, so huge documents stay usable.
@@ -72,14 +74,16 @@ const MAX_HOVER_ENTRIES: usize = 50;
 
 /// `read_only` hides everything that writes. `references` says where id
 /// fields can be looked up; `None` when lookups are off.
+/// `ai` shows the Ask AI button.
 pub fn show(
     ui: &mut egui::Ui,
     tab: &mut CollectionTab,
     read_only: bool,
     references: Option<&References>,
+    ai: bool,
 ) -> Option<TabAction> {
     let palette = theme::palette(ui);
-    let mut action = query_bar(ui, tab);
+    let mut action = query_bar(ui, tab, ai);
     for error in &tab.input_errors {
         ui.label(RichText::new(format!("{}  {error}", icons::CIRCLE_ALERT)).color(palette.danger));
     }
@@ -286,18 +290,24 @@ fn field_menu(
 /// Narrower than this, the query buttons move under the filter.
 const MIN_FILTER_WIDTH: f32 = 320.0;
 
-fn query_bar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
+fn query_bar(ui: &mut egui::Ui, tab: &mut CollectionTab, ai: bool) -> Option<TabAction> {
     let mut action = None;
     let spacing = ui.spacing().item_spacing.x;
+    let ai_width = if ai {
+        kit::button_width(ui, Tone::Secondary, Some(icons::SPARKLES), "Ask AI") + spacing
+    } else {
+        0.0
+    };
     let buttons = kit::button_width(ui, Tone::Secondary, Some(icons::SLIDERS), "Options")
         + kit::button_width(ui, Tone::Secondary, Some(icons::HISTORY), "History")
         + kit::button_width(ui, Tone::Ghost, None, "Reset")
         + kit::button_width(ui, Tone::Primary, Some(icons::SEARCH), "Find")
+        + ai_width
         + 4.0 * spacing;
     if ui.available_width() - buttons >= MIN_FILTER_WIDTH {
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                query_buttons(ui, tab, &mut action);
+                query_buttons(ui, tab, ai, &mut action);
                 if filter_field(ui, tab) {
                     action = Some(TabAction::Run);
                 }
@@ -313,7 +323,7 @@ fn query_bar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
         ui.allocate_ui_with_layout(
             egui::vec2(ui.available_width(), kit::QUERY_HEIGHT),
             Layout::right_to_left(Align::Center),
-            |ui| query_buttons(ui, tab, &mut action),
+            |ui| query_buttons(ui, tab, ai, &mut action),
         );
     }
     if tab.show_options {
@@ -328,8 +338,13 @@ fn query_bar(ui: &mut egui::Ui, tab: &mut CollectionTab) -> Option<TabAction> {
     action
 }
 
-/// Find, Reset, History and Options, laid out right to left.
-fn query_buttons(ui: &mut egui::Ui, tab: &mut CollectionTab, action: &mut Option<TabAction>) {
+/// Find, Reset, History, Options and Ask AI, laid out right to left.
+fn query_buttons(
+    ui: &mut egui::Ui,
+    tab: &mut CollectionTab,
+    ai: bool,
+    action: &mut Option<TabAction>,
+) {
     let palette = theme::palette(ui);
     let height = kit::QUERY_HEIGHT;
     if kit::button(ui, Tone::Primary, Some(icons::SEARCH), "Find", height).clicked() {
@@ -356,6 +371,16 @@ fn query_buttons(ui: &mut egui::Ui, tab: &mut CollectionTab, action: &mut Option
     }
     if options.clicked() {
         tab.show_options = !tab.show_options;
+    }
+    if ai {
+        let ask = kit::button(ui, Tone::Secondary, Some(icons::SPARKLES), "Ask AI", height)
+            .on_hover_text(format!(
+                "Describe the query and let an agent write it ({})",
+                crate::shortcuts::text(ui.ctx(), &crate::shortcuts::ASK_AI)
+            ));
+        if ask.clicked() {
+            *action = Some(TabAction::AskAi);
+        }
     }
 }
 
@@ -1544,7 +1569,7 @@ mod tests {
             .with_context_setup(theme::install)
             .build_ui_state(
                 |ui, tab: &mut CollectionTab| {
-                    show(ui, tab, false, None);
+                    show(ui, tab, false, None, false);
                 },
                 tab,
             );
