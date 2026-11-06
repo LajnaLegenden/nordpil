@@ -526,9 +526,9 @@ impl NordpilApp {
     fn set_settings(&mut self, ctx: &egui::Context, settings: Settings) {
         let scope_changed = settings.goto_scope != self.settings.goto_scope;
         let lookups_turned_on = settings.look_up_references && !self.settings.look_up_references;
-        self.settings = settings;
         theme::apply_settings(ctx, &settings);
-        self.backend.send(Command::SaveSettings(settings));
+        self.backend.send(Command::SaveSettings(settings.clone()));
+        self.settings = settings;
         if lookups_turned_on {
             let targets: Vec<Selection> = self.tabs.iter().map(|tab| tab.target.clone()).collect();
             for target in targets {
@@ -538,7 +538,7 @@ impl NordpilApp {
         if !scope_changed {
             return;
         }
-        match settings.goto_scope {
+        match self.settings.goto_scope {
             GotoScope::OpenOnly => {
                 self.known.clear();
                 self.backend.send(Command::ForgetCollections(None));
@@ -824,7 +824,8 @@ impl NordpilApp {
         match action {
             ShellAction::Run(script) => self.run_script(index, script),
             ShellAction::SaveLayout => {
-                self.backend.send(Command::SaveSettings(self.settings));
+                self.backend
+                    .send(Command::SaveSettings(self.settings.clone()));
             }
             ShellAction::Lookup {
                 database,
@@ -979,7 +980,8 @@ impl NordpilApp {
                 }
             }
             AggregateAction::SaveLayout => {
-                self.backend.send(Command::SaveSettings(self.settings));
+                self.backend
+                    .send(Command::SaveSettings(self.settings.clone()));
             }
             AggregateAction::Lookup { collection, filter } => {
                 self.tab_action(index, TabAction::Lookup { collection, filter });
@@ -2517,7 +2519,7 @@ impl NordpilApp {
         let Some(dialog) = &mut self.settings_dialog else {
             return;
         };
-        let mut settings = self.settings;
+        let mut settings = self.settings.clone();
         match dialog.show(ctx, &mut settings) {
             settings_dialog::Outcome::Open => {}
             settings_dialog::Outcome::Close => self.settings_dialog = None,
@@ -2635,7 +2637,8 @@ impl NordpilApp {
         let panel = self.tabs[index].panel;
         if panel != self.settings.last_panel {
             self.settings.last_panel = panel;
-            self.backend.send(Command::SaveSettings(self.settings));
+            self.backend
+                .send(Command::SaveSettings(self.settings.clone()));
         }
     }
 }
