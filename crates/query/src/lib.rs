@@ -12,6 +12,7 @@ mod fields;
 mod format;
 mod highlight;
 pub mod lexer;
+pub mod mask;
 pub mod parser;
 pub mod pipeline;
 mod script;
