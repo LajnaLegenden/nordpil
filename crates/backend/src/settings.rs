@@ -139,6 +139,73 @@ impl Default for AggregateSettings {
     }
 }
 
+/// The command-line agent that writes queries on request, if any.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AiAgent {
+    #[default]
+    Off,
+    Claude,
+    Codex,
+    /// A program the user names, reading the prompt on stdin.
+    Custom,
+}
+
+/// A built-in agent: Claude Code or Codex.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiPreset {
+    /// The program; empty looks it up on the login shell's `PATH`.
+    pub path: String,
+    /// Passed as `--model`; empty uses the agent's fast tier
+    /// ([`AiPreset::CLAUDE_MODEL`], [`AiPreset::CODEX_MODEL`]).
+    pub model: String,
+}
+
+impl AiPreset {
+    /// Claude Code's alias for its newest Haiku.
+    pub const CLAUDE_MODEL: &str = "haiku";
+    /// Codex's fast and affordable model.
+    pub const CODEX_MODEL: &str = "gpt-6-luna";
+}
+
+/// A user-defined agent. It gets the prompt on stdin and prints a JSON
+/// object; `{schema_file}` in an argument becomes the path of a file holding
+/// the answer's JSON Schema.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiCustom {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiSettings {
+    pub agent: AiAgent,
+    pub claude: AiPreset,
+    pub codex: AiPreset,
+    pub custom: AiCustom,
+    /// The agent is stopped after this long.
+    pub timeout_secs: u64,
+}
+
+impl AiSettings {
+    pub const TIMEOUT_SECS: u64 = 120;
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self {
+            agent: AiAgent::Off,
+            claude: AiPreset::default(),
+            codex: AiPreset::default(),
+            custom: AiCustom::default(),
+            timeout_secs: Self::TIMEOUT_SECS,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -153,6 +220,7 @@ pub struct Settings {
     pub last_panel: Panel,
     pub shell: ShellLayout,
     pub aggregate: AggregateSettings,
+    pub ai: AiSettings,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -222,6 +290,19 @@ mod tests {
                 split: 0.3,
                 sample_size: 500,
             },
+            ai: AiSettings {
+                agent: AiAgent::Custom,
+                claude: AiPreset {
+                    path: "/opt/claude".to_owned(),
+                    model: "sonnet".to_owned(),
+                },
+                codex: AiPreset::default(),
+                custom: AiCustom {
+                    program: "ollama-query".to_owned(),
+                    args: vec!["--schema".to_owned(), "{schema_file}".to_owned()],
+                },
+                timeout_secs: 30,
+            },
         };
         save(&path, settings.clone()).unwrap();
 
@@ -233,6 +314,7 @@ mod tests {
         assert!(text.contains("last_panel = \"shell\""), "{text}");
         assert!(text.contains("orientation = \"side-by-side\""), "{text}");
         assert!(text.contains("sample_size = 500"), "{text}");
+        assert!(text.contains("agent = \"custom\""), "{text}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -248,6 +330,8 @@ mod tests {
         assert_eq!(settings.last_panel, Panel::Documents);
         assert_eq!(settings.shell, ShellLayout::default());
         assert_eq!(settings.aggregate, AggregateSettings::default());
+        assert_eq!(settings.ai, AiSettings::default());
+        assert_eq!(settings.ai.agent, AiAgent::Off);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

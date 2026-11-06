@@ -1572,6 +1572,8 @@ impl NordpilApp {
                 }
                 Err(error) => self.notify(error),
             },
+            // Nothing asks an agent yet.
+            Response::AgentAnswer(_) => {}
             Response::DatabaseDropped {
                 connection,
                 database,

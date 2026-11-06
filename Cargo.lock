@@ -3565,6 +3565,8 @@ dependencies = [
  "nordpil-query",
  "nordpil-shell",
  "percent-encoding",
+ "proptest",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "testcontainers-modules",
