@@ -17,7 +17,7 @@ pub enum Outcome {
 
 impl SettingsDialog {
     pub fn show(&mut self, ctx: &egui::Context, settings: &mut Settings) -> Outcome {
-        let before = *settings;
+        let before = settings.clone();
         let mut outcome = Outcome::Open;
         let modal = kit::modal(ctx, egui::Id::unique("settings_dialog")).show(ctx, |ui| {
             kit::dialog_width(ui, 560.0);

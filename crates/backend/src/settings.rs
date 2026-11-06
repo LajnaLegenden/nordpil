@@ -139,7 +139,7 @@ impl Default for AggregateSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub theme: Theme,
@@ -223,7 +223,7 @@ mod tests {
                 sample_size: 500,
             },
         };
-        save(&path, settings).unwrap();
+        save(&path, settings.clone()).unwrap();
 
         assert_eq!(load(&path).unwrap(), settings);
         let text = std::fs::read_to_string(&path).unwrap();
