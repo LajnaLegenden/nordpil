@@ -53,6 +53,8 @@ pub enum AggregateAction {
         collection: String,
         filter: Document,
     },
+    /// Open Ask AI for the pipeline.
+    AskAi,
 }
 
 /// What the panel uses besides its tab.
@@ -63,6 +65,8 @@ pub struct Surroundings<'a> {
     /// Where id fields of results can be looked up; `None` when lookups are off.
     pub references: Option<&'a References>,
     pub read_only: bool,
+    /// Shows Ask AI.
+    pub ai: bool,
 }
 
 pub fn show(
@@ -75,9 +79,10 @@ pub fn show(
         settings,
         references,
         read_only,
+        ai,
     } = surroundings;
     let palette = theme::palette(ui);
-    let mut action = toolbar(ui, tab, settings.sample_size);
+    let mut action = toolbar(ui, tab, settings.sample_size, ai);
     if tab.aggregate.show_options {
         ui.add_space(8.0);
         action = options(ui, tab).or(action);
@@ -108,6 +113,7 @@ fn toolbar(
     ui: &mut egui::Ui,
     tab: &mut CollectionTab,
     sample_size: u64,
+    ai: bool,
 ) -> Option<AggregateAction> {
     let mut action = None;
     let height = kit::TOOLBAR_HEIGHT;
@@ -170,6 +176,9 @@ fn toolbar(
                     ui.ctx()
                         .copy_text(state.shell_statement(&tab.target.collection));
                 }
+                if ai && ui.button("Ask AI…").clicked() {
+                    action = Some(AggregateAction::AskAi);
+                }
                 if ui.button("Paste pipeline…").clicked() {
                     state.paste = Some(Paste {
                         editor: code_editor::CodeEditor::new(
@@ -190,6 +199,16 @@ fn toolbar(
                     action = Some(AggregateAction::Explain);
                 }
             });
+            if ai {
+                let ask = kit::button(ui, Tone::Ghost, Some(icons::SPARKLES), "Ask AI", height)
+                    .on_hover_text(format!(
+                        "Describe the pipeline and let an agent write it ({})",
+                        shortcuts::text(ui.ctx(), &shortcuts::ASK_AI)
+                    ));
+                if ask.clicked() {
+                    action = Some(AggregateAction::AskAi);
+                }
+            }
             let history = kit::button(ui, Tone::Ghost, Some(icons::HISTORY), "History", height);
             egui::Popup::menu(&history).show(|ui| {
                 if let Some(chosen) = history_menu(ui, state) {
@@ -1082,6 +1101,7 @@ mod tests {
                         settings: &mut state.settings,
                         references: None,
                         read_only: false,
+                        ai: false,
                     };
                     if let Some(AggregateAction::Run) = show(ui, &mut state.tab, surroundings) {
                         state.ran = true;

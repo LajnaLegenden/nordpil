@@ -91,6 +91,7 @@ impl MacMenu {
 
         let goto = item("Go to Collection…", AppCommand::GoTo);
         let focus = item("Focus Filter or Script", AppCommand::FocusEditor);
+        let ask_ai = item("Ask AI…", AppCommand::AskAi);
         let documents = item("Documents", AppCommand::Panel(Panel::Documents));
         let indexes = item("Indexes", AppCommand::Panel(Panel::Indexes));
         let shell = item("Shell", AppCommand::Panel(Panel::Shell));
@@ -102,6 +103,7 @@ impl MacMenu {
             &[
                 &goto,
                 &focus,
+                &ask_ai,
                 &separator(),
                 &documents,
                 &indexes,
@@ -177,7 +179,8 @@ impl MacMenu {
                 | AppCommand::SelectTab(_)
                 | AppCommand::LastTab
                 | AppCommand::Panel(_)
-                | AppCommand::Refresh => state.has_tabs,
+                | AppCommand::Refresh
+                | AppCommand::AskAi => state.has_tabs,
                 AppCommand::ReopenTab => state.can_reopen,
                 AppCommand::SaveScript | AppCommand::OpenScript => state.on_shell,
                 AppCommand::StopScript => state.on_shell || state.on_aggregate,

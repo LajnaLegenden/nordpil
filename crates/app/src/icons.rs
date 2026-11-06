@@ -38,6 +38,7 @@ pub const SAVE: &str = "\u{e14d}";
 pub const SEARCH: &str = "\u{e151}";
 pub const SETTINGS: &str = "\u{e154}";
 pub const SLIDERS: &str = "\u{e245}";
+pub const SPARKLES: &str = "\u{e412}";
 pub const SQUARE: &str = "\u{e167}";
 pub const SQUARE_TERMINAL: &str = "\u{e20a}";
 pub const STAR: &str = "\u{e176}";
