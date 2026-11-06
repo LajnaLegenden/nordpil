@@ -49,12 +49,19 @@ when idle, against roughly 1 GB for Compass.
   the total. Stop (Ctrl+. or Esc) ends it on the server too. `$out` and `$merge` ask before
   writing. Export the results, explain the pipeline, copy it as shell code or open it in
   the Shell. Drafts, history and favorites per collection.
+- **Ask AI**: describe a query or pipeline in words (Ctrl+I) and let Claude Code, Codex or
+  a command of your own write it. The agent never sees your data: it gets the field
+  names and types, the index keys, the collections you linked, and your current query
+  with every value replaced by a placeholder that nordpil puts back in the answer. The
+  built-in agents run without tools, in an empty folder, so they can't look anything up.
+  The answer opens in an editable preview with a one-line explanation; refine it, see
+  exactly what was sent, then apply it. Off until you pick an agent in Settings.
 - **Import and export**: JSON, JSON lines and CSV, streamed with progress and cancel.
 - **Settings**: dark, light or system theme, three text sizes, and whether Ctrl+K searches
   all saved connections or only open ones.
 - **Keyboard**: F1 lists every shortcut. Ctrl+W closes a tab and Ctrl+Shift+T brings it
   back, Ctrl+Tab and Ctrl+1–9 switch tabs, Alt+1/2/3/4 switch between Documents, Indexes,
-  Shell and Aggregation, Ctrl+R reruns the query or pipeline and Ctrl+, opens the settings. On macOS the keys use
+  Shell and Aggregation, Ctrl+R reruns the query or pipeline, Ctrl+I asks AI and Ctrl+, opens the settings. On macOS the keys use
   ⌘ and the same commands sit in the menu bar. Tabs carry their connection's color.
 
 | Go to collection (Ctrl+K) | Values from the results |
@@ -68,6 +75,8 @@ when idle, against roughly 1 GB for Compass.
 | ![Shell](docs/screenshots/shell.png) | ![Shell side by side](docs/screenshots/shell-side-by-side.png) |
 | **Aggregation** | **Keyboard shortcuts (F1)** |
 | ![Aggregation](docs/screenshots/aggregate.png) | ![Keyboard shortcuts](docs/screenshots/shortcuts.png) |
+| **Ask AI (Ctrl+I)** | **Choosing the agent** |
+| ![Ask AI](docs/screenshots/ask-ai.png) | ![Ask AI settings](docs/screenshots/settings-ai.png) |
 
 ## Install
 
