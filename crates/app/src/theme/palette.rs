@@ -21,9 +21,40 @@ impl Rgba {
         Self([r, g, b, alpha])
     }
 
+    pub fn alpha(self) -> u8 {
+        self.0[3]
+    }
+
     pub fn color32(self) -> Color32 {
         let [r, g, b, a] = self.0;
         Color32::from_rgba_unmultiplied(r, g, b, a)
+    }
+
+    /// Reads `#rrggbb` or `#rrggbbaa`, in either case.
+    pub fn parse(text: &str) -> Option<Self> {
+        let digits = text.trim().strip_prefix('#')?;
+        if !matches!(digits.len(), 6 | 8) || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let byte = |i: usize| u8::from_str_radix(&digits[i..i + 2], 16).ok();
+        let alpha = if digits.len() == 8 { byte(6)? } else { 255 };
+        Some(Self([byte(0)?, byte(2)?, byte(4)?, alpha]))
+    }
+}
+
+/// One color of a theme, as named in theme files.
+pub struct Token {
+    pub key: &'static str,
+    /// A token that is this one at another opacity. When a theme sets the
+    /// parent but not this token, this one follows the parent's color.
+    pub parent: Option<&'static str>,
+    pub get: fn(&Colors) -> Rgba,
+    pub set: fn(&mut Colors, Rgba),
+}
+
+impl Token {
+    pub fn find(key: &str) -> Option<&'static Token> {
+        TOKENS.iter().find(|token| token.key == key)
     }
 }
 
@@ -40,7 +71,19 @@ macro_rules! tokens {
                 Tokens { $( $field: f(self.$field), )* }
             }
         }
+
+        /// In the order the theme editor and saved files list them.
+        pub const TOKENS: &[Token] = &[$(
+            Token {
+                key: stringify!($field),
+                parent: tokens!(@parent $($parent)?),
+                get: |colors| colors.$field,
+                set: |colors, color| colors.$field = color,
+            },
+        )*];
     };
+    (@parent) => { None };
+    (@parent $parent:ident) => { Some(stringify!($parent)) };
 }
 
 tokens! {
@@ -188,4 +231,47 @@ pub fn nordic_light() -> Colors {
         syntax_operator: Rgba::rgb(0x8a4b9e),
         ..Colors::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_parses_and_rejects_other_forms() {
+        assert_eq!(
+            Rgba::parse("#88c0d024").unwrap(),
+            Rgba([0x88, 0xc0, 0xd0, 0x24])
+        );
+        assert_eq!(
+            Rgba::parse("#88C0D0").unwrap(),
+            Rgba([0x88, 0xc0, 0xd0, 255])
+        );
+        for bad in ["88c0d0", "#12345", "#abc", "#88c0dz", "#88c0d0ff00", ""] {
+            assert_eq!(Rgba::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn every_token_has_a_unique_key_and_an_existing_parent() {
+        for (i, token) in TOKENS.iter().enumerate() {
+            assert!(TOKENS[..i].iter().all(|other| other.key != token.key));
+            if let Some(parent) = token.parent {
+                assert!(Token::find(parent).is_some_and(|p| p.parent.is_none()));
+            }
+        }
+    }
+
+    #[test]
+    fn built_in_linked_tokens_are_their_parent_at_another_opacity() {
+        for colors in [nordic_dark(), nordic_light()] {
+            for token in TOKENS {
+                let Some(parent) = token.parent.and_then(Token::find) else {
+                    continue;
+                };
+                let own = (token.get)(&colors);
+                assert_eq!((parent.get)(&colors).with_alpha(own.alpha()), own);
+            }
+        }
+    }
 }

@@ -12,8 +12,10 @@ use nordpil_backend::settings::{Settings, TextSize};
 use nordpil_query::Highlight;
 
 mod palette;
+mod resolve;
 
 pub use palette::{Palette, nordic_dark, nordic_light};
+pub use resolve::{Themes, builtin_name};
 
 static DARK: LazyLock<Arc<Palette>> = LazyLock::new(|| Arc::new(nordic_dark().palette()));
 static LIGHT: LazyLock<Arc<Palette>> = LazyLock::new(|| Arc::new(nordic_light().palette()));
@@ -92,8 +94,9 @@ pub fn set_palettes(ctx: &egui::Context, dark: Arc<Palette>, light: Arc<Palette>
     });
 }
 
-/// Applies the theme and text size settings.
-pub fn apply_settings(ctx: &egui::Context, settings: &Settings) {
+/// Applies the theme mode and text size settings. Palettes are set apart,
+/// with [`set_palettes`].
+pub fn apply_mode(ctx: &egui::Context, settings: &Settings) {
     use nordpil_backend::settings::ThemeMode as Setting;
     ctx.set_theme(match settings.themes.mode {
         Setting::System => ThemePreference::System,

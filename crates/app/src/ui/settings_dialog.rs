@@ -1,12 +1,13 @@
-//! Settings: theme, text size, what Ctrl+K searches, id lookups and updates. Changes
-//! apply at once and are saved to `config.toml`.
+//! Settings: themes, text size, what Ctrl+K searches, id lookups and updates.
+//! Changes apply at once and are saved to `config.toml`.
 
 use eframe::egui::{self, CornerRadius, Frame, Margin, RichText, Stroke};
 use nordpil_backend::settings::{
     AiAgent, AiSettings, GotoScope, Settings, TextSize, ThemeMode, Updates,
 };
 
-use crate::theme;
+use crate::icons;
+use crate::theme::{self, Themes};
 use crate::widgets::kit::{self, Tone};
 
 #[derive(Default)]
@@ -59,12 +60,26 @@ pub enum Outcome {
     Open,
     Close,
     Changed,
+    Theme(ThemeAction),
+}
+
+/// A theme button the app acts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThemeAction {
+    Reload,
+    OpenFolder,
 }
 
 impl SettingsDialog {
-    pub fn show(&mut self, ctx: &egui::Context, settings: &mut Settings) -> Outcome {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        settings: &mut Settings,
+        themes: &Themes,
+    ) -> Outcome {
         let before = settings.clone();
         let mut outcome = Outcome::Open;
+        let mut action = None;
         let draft = self.ai.get_or_insert_with(|| AiDraft::new(&settings.ai));
         let mut save_draft = false;
         let modal = kit::modal(ctx, egui::Id::unique("settings_dialog")).show(ctx, |ui| {
@@ -92,6 +107,51 @@ impl SettingsDialog {
                             ],
                             38.0,
                         );
+                        ui.end_row();
+
+                        for dark in [true, false] {
+                            if dark {
+                                described(ui, "Dark theme", "Colors in dark mode");
+                            } else {
+                                described(ui, "Light theme", "Colors in light mode");
+                            }
+                            ui.vertical(|ui| {
+                                ui.set_width(330.0);
+                                theme_picker(ui, settings, themes, dark);
+                            });
+                            ui.end_row();
+                        }
+
+                        described(ui, "Custom themes", "TOML files you can edit");
+                        ui.vertical(|ui| {
+                            ui.set_width(330.0);
+                            ui.horizontal(|ui| {
+                                let height = 32.0;
+                                if kit::button(
+                                    ui,
+                                    Tone::Secondary,
+                                    Some(icons::REFRESH),
+                                    "Reload",
+                                    height,
+                                )
+                                .on_hover_text("Reads the theme files again")
+                                .clicked()
+                                {
+                                    action = Some(ThemeAction::Reload);
+                                }
+                                if kit::button(
+                                    ui,
+                                    Tone::Secondary,
+                                    Some(icons::FOLDER_OPEN),
+                                    "Open folder",
+                                    height,
+                                )
+                                .clicked()
+                                {
+                                    action = Some(ThemeAction::OpenFolder);
+                                }
+                            });
+                        });
                         ui.end_row();
 
                         described(ui, "Text size", "Body text 12.5, 14 or 15 px");
@@ -207,6 +267,9 @@ impl SettingsDialog {
         }
         if save_draft {
             draft.save(&mut settings.ai);
+        }
+        if let Some(action) = action {
+            return Outcome::Theme(action);
         }
         if *settings != before {
             outcome = Outcome::Changed;
@@ -326,6 +389,78 @@ fn ai_settings(ui: &mut egui::Ui, ai: &mut AiSettings, draft: &mut AiDraft) -> b
         );
     }
     lost_focus
+}
+
+/// The dark or light slot's theme, from the themes usable in that mode.
+/// Themes that can't be used are listed greyed out, with their error.
+fn theme_picker(ui: &mut egui::Ui, settings: &mut Settings, themes: &Themes, dark: bool) {
+    let palette = theme::palette(ui);
+    let slot = themes.slot(&settings.themes, dark);
+    let selected = if dark {
+        &mut settings.themes.dark
+    } else {
+        &mut settings.themes.light
+    };
+    let current = themes.get(selected).filter(|entry| entry.usable_as(dark));
+    let text = current.map_or_else(
+        || theme::builtin_name(dark).to_owned(),
+        |entry| entry.name.clone(),
+    );
+    let label = if dark { "Dark theme" } else { "Light theme" };
+    let combo = egui::ComboBox::from_id_salt(label)
+        .width(ui.available_width())
+        .selected_text(text)
+        .show_ui(ui, |ui| {
+            for entry in themes.entries.iter().filter(|entry| entry.usable_as(dark)) {
+                let mut name = entry.name.clone();
+                if !entry.warnings.is_empty() {
+                    name.push_str(&format!(" ({} warnings)", entry.warnings.len()));
+                }
+                ui.selectable_value(selected, entry.id.clone(), name);
+            }
+            let broken: Vec<_> = themes
+                .entries
+                .iter()
+                .filter(|entry| entry.resolved.is_err())
+                .collect();
+            if !broken.is_empty() {
+                ui.separator();
+                ui.label(RichText::new("Can't be used").size(12.0).weak());
+                for entry in broken {
+                    let error = entry.resolved.as_ref().err().cloned().unwrap_or_default();
+                    ui.add_enabled(
+                        false,
+                        egui::Button::selectable(false, format!("{}.toml", entry.id)),
+                    )
+                    .on_disabled_hover_text(error);
+                }
+            }
+        });
+    combo
+        .response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, label));
+    let note = |ui: &mut egui::Ui, icon: &str, text: String, color: egui::Color32| {
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!("{icon} {text}"))
+                    .size(12.5)
+                    .color(color),
+            )
+            .wrap(),
+        )
+    };
+    if let Some(problem) = slot.problem {
+        note(ui, icons::CIRCLE_ALERT, problem, palette.danger);
+    } else if let Some(entry) = current.filter(|entry| !entry.warnings.is_empty()) {
+        let count = entry.warnings.len();
+        let text = format!(
+            "{count} line{} of {}.toml skipped",
+            if count == 1 { "" } else { "s" },
+            entry.id
+        );
+        note(ui, icons::TRIANGLE_ALERT, text, palette.warn)
+            .on_hover_text(entry.warnings.join("\n"));
+    }
 }
 
 fn described(ui: &mut egui::Ui, title: &str, description: &str) {

@@ -140,6 +140,11 @@ pub struct NordpilApp {
     notifications: Vec<BackendError>,
     settings: Settings,
     settings_dialog: Option<SettingsDialog>,
+    /// Built-in themes and theme files.
+    themes: theme::Themes,
+    /// Palettes are set again on the next frame; with `true`, problems with
+    /// themes show as a notice.
+    restyle: Option<bool>,
     /// The F1 sheet of keyboard shortcuts.
     shortcuts_sheet: bool,
     /// Fields the user linked to collections, per database.
@@ -169,11 +174,14 @@ impl NordpilApp {
             Ok(settings) => (settings, None),
             Err(error) => (Settings::default(), Some(error)),
         };
+        let (loaded, themes_error) = match backend.load_themes() {
+            Ok(loaded) => (loaded, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
         theme::install(ctx);
-        theme::apply_settings(ctx, &settings);
         ctx.options_mut(|options| options.input_options.line_scroll_speed = LINE_SCROLL_SPEED);
-        let ctx = ctx.clone();
-        let mut backend = Bridge::new(backend, move || ctx.request_repaint())?;
+        let repaint = ctx.clone();
+        let mut backend = Bridge::new(backend, move || repaint.request_repaint())?;
         backend.send(Command::LoadConnections);
         backend.send(Command::LoadNavigation);
         backend.send(Command::LoadMappings);
@@ -194,6 +202,8 @@ impl NordpilApp {
             notifications: Vec::new(),
             settings,
             settings_dialog: None,
+            themes: theme::Themes::new(loaded),
+            restyle: None,
             shortcuts_sheet: false,
             mappings: Vec::new(),
             mappings_dialog: None,
@@ -210,6 +220,11 @@ impl NordpilApp {
         if let Some(error) = settings_error {
             app.notify(error);
         }
+        if let Some(error) = themes_error {
+            app.notify(error);
+        }
+        // Before the first frame, so the window opens in the right colors.
+        app.apply_themes(ctx, true);
         Ok(app)
     }
 
@@ -232,6 +247,32 @@ impl NordpilApp {
         self.connections
             .iter_mut()
             .find(|entry| entry.saved.id == id)
+    }
+
+    /// Sets the mode, text size and palettes from the settings and themes.
+    /// With `announce`, problems with theme files show as one notice.
+    fn apply_themes(&mut self, ctx: &egui::Context, announce: bool) {
+        theme::apply_mode(ctx, &self.settings);
+        let dark = self.themes.slot(&self.settings.themes, true);
+        let light = self.themes.slot(&self.settings.themes, false);
+        theme::set_palettes(
+            ctx,
+            Arc::new(dark.colors.palette()),
+            Arc::new(light.colors.palette()),
+        );
+        if !announce {
+            return;
+        }
+        let mut lines: Vec<String> = dark.problem.into_iter().chain(light.problem).collect();
+        lines.extend(self.themes.problems());
+        let Some(first) = lines.first() else {
+            return;
+        };
+        let message = match lines.len() {
+            1 => first.clone(),
+            n => format!("{first} (+{} more theme problems)", n - 1),
+        };
+        self.notify(BackendError::new(message).with_detail(lines.join("\n")));
     }
 
     fn notify(&mut self, error: BackendError) {
@@ -531,9 +572,9 @@ impl NordpilApp {
     fn set_settings(&mut self, ctx: &egui::Context, settings: Settings) {
         let scope_changed = settings.goto_scope != self.settings.goto_scope;
         let lookups_turned_on = settings.look_up_references && !self.settings.look_up_references;
-        theme::apply_settings(ctx, &settings);
         self.backend.send(Command::SaveSettings(settings.clone()));
         self.settings = settings;
+        self.apply_themes(ctx, false);
         if lookups_turned_on {
             let targets: Vec<Selection> = self.tabs.iter().map(|tab| tab.target.clone()).collect();
             for target in targets {
@@ -1812,7 +1853,14 @@ impl NordpilApp {
                     self.notify(error);
                 }
             }
-            Response::Themes(_) | Response::ThemeSaved { .. } => {}
+            Response::Themes(result) => match result {
+                Ok(loaded) => {
+                    self.themes = theme::Themes::new(loaded);
+                    self.restyle = Some(true);
+                }
+                Err(error) => self.notify(error),
+            },
+            Response::ThemeSaved { .. } => {}
             Response::ScriptFinished(result) => self.script_finished(request, result),
             Response::Scripts { namespace, result } => match result {
                 Ok(scripts) => {
@@ -2845,7 +2893,7 @@ impl NordpilApp {
             return;
         };
         let mut settings = self.settings.clone();
-        match dialog.show(ctx, &mut settings) {
+        match dialog.show(ctx, &mut settings, &self.themes) {
             settings_dialog::Outcome::Open => {}
             settings_dialog::Outcome::Close => {
                 self.settings_dialog = None;
@@ -2854,6 +2902,19 @@ impl NordpilApp {
                 }
             }
             settings_dialog::Outcome::Changed => self.set_settings(ctx, settings),
+            settings_dialog::Outcome::Theme(action) => {
+                if settings != self.settings {
+                    self.set_settings(ctx, settings);
+                }
+                match action {
+                    settings_dialog::ThemeAction::Reload => {
+                        self.backend.send(Command::LoadThemes);
+                    }
+                    settings_dialog::ThemeAction::OpenFolder => {
+                        self.backend.send(Command::OpenThemesFolder);
+                    }
+                }
+            }
         }
     }
 
@@ -2878,6 +2939,9 @@ impl NordpilApp {
         self.poll_aggregates(&ctx);
         self.poll_ask_ai(&ctx);
         self.shortcuts(&ctx);
+        if let Some(announce) = self.restyle.take() {
+            self.apply_themes(&ctx, announce);
+        }
         let palette = theme::palette(ui);
 
         let top = egui::Panel::top("top_bar")
