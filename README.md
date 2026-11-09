@@ -57,8 +57,11 @@ when idle, against roughly 1 GB for Compass.
   The answer opens in an editable preview with a one-line explanation; refine it, see
   exactly what was sent, then apply it. Off until you pick an agent in Settings.
 - **Import and export**: JSON, JSON lines and CSV, streamed with progress and cancel.
-- **Settings**: dark, light or system theme, three text sizes, and whether Ctrl+K searches
-  all saved connections or only open ones.
+- **Themes**: dark, light or system mode, with a theme picked for each. Make your own
+  in the theme editor, a panel beside the app where every color change shows at once,
+  or by hand in a TOML file; see [Themes](#themes).
+- **Settings**: three text sizes, and whether Ctrl+K searches all saved connections or
+  only open ones.
 - **Keyboard**: F1 lists every shortcut. Ctrl+W closes a tab and Ctrl+Shift+T brings it
   back, Ctrl+Tab and Ctrl+1–9 switch tabs, Alt+1/2/3/4 switch between Documents, Indexes,
   Shell and Aggregation, Ctrl+R reruns the query or pipeline, Ctrl+I asks AI and Ctrl+, opens the settings. On macOS the keys use
@@ -77,6 +80,8 @@ when idle, against roughly 1 GB for Compass.
 | ![Aggregation](docs/screenshots/aggregate.png) | ![Keyboard shortcuts](docs/screenshots/shortcuts.png) |
 | **Ask AI (Ctrl+I)** | **Choosing the agent** |
 | ![Ask AI](docs/screenshots/ask-ai.png) | ![Ask AI settings](docs/screenshots/settings-ai.png) |
+| **Theme editor** | **Choosing themes** |
+| ![Theme editor](docs/screenshots/theme-editor.png) | ![Theme settings](docs/screenshots/settings.png) |
 
 ## Install
 
@@ -114,9 +119,49 @@ nordpil
 On Linux, saving passwords needs a Secret Service keyring (GNOME Keyring, KeePassXC, …),
 and the file picker uses the XDG desktop portal.
 
-Saved connections, settings, query history and recent collections live in the
+Saved connections, settings, themes, query history and recent collections live in the
 platform config folder (`~/.config/nordpil/` on Linux); logs in the platform state
 folder (`~/.local/state/nordpil/logs/` on Linux).
+
+## Themes
+
+nordpil ships Nordic frost, in dark and light. Settings pick the mode (system, dark or
+light) and the theme for each. A theme of your own is a TOML file in the `themes`
+folder of the config folder (Settings → Custom themes → Open folder); its file name
+without `.toml` is its id:
+
+```toml
+# themes/fjord.toml
+name = "Fjord"
+base = "nordic-dark"  # nordic-dark, nordic-light, or another theme's id
+
+[colors]
+main = "#121d27"
+accent = "#e0a35b"
+scrim = "#06090da3"   # #rrggbb, or #rrggbbaa with alpha
+```
+
+A theme changes only the colors it lists; the rest come from its base, and a base can
+build on another theme. Whether a theme is dark or light comes from the built-in at the
+bottom. `accent_soft`, `focus` and `danger_soft` are their parent (`accent`, `danger`) at
+the base's opacity, so they follow it when the theme sets only the parent.
+
+After editing a file by hand, press Reload in Settings. A line with an unknown color name
+or a bad color is skipped, and Settings says which; a file that isn't valid TOML, or
+whose base is missing or builds on itself, can't be used and the built-in shows instead.
+
+The theme editor (Edit next to a theme, or New theme) saves the same files. Saving
+rewrites the file, so comments and skipped lines are dropped. A built-in can't change:
+editing one starts a new theme based on it.
+
+| Group | Colors |
+| --- | --- |
+| Surfaces | `app`, `side`, `main`, `surface`, `raised`, `hover`, `hover_tint`, `track`, `active`, `line`, `line_strong`, `scrim`, `shadow` |
+| Text | `text`, `muted`, `subtle` |
+| Accent | `accent`, `accent_ink`, `accent_soft`, `accent_text`, `focus` |
+| Status | `danger`, `danger_soft`, `warn` |
+| Syntax | `syntax_key`, `syntax_string`, `syntax_number`, `syntax_constructor`, `syntax_operator` |
+| Connections | `conn_red`, `conn_orange`, `conn_yellow`, `conn_green`, `conn_teal`, `conn_blue`, `conn_purple`, `conn_pink` |
 
 ## Development
 

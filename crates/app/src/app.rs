@@ -4783,6 +4783,11 @@ mod screenshots {
         save(&mut harness, "settings");
         harness.state_mut().settings.ai.agent = AiAgent::Custom;
         harness.run();
+        // The theme rows push the AI options down; scroll to them.
+        harness
+            .get_by_role_and_label(Role::MultilineTextInput, "Arguments")
+            .scroll_to_me();
+        harness.run();
         save(&mut harness, "settings-ai");
         harness.state_mut().settings.ai.agent = AiAgent::Off;
         harness.key_press(egui::Key::Escape);
