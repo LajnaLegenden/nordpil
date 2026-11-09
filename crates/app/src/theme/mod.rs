@@ -1,5 +1,5 @@
-//! The look: color tokens for the dark and light themes, fonts and sizes.
-//! Values come from the design canvas's foundations board.
+//! The look: palettes for the dark and light themes, fonts and sizes.
+//! Built-in values come from the design canvas's foundations board.
 
 use std::sync::{Arc, LazyLock};
 
@@ -11,129 +11,39 @@ use eframe::epaint::text::VariationCoords;
 use nordpil_backend::settings::{Settings, TextSize};
 use nordpil_query::Highlight;
 
-/// Color tokens. Components use these, never raw colors.
-pub struct Palette {
-    /// Window background behind panels; the top bar.
-    pub app: Color32,
-    /// Sidebar and tab bar.
-    pub side: Color32,
-    /// Content area and editor ground.
-    pub main: Color32,
-    /// Cards, tables, dialogs.
-    pub surface: Color32,
-    /// Buttons, inputs, popups, table headers.
-    pub raised: Color32,
-    pub hover: Color32,
-    /// Segmented control track and its active item.
-    pub track: Color32,
-    pub active: Color32,
-    pub line: Color32,
-    pub line_strong: Color32,
-    pub text: Color32,
-    pub muted: Color32,
-    pub subtle: Color32,
-    pub accent: Color32,
-    /// Text on an accent fill.
-    pub accent_ink: Color32,
-    /// Selected rows and options.
-    pub accent_soft: Color32,
-    /// Text on `accent_soft`.
-    pub accent_text: Color32,
-    pub focus: Color32,
-    pub danger: Color32,
-    pub danger_soft: Color32,
-    pub warn: Color32,
-    pub scrim: Color32,
-    pub shadow: Color32,
-    pub syntax_key: Color32,
-    pub syntax_string: Color32,
-    pub syntax_number: Color32,
-    pub syntax_constructor: Color32,
-    pub syntax_operator: Color32,
+mod palette;
+
+pub use palette::{Palette, nordic_dark, nordic_light};
+
+static DARK: LazyLock<Arc<Palette>> = LazyLock::new(|| Arc::new(nordic_dark().palette()));
+static LIGHT: LazyLock<Arc<Palette>> = LazyLock::new(|| Arc::new(nordic_light().palette()));
+
+fn palette_id(dark: bool) -> egui::Id {
+    egui::Id::unique(("nordpil-palette", dark))
 }
-
-const fn rgb(hex: u32) -> Color32 {
-    Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
-}
-
-fn rgba(hex: u32, alpha: f32) -> Color32 {
-    let [_, r, g, b] = hex.to_be_bytes();
-    Color32::from_rgba_unmultiplied(r, g, b, (alpha * 255.0).round() as u8)
-}
-
-static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
-    app: rgb(0x0e1115),
-    side: rgb(0x11151a),
-    main: rgb(0x161a20),
-    surface: rgb(0x1b2028),
-    raised: rgb(0x212731),
-    hover: rgb(0x262d38),
-    track: rgb(0x0f1318),
-    active: rgb(0x2c3441),
-    line: rgb(0x262c36),
-    line_strong: rgb(0x343c4a),
-    text: rgb(0xe5e9f0),
-    muted: rgb(0xa7b0bf),
-    subtle: rgb(0x828d9f),
-    accent: rgb(0x88c0d0),
-    accent_ink: rgb(0x0b1a20),
-    accent_soft: rgba(0x88c0d0, 0.14),
-    accent_text: rgb(0xa8d6e3),
-    focus: rgba(0x88c0d0, 0.32),
-    danger: rgb(0xef8a8a),
-    danger_soft: rgba(0xef8a8a, 0.12),
-    warn: rgb(0xebcb8b),
-    scrim: rgba(0x06090d, 0.64),
-    shadow: rgba(0x000000, 0.55),
-    syntax_key: rgb(0x81a1c1),
-    syntax_string: rgb(0xa3be8c),
-    syntax_number: rgb(0xd08770),
-    syntax_constructor: rgb(0x8fbcbb),
-    syntax_operator: rgb(0xb48ead),
-});
-
-static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
-    app: rgb(0xe8ecf1),
-    side: rgb(0xf1f4f7),
-    main: rgb(0xf8f9fb),
-    surface: rgb(0xffffff),
-    raised: rgb(0xeef1f5),
-    hover: rgb(0xe7ebf0),
-    track: rgb(0xe4e8ee),
-    active: rgb(0xffffff),
-    line: rgb(0xdfe4ea),
-    line_strong: rgb(0xc9d1db),
-    text: rgb(0x1c232e),
-    muted: rgb(0x475266),
-    subtle: rgb(0x5d6879),
-    accent: rgb(0x2b7a91),
-    accent_ink: rgb(0xffffff),
-    accent_soft: rgba(0x2b7a91, 0.11),
-    accent_text: rgb(0x1b6176),
-    focus: rgba(0x2b7a91, 0.25),
-    danger: rgb(0xc2414d),
-    danger_soft: rgba(0xc2414d, 0.09),
-    warn: rgb(0x9a6a12),
-    scrim: rgba(0x1c232e, 0.32),
-    shadow: rgba(0x182434, 0.16),
-    syntax_key: rgb(0x3b6a9c),
-    syntax_string: rgb(0x4c7a34),
-    syntax_number: rgb(0xb4532a),
-    syntax_constructor: rgb(0x1f7a78),
-    syntax_operator: rgb(0x8a4b9e),
-});
 
 /// The palette of the theme `ui` is drawn in.
-pub fn palette(ui: &egui::Ui) -> &'static Palette {
-    of(ui.visuals())
+pub fn palette(ui: &egui::Ui) -> Arc<Palette> {
+    of(ui.ctx(), ui.visuals().dark_mode)
 }
 
-pub fn of(visuals: &Visuals) -> &'static Palette {
-    if visuals.dark_mode { &DARK } else { &LIGHT }
+/// The palette of the dark or the light theme.
+pub fn of(ctx: &egui::Context, dark: bool) -> Arc<Palette> {
+    ctx.data(|data| data.get_temp(palette_id(dark)))
+        .unwrap_or_else(|| builtin(dark))
 }
 
-pub fn syntax(kind: Highlight, visuals: &Visuals) -> Color32 {
-    let p = of(visuals);
+/// The palette of the theme the window shows now.
+pub fn current(ctx: &egui::Context) -> Arc<Palette> {
+    of(ctx, ctx.global_style().visuals.dark_mode)
+}
+
+/// A built-in Nordic frost palette.
+pub fn builtin(dark: bool) -> Arc<Palette> {
+    Arc::clone(if dark { &DARK } else { &LIGHT })
+}
+
+pub fn syntax(kind: Highlight, p: &Palette) -> Color32 {
     match kind {
         Highlight::Punctuation => p.subtle,
         Highlight::Comment => p.subtle,
@@ -166,11 +76,20 @@ pub fn section_style() -> TextStyle {
     TextStyle::Name("section".into())
 }
 
-/// Sets fonts and both themes' styles. Call once at startup.
+/// Sets fonts and the built-in palettes. Call once at startup.
 pub fn install(ctx: &egui::Context) {
     install_fonts(ctx);
-    ctx.style_mut_of(Theme::Dark, |style| apply(style, &DARK, true));
-    ctx.style_mut_of(Theme::Light, |style| apply(style, &LIGHT, false));
+    set_palettes(ctx, builtin(true), builtin(false));
+}
+
+/// Paints the dark and the light theme with these palettes from now on.
+pub fn set_palettes(ctx: &egui::Context, dark: Arc<Palette>, light: Arc<Palette>) {
+    ctx.style_mut_of(Theme::Dark, |style| apply(style, &dark, true));
+    ctx.style_mut_of(Theme::Light, |style| apply(style, &light, false));
+    ctx.data_mut(|data| {
+        data.insert_temp(palette_id(true), dark);
+        data.insert_temp(palette_id(false), light);
+    });
 }
 
 /// Applies the theme and text size settings.
@@ -193,9 +112,9 @@ pub fn zoom(size: TextSize) -> f32 {
     }
 }
 
-const GEIST: &[u8] = include_bytes!("../assets/fonts/Geist.ttf");
-const GEIST_MONO: &[u8] = include_bytes!("../assets/fonts/GeistMono.ttf");
-const LUCIDE: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
+const GEIST: &[u8] = include_bytes!("../../assets/fonts/Geist.ttf");
+const GEIST_MONO: &[u8] = include_bytes!("../../assets/fonts/GeistMono.ttf");
+const LUCIDE: &[u8] = include_bytes!("../../assets/fonts/lucide.ttf");
 
 fn install_fonts(ctx: &egui::Context) {
     let weight = |font: &'static [u8], weight: f32| {
@@ -351,4 +270,26 @@ fn visuals(p: &Palette, dark: bool) -> Visuals {
     w.open.fg_stroke = Stroke::new(1.0, p.text);
     w.open.corner_radius = radius;
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn built_in_hover_tints_match_the_old_fixed_tints() {
+        assert_eq!(builtin(true).hover_tint, Color32::from_white_alpha(22));
+        assert_eq!(builtin(false).hover_tint, Color32::from_black_alpha(18));
+    }
+
+    #[test]
+    fn palettes_set_on_a_context_are_read_back_by_theme() {
+        let ctx = egui::Context::default();
+        assert_eq!(*of(&ctx, true), *builtin(true));
+        let mut light = *builtin(false);
+        light.accent = Color32::RED;
+        set_palettes(&ctx, builtin(true), Arc::new(light));
+        assert_eq!(of(&ctx, false).accent, Color32::RED);
+        assert_eq!(*of(&ctx, true), *builtin(true));
+    }
 }

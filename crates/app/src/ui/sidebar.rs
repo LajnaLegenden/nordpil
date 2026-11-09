@@ -170,7 +170,7 @@ fn tree_row(ui: &mut egui::Ui, row: Row<'_>) -> Response {
     let room = rect.right() - 8.0 - x;
     let label_width = kit::text_width(ui, row.label, font.clone());
     let trailing_room = (room - label_width - 12.0).max(room * 0.4);
-    let trailing_width = paint_trailing(ui, palette, &row.trailing, rect, trailing_room);
+    let trailing_width = paint_trailing(ui, &palette, &row.trailing, rect, trailing_room);
     let max_width = (rect.right() - trailing_width - x - 8.0).max(10.0);
     let mut job = egui::text::LayoutJob::simple_singleline(row.label.to_owned(), font, text_color);
     job.wrap.max_width = max_width;
@@ -265,7 +265,11 @@ fn connection(
     actions: &mut Vec<Action>,
 ) {
     let id = entry.saved.id;
-    let color = entry.saved.color.map_or(theme::palette(ui).subtle, color32);
+    let palette = theme::palette(ui);
+    let color = entry
+        .saved
+        .color
+        .map_or(palette.subtle, |color| color32(&palette, color));
     let trailing = if entry.saved.read_only {
         Trailing::ReadOnly
     } else {
@@ -527,15 +531,15 @@ fn database_node(
     }
 }
 
-pub fn color32(color: ConnectionColor) -> Color32 {
+pub fn color32(palette: &Palette, color: ConnectionColor) -> Color32 {
     match color {
-        ConnectionColor::Red => Color32::from_rgb(0xe5, 0x63, 0x6f),
-        ConnectionColor::Orange => Color32::from_rgb(0xe8, 0x96, 0x4a),
-        ConnectionColor::Yellow => Color32::from_rgb(0xe3, 0xc1, 0x5a),
-        ConnectionColor::Green => Color32::from_rgb(0x7f, 0xbf, 0x72),
-        ConnectionColor::Teal => Color32::from_rgb(0x4f, 0xb8, 0xad),
-        ConnectionColor::Blue => Color32::from_rgb(0x5b, 0x9b, 0xe0),
-        ConnectionColor::Purple => Color32::from_rgb(0xa1, 0x84, 0xd6),
-        ConnectionColor::Pink => Color32::from_rgb(0xdf, 0x79, 0xb4),
+        ConnectionColor::Red => palette.conn_red,
+        ConnectionColor::Orange => palette.conn_orange,
+        ConnectionColor::Yellow => palette.conn_yellow,
+        ConnectionColor::Green => palette.conn_green,
+        ConnectionColor::Teal => palette.conn_teal,
+        ConnectionColor::Blue => palette.conn_blue,
+        ConnectionColor::Purple => palette.conn_purple,
+        ConnectionColor::Pink => palette.conn_pink,
     }
 }

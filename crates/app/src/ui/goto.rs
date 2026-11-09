@@ -102,7 +102,7 @@ impl GotoPalette {
         }
 
         let visuals = ctx.global_style().visuals.clone();
-        let palette = theme::of(&visuals);
+        let palette = theme::of(ctx, visuals.dark_mode);
         let area = egui::Modal::default_area(egui::Id::unique("goto_palette"))
             .anchor(Align2::CENTER_TOP, vec2(0.0, 8.0));
         let modal = kit::modal(ctx, egui::Id::unique("goto_palette"))

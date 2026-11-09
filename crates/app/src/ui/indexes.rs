@@ -65,8 +65,8 @@ pub fn show(ui: &mut egui::Ui, tab: &CollectionTab, read_only: bool) -> Option<I
         }
         Some(Ok(indexes)) => indexes,
     };
-    let key_color = code_editor::color(Highlight::Key, ui.visuals());
-    let number_color = code_editor::color(Highlight::Number, ui.visuals());
+    let key_color = code_editor::color(Highlight::Key, ui);
+    let number_color = code_editor::color(Highlight::Number, ui);
     kit::card(ui).inner_margin(Margin::ZERO).show(ui, |ui| {
         ui.set_width(ui.available_width());
         egui::ScrollArea::horizontal().show(ui, |ui| {

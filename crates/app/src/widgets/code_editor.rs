@@ -645,10 +645,11 @@ fn paint_line_numbers(
 /// Monospace text colored by `spans`.
 pub fn layout_job(ui: &egui::Ui, text: &str, spans: &[Span]) -> LayoutJob {
     let font_id = TextStyle::Monospace.resolve(ui.style());
-    let visuals = ui.visuals();
+    let text_color = ui.visuals().text_color();
+    let palette = theme::palette(ui);
     let mut job = LayoutJob::default();
     let mut push = |range: Range<usize>, kind: Option<Highlight>| {
-        let color = kind.map_or(visuals.text_color(), |kind| color(kind, visuals));
+        let color = kind.map_or(text_color, |kind| theme::syntax(kind, &palette));
         let format = TextFormat::simple(font_id.clone(), color);
         job.append(&text[range], 0.0, format);
     };
@@ -673,8 +674,8 @@ pub fn layout_job(ui: &egui::Ui, text: &str, spans: &[Span]) -> LayoutJob {
     job
 }
 
-pub fn color(kind: Highlight, visuals: &egui::Visuals) -> egui::Color32 {
-    theme::syntax(kind, visuals)
+pub fn color(kind: Highlight, ui: &egui::Ui) -> egui::Color32 {
+    theme::syntax(kind, &theme::palette(ui))
 }
 
 #[cfg(test)]
