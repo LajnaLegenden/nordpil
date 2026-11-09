@@ -30,6 +30,16 @@ impl Rgba {
         Color32::from_rgba_unmultiplied(r, g, b, a)
     }
 
+    /// `#rrggbb`, or `#rrggbbaa` when not opaque.
+    pub fn hex(self) -> String {
+        let [r, g, b, a] = self.0;
+        if a == 255 {
+            format!("#{r:02x}{g:02x}{b:02x}")
+        } else {
+            format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+        }
+    }
+
     /// Reads `#rrggbb` or `#rrggbbaa`, in either case.
     pub fn parse(text: &str) -> Option<Self> {
         let digits = text.trim().strip_prefix('#')?;
@@ -42,9 +52,43 @@ impl Rgba {
     }
 }
 
+/// Where a token shows up in the theme editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    Surfaces,
+    Text,
+    Accent,
+    Status,
+    Syntax,
+    Connections,
+}
+
+impl Group {
+    pub const ALL: [Self; 6] = [
+        Self::Surfaces,
+        Self::Text,
+        Self::Accent,
+        Self::Status,
+        Self::Syntax,
+        Self::Connections,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Surfaces => "Surfaces",
+            Self::Text => "Text",
+            Self::Accent => "Accent",
+            Self::Status => "Status",
+            Self::Syntax => "Syntax",
+            Self::Connections => "Connections",
+        }
+    }
+}
+
 /// One color of a theme, as named in theme files.
 pub struct Token {
     pub key: &'static str,
+    pub group: Group,
     /// A token that is this one at another opacity. When a theme sets the
     /// parent but not this token, this one follows the parent's color.
     pub parent: Option<&'static str>,
@@ -76,6 +120,7 @@ macro_rules! tokens {
         pub const TOKENS: &[Token] = &[$(
             Token {
                 key: stringify!($field),
+                group: Group::$group,
                 parent: tokens!(@parent $($parent)?),
                 get: |colors| colors.$field,
                 set: |colors, color| colors.$field = color,
@@ -238,11 +283,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hex_parses_and_rejects_other_forms() {
-        assert_eq!(
-            Rgba::parse("#88c0d024").unwrap(),
-            Rgba([0x88, 0xc0, 0xd0, 0x24])
-        );
+    fn hex_round_trips_and_rejects_other_forms() {
+        for text in ["#88c0d0", "#88c0d024"] {
+            assert_eq!(Rgba::parse(text).unwrap().hex(), text);
+        }
         assert_eq!(
             Rgba::parse("#88C0D0").unwrap(),
             Rgba([0x88, 0xc0, 0xd0, 255])

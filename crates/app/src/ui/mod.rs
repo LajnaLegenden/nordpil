@@ -16,6 +16,7 @@ pub mod settings_dialog;
 pub mod shell;
 pub mod shortcuts_dialog;
 pub mod sidebar;
+pub mod theme_editor;
 pub mod transfer_dialog;
 
 use nordpil_backend::Password;
