@@ -24,6 +24,8 @@ pub struct Resolved {
 pub struct Entry {
     pub id: String,
     pub name: String,
+    /// `None` for built-ins.
+    pub file: Option<LoadedTheme>,
     /// The error says why the theme can't be used.
     pub resolved: Result<Resolved, String>,
     /// Lines of the file that were skipped.
@@ -31,6 +33,10 @@ pub struct Entry {
 }
 
 impl Entry {
+    pub fn builtin(&self) -> bool {
+        self.file.is_none()
+    }
+
     /// Whether this theme can be shown in dark (or light) mode.
     pub fn usable_as(&self, dark: bool) -> bool {
         self.resolved
@@ -51,6 +57,10 @@ pub struct Slot {
     pub problem: Option<String>,
 }
 
+pub fn builtin_id(dark: bool) -> &'static str {
+    if dark { NORDIC_DARK } else { NORDIC_LIGHT }
+}
+
 pub fn builtin_name(dark: bool) -> &'static str {
     if dark {
         "Nordic frost dark"
@@ -68,6 +78,7 @@ fn builtin_entry(dark: bool) -> Entry {
     Entry {
         id: id.to_owned(),
         name: builtin_name(dark).to_owned(),
+        file: None,
         resolved: Ok(Resolved { colors, dark }),
         warnings: Vec::new(),
     }
@@ -227,6 +238,7 @@ impl Themes {
             entries.push(Entry {
                 id: theme.id.clone(),
                 name,
+                file: Some(theme.clone()),
                 resolved,
                 warnings,
             });
@@ -234,8 +246,32 @@ impl Themes {
         Self { entries }
     }
 
+    /// The same themes with `theme` added or replaced, e.g. after saving it.
+    pub fn with_file(&self, theme: LoadedTheme) -> Self {
+        let mut files: Vec<LoadedTheme> = self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.file.clone())
+            .filter(|file| file.id != theme.id)
+            .collect();
+        files.push(theme);
+        files.sort_by(|a, b| a.id.cmp(&b.id));
+        Self::new(files)
+    }
+
     pub fn get(&self, id: &str) -> Option<&Entry> {
         self.entries.iter().find(|entry| entry.id == id)
+    }
+
+    fn files(&self) -> Files<'_> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let loaded = entry.file.as_ref()?;
+                let file = loaded.file.as_ref().ok().filter(|_| !reserved(&entry.id));
+                Some((entry.id.as_str(), file))
+            })
+            .collect()
     }
 
     /// The colors for the dark (or light) slot of `settings`, falling back
@@ -268,6 +304,32 @@ impl Themes {
             colors: if dark { nordic_dark() } else { nordic_light() },
             problem: Some(problem),
         }
+    }
+
+    /// Resolves an unsaved theme with this `id`, `base` and colors.
+    pub fn resolve_draft(
+        &self,
+        id: &str,
+        base: &str,
+        overrides: &[(&'static Token, Rgba)],
+    ) -> Result<Resolved, String> {
+        resolve_layer(&self.files(), id, base, overrides)
+    }
+
+    /// Whether `id` is `ancestor` or builds on it, directly or not.
+    pub fn descends_from(&self, id: &str, ancestor: &str) -> bool {
+        let files = self.files();
+        let mut current = id;
+        for _ in 0..=MAX_DEPTH {
+            if current == ancestor {
+                return true;
+            }
+            let Some(Some(file)) = files.get(current) else {
+                return false;
+            };
+            current = &file.base;
+        }
+        false
     }
 
     /// Lines saying which theme files have problems, for one notice.
@@ -388,6 +450,8 @@ mod tests {
         assert_eq!(c.side, Rgba::rgb(0x222222));
         assert_eq!(c.text, nordic_light().text);
         assert!(themes.get("c").unwrap().usable_as(false));
+        assert!(themes.descends_from("c", "a"));
+        assert!(!themes.descends_from("a", "c"));
     }
 
     #[test]
@@ -455,7 +519,7 @@ mod tests {
     fn a_file_with_a_built_in_id_is_unusable() {
         let themes = Themes::new(vec![file(NORDIC_DARK, NORDIC_LIGHT, &[])]);
         assert_eq!(colors(&themes, NORDIC_DARK), nordic_dark());
-        let file_entry = &themes.entries[2];
+        let file_entry = themes.entries.iter().find(|e| !e.builtin()).unwrap();
         assert!(
             file_entry
                 .resolved
@@ -493,17 +557,40 @@ mod tests {
     }
 
     #[test]
+    fn drafts_resolve_against_the_loaded_files_and_refuse_cycles() {
+        let themes = Themes::new(vec![
+            file("ocean", NORDIC_DARK, &[]),
+            file("deep", "ocean", &[]),
+        ]);
+        let accent = Token::find("accent").unwrap();
+        let draft = themes
+            .resolve_draft("new", "deep", &[(accent, Rgba::rgb(0xff0000))])
+            .unwrap();
+        assert!(draft.dark);
+        assert_eq!(draft.colors.accent, Rgba::rgb(0xff0000));
+        let error = themes.resolve_draft("ocean", "deep", &[]).unwrap_err();
+        assert_eq!(error, "base cycle: ocean → deep → ocean");
+    }
+
+    #[test]
+    fn replacing_a_file_updates_the_themes_built_on_it() {
+        let themes = Themes::new(vec![
+            file("ocean", NORDIC_DARK, &[("main", "#111111")]),
+            file("deep", "ocean", &[]),
+        ]);
+        let themes = themes.with_file(file("ocean", NORDIC_DARK, &[("main", "#222222")]));
+        assert_eq!(colors(&themes, "deep").main, Rgba::rgb(0x222222));
+        let themes = themes.with_file(file("new", "deep", &[]));
+        let ids: Vec<_> = themes.entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, [NORDIC_DARK, NORDIC_LIGHT, "deep", "new", "ocean"]);
+    }
+
+    #[test]
     fn built_ins_survive_a_round_trip_through_a_theme_file() {
         for (id, builtin) in [(NORDIC_DARK, nordic_dark()), (NORDIC_LIGHT, nordic_light())] {
             let all: Vec<(String, String)> = TOKENS
                 .iter()
-                .map(|token| {
-                    let [r, g, b, a] = (token.get)(&builtin).0;
-                    (
-                        token.key.to_owned(),
-                        format!("#{r:02x}{g:02x}{b:02x}{a:02x}"),
-                    )
-                })
+                .map(|token| (token.key.to_owned(), (token.get)(&builtin).hex()))
                 .collect();
             let other = if id == NORDIC_DARK {
                 NORDIC_LIGHT

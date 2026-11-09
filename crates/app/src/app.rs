@@ -7,6 +7,7 @@ use nordpil_backend::navigation::{KnownDatabase, Recent};
 use nordpil_backend::references::{DatabaseMappings, Mapping};
 use nordpil_backend::settings::{AiAgent, GotoScope, Settings};
 use nordpil_backend::store::SavedConnection;
+use nordpil_backend::themes::{LoadedTheme, ThemeSaved};
 use nordpil_backend::{
     Backend, BackendError, Bridge, Command, DatabaseInfo, ErrorKind, Outcome, Password, RequestId,
     Response,
@@ -32,6 +33,7 @@ use crate::ui::mappings_dialog::{self, MappingsDialog, Source};
 use crate::ui::settings_dialog::{self, SettingsDialog};
 use crate::ui::shell::ShellAction;
 use crate::ui::shortcuts_dialog;
+use crate::ui::theme_editor::{self, NewThemeDialog, ThemeEditor};
 use crate::ui::transfer_dialog::{self, TransferDialog};
 use crate::ui::{Action, chrome, documents, sidebar};
 use crate::update::{self, Updater};
@@ -145,6 +147,9 @@ pub struct NordpilApp {
     /// Palettes are set again on the next frame; with `true`, problems with
     /// themes show as a notice.
     restyle: Option<bool>,
+    /// While open, the app shows the edited theme.
+    theme_editor: Option<ThemeEditor>,
+    new_theme: Option<NewThemeDialog>,
     /// The F1 sheet of keyboard shortcuts.
     shortcuts_sheet: bool,
     /// Fields the user linked to collections, per database.
@@ -204,6 +209,8 @@ impl NordpilApp {
             settings_dialog: None,
             themes: theme::Themes::new(loaded),
             restyle: None,
+            theme_editor: None,
+            new_theme: None,
             shortcuts_sheet: false,
             mappings: Vec::new(),
             mappings_dialog: None,
@@ -253,8 +260,22 @@ impl NordpilApp {
     /// With `announce`, problems with theme files show as one notice.
     fn apply_themes(&mut self, ctx: &egui::Context, announce: bool) {
         theme::apply_mode(ctx, &self.settings);
-        let dark = self.themes.slot(&self.settings.themes, true);
-        let light = self.themes.slot(&self.settings.themes, false);
+        let mut dark = self.themes.slot(&self.settings.themes, true);
+        let mut light = self.themes.slot(&self.settings.themes, false);
+        // The edited theme shows in its own mode, whatever the setting.
+        if let Some(Ok(edited)) = self
+            .theme_editor
+            .as_ref()
+            .map(|editor| editor.resolved(&self.themes))
+        {
+            let slot = if edited.dark { &mut dark } else { &mut light };
+            slot.colors = edited.colors;
+            ctx.set_theme(if edited.dark {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            });
+        }
         theme::set_palettes(
             ctx,
             Arc::new(dark.colors.palette()),
@@ -1856,11 +1877,14 @@ impl NordpilApp {
             Response::Themes(result) => match result {
                 Ok(loaded) => {
                     self.themes = theme::Themes::new(loaded);
+                    if let Some(editor) = &mut self.theme_editor {
+                        editor.themes_loaded(&self.themes);
+                    }
                     self.restyle = Some(true);
                 }
                 Err(error) => self.notify(error),
             },
-            Response::ThemeSaved { .. } => {}
+            Response::ThemeSaved { id, result } => self.theme_saved(&id, result),
             Response::ScriptFinished(result) => self.script_finished(request, result),
             Response::Scripts { namespace, result } => match result {
                 Ok(scripts) => {
@@ -2744,6 +2768,11 @@ impl NordpilApp {
             let state = &self.tabs[index].aggregate;
             state.confirm.is_some() || state.explain.is_some() || state.paste.is_some()
         });
+        let theme_dialog = self.new_theme.is_some()
+            || self
+                .theme_editor
+                .as_ref()
+                .is_some_and(ThemeEditor::confirming);
         if self.form.is_some()
             || self.dialog.is_some()
             || self.document_dialog.is_some()
@@ -2753,6 +2782,7 @@ impl NordpilApp {
             || self.ask_ai.is_some()
             || write_waits
             || aggregate_dialog
+            || theme_dialog
         {
             Some(Modal::Other)
         } else if self.settings_dialog.is_some() {
@@ -2893,7 +2923,8 @@ impl NordpilApp {
             return;
         };
         let mut settings = self.settings.clone();
-        match dialog.show(ctx, &mut settings, &self.themes) {
+        let editing = self.theme_editor.is_some();
+        match dialog.show(ctx, &mut settings, &self.themes, editing) {
             settings_dialog::Outcome::Open => {}
             settings_dialog::Outcome::Close => {
                 self.settings_dialog = None;
@@ -2913,9 +2944,139 @@ impl NordpilApp {
                     settings_dialog::ThemeAction::OpenFolder => {
                         self.backend.send(Command::OpenThemesFolder);
                     }
+                    settings_dialog::ThemeAction::Edit(id) => {
+                        self.settings_dialog = None;
+                        self.edit_theme(ctx, &id);
+                    }
+                    settings_dialog::ThemeAction::New(base) => {
+                        self.settings_dialog = None;
+                        self.new_theme = Some(NewThemeDialog::new(&base));
+                    }
                 }
             }
         }
+    }
+
+    /// Opens a theme file in the editor. A built-in can't change, so it
+    /// starts a new theme on it instead.
+    fn edit_theme(&mut self, ctx: &egui::Context, id: &str) {
+        let editor = self.themes.get(id).and_then(ThemeEditor::open);
+        match editor {
+            Some(editor) => {
+                self.theme_editor = Some(editor);
+                self.apply_themes(ctx, false);
+            }
+            None => self.new_theme = Some(NewThemeDialog::new(id)),
+        }
+    }
+
+    fn show_new_theme(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.new_theme else {
+            return;
+        };
+        match dialog.show(ctx, &self.themes) {
+            theme_editor::NewOutcome::Open => {}
+            theme_editor::NewOutcome::Cancel => self.new_theme = None,
+            theme_editor::NewOutcome::Create { id, name, base } => {
+                self.new_theme = None;
+                self.theme_editor = Some(ThemeEditor::create(id, &name, &base));
+                self.apply_themes(ctx, false);
+            }
+        }
+    }
+
+    fn show_theme_editor(&mut self, ui: &mut egui::Ui) {
+        let Some(editor) = &mut self.theme_editor else {
+            return;
+        };
+        let palette = theme::palette(ui);
+        let outcome = egui::Panel::right("theme_editor")
+            .resizable(true)
+            .default_size(380.0)
+            .size_range(320.0..=560.0)
+            .show_separator_line(false)
+            .frame(
+                Frame::new()
+                    .fill(palette.side)
+                    .inner_margin(Margin::symmetric(16, 0)),
+            )
+            .show(ui, |ui| {
+                let rect = ui.max_rect().expand2(egui::vec2(16.0, 0.0));
+                ui.painter().vline(
+                    rect.left() - 0.5,
+                    rect.y_range(),
+                    Stroke::new(1.0, palette.line),
+                );
+                editor.show(ui, &self.themes)
+            })
+            .inner;
+        let ctx = ui.ctx().clone();
+        match outcome {
+            theme_editor::Outcome::Open => {}
+            theme_editor::Outcome::Changed => {
+                self.apply_themes(&ctx, false);
+                ctx.request_repaint();
+            }
+            theme_editor::Outcome::Save(write) => {
+                let file = editor.start_save();
+                self.backend.send(Command::SaveTheme {
+                    id: editor.id.clone(),
+                    file,
+                    write,
+                });
+            }
+            theme_editor::Outcome::Reload => {
+                self.backend.send(Command::LoadThemes);
+            }
+            theme_editor::Outcome::OpenFolder => {
+                self.backend.send(Command::OpenThemesFolder);
+            }
+            theme_editor::Outcome::Close => {
+                self.theme_editor = None;
+                self.apply_themes(&ctx, false);
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// A save's answer. A saved theme replaces its file in the themes at
+    /// once; a new one also becomes the theme for its mode.
+    fn theme_saved(&mut self, id: &str, result: Result<ThemeSaved, BackendError>) {
+        let Some(editor) = self.theme_editor.as_mut().filter(|editor| editor.id == id) else {
+            if let Err(error) = result {
+                self.notify(error);
+            }
+            return;
+        };
+        let was_new = editor.new;
+        let (file, close) = editor.saved(result);
+        let modified = editor.modified();
+        if let Some(file) = file {
+            self.themes = self.themes.with_file(LoadedTheme {
+                id: id.to_owned(),
+                file: Ok(file),
+                modified,
+            });
+            let dark = self
+                .themes
+                .get(id)
+                .and_then(|entry| entry.resolved.as_ref().ok())
+                .map(|r| r.dark);
+            if was_new && let Some(dark) = dark {
+                let mut settings = self.settings.clone();
+                if dark {
+                    id.clone_into(&mut settings.themes.dark);
+                } else {
+                    id.clone_into(&mut settings.themes.light);
+                }
+                self.backend.send(Command::SaveSettings(settings.clone()));
+                self.settings = settings;
+            }
+        }
+        if close {
+            self.theme_editor = None;
+        }
+        self.restyle = Some(false);
     }
 
     /// Applies the backend results that arrived since the last frame.
@@ -2987,6 +3148,7 @@ impl NordpilApp {
                     &mut actions,
                 );
             });
+        self.show_theme_editor(ui);
         self.show_update(ui);
         self.show_notifications(ui);
         egui::CentralPanel::no_frame()
@@ -3011,6 +3173,7 @@ impl NordpilApp {
             self.dialog = None;
         }
         self.show_settings(&ctx);
+        self.show_new_theme(&ctx);
         if self.shortcuts_sheet {
             self.shortcuts_sheet = shortcuts_dialog::show(&ctx);
         }
@@ -3065,7 +3228,11 @@ mod tests {
     use super::*;
 
     fn harness() -> Harness<'static, NordpilApp> {
-        let dir = std::env::temp_dir().join(format!("nordpil-ui-{}", Uuid::new_v4()));
+        harness_in(&std::env::temp_dir().join(format!("nordpil-ui-{}", Uuid::new_v4())))
+    }
+
+    /// With the config files, themes among them, in `dir`.
+    fn harness_in(dir: &std::path::Path) -> Harness<'static, NordpilApp> {
         let store = ConnectionStore::new(dir.join("connections.toml"));
         let backend = Backend::new(store, MemorySecrets::default());
         let app = NordpilApp::new(&egui::Context::default(), backend).unwrap();
@@ -4231,6 +4398,143 @@ fi"#,
         harness.run();
         assert!(harness.state().ask_ai.is_none());
     }
+
+    fn theme_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("nordpil-ui-{}", Uuid::new_v4()))
+    }
+
+    /// Starts a new theme on the built-in dark theme through Settings.
+    fn start_dark_theme(harness: &mut Harness<'_, NordpilApp>, name: &str) {
+        harness.state_mut().settings_dialog = Some(SettingsDialog::default());
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Edit dark theme")
+            .click();
+        harness.run();
+        assert!(harness.state().settings_dialog.is_none());
+        type_into(harness, "Name", name);
+        harness
+            .get_by_role_and_label(Role::Button, "Create")
+            .click();
+        harness.run();
+        assert!(harness.state().theme_editor.is_some());
+    }
+
+    fn wait_for_label(harness: &mut Harness<'_, NordpilApp>, text: &str, present: bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while harness.query_by_label_contains(text).is_some() != present {
+            assert!(Instant::now() < deadline, "waited for {text:?} = {present}");
+            std::thread::sleep(Duration::from_millis(20));
+            harness.step();
+        }
+        harness.run();
+    }
+
+    #[test]
+    fn a_new_theme_is_saved_and_becomes_the_theme_for_its_mode() {
+        let dir = theme_dir();
+        let mut harness = harness_in(&dir);
+        start_dark_theme(&mut harness, "Deep Sea");
+        assert_eq!(
+            harness.state().theme_editor.as_ref().unwrap().id,
+            "deep-sea"
+        );
+
+        harness.get_by_role_and_label(Role::Button, "Save").click();
+        run_until(&mut harness, |app| {
+            app.theme_editor.as_ref().is_some_and(|editor| !editor.new)
+        });
+
+        let text = std::fs::read_to_string(dir.join("themes/deep-sea.toml")).unwrap();
+        assert!(text.contains("name = \"Deep Sea\""), "{text}");
+        assert!(text.contains("base = \"nordic-dark\""), "{text}");
+        assert_eq!(harness.state().settings.themes.dark, "deep-sea");
+        assert!(harness.state().themes.get("deep-sea").is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn edited_colors_show_at_once_and_revert_restores_them() {
+        let mut harness = harness();
+        start_dark_theme(&mut harness, "Red");
+        let builtin = theme::nordic_dark();
+
+        type_into(&mut harness, "accent", "#ff0000");
+        let red = theme::Rgba::rgb(0xff0000);
+        let palette = theme::of(&harness.ctx, true);
+        assert_eq!(palette.accent, red.color32());
+        assert_eq!(
+            palette.accent_soft,
+            red.with_alpha(builtin.accent_soft.alpha()).color32()
+        );
+        assert!(harness.ctx.global_style().visuals.dark_mode);
+
+        harness
+            .get_by_role_and_label(Role::Button, "Revert")
+            .click();
+        harness.run();
+        assert_eq!(*theme::of(&harness.ctx, true), builtin.palette());
+    }
+
+    #[test]
+    fn saving_writes_only_the_colors_the_theme_sets() {
+        let dir = theme_dir();
+        let mut harness = harness_in(&dir);
+        start_dark_theme(&mut harness, "Red");
+        type_into(&mut harness, "accent", "#ff0000");
+        harness.get_by_role_and_label(Role::Button, "Save").click();
+        run_until(&mut harness, |app| {
+            app.theme_editor.as_ref().is_some_and(|editor| !editor.new)
+        });
+
+        let text = std::fs::read_to_string(dir.join("themes/red.toml")).unwrap();
+        assert!(text.contains("[colors]\naccent = \"#ff0000\"\n"), "{text}");
+        assert_eq!(text.matches(" = \"#").count(), 1, "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reloading_a_changed_file_over_unsaved_edits_asks_which_to_keep() {
+        let dir = theme_dir();
+        let path = dir.join("themes/ocean.toml");
+        std::fs::create_dir_all(dir.join("themes")).unwrap();
+        std::fs::write(&path, "name = \"Ocean\"\nbase = \"nordic-dark\"\n").unwrap();
+        let mut harness = harness_in(&dir);
+        harness.state_mut().settings.themes.dark = "ocean".to_owned();
+        harness.state_mut().settings_dialog = Some(SettingsDialog::default());
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Edit dark theme")
+            .click();
+        harness.run();
+        assert_eq!(harness.state().theme_editor.as_ref().unwrap().id, "ocean");
+        type_into(&mut harness, "accent", "#ff0000");
+
+        std::fs::write(&path, "name = \"Ocean\"\nbase = \"nordic-light\"\n").unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        harness
+            .get_by_role_and_label(Role::Button, "Reload themes")
+            .click();
+        wait_for_label(&mut harness, "changed on disk", true);
+        harness.get_by_role_and_label(Role::Button, "Keep mine");
+        assert_eq!(
+            theme::of(&harness.ctx, true).accent,
+            theme::Rgba::rgb(0xff0000).color32()
+        );
+
+        harness
+            .get_by_role_and_label(Role::Button, "Reload")
+            .click();
+        wait_for_label(&mut harness, "changed on disk", false);
+        assert!(!harness.ctx.global_style().visuals.dark_mode);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[cfg(all(test, feature = "screenshots"))]
@@ -4482,6 +4786,53 @@ mod screenshots {
         save(&mut harness, "settings-ai");
         harness.state_mut().settings.ai.agent = AiAgent::Off;
         harness.key_press(egui::Key::Escape);
+        harness.run();
+
+        harness.state_mut().new_theme = Some(NewThemeDialog::new("nordic-dark"));
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::TextInput, "Name")
+            .type_text("Fjord");
+        harness.run();
+        save(&mut harness, "new-theme");
+        harness
+            .get_by_role_and_label(Role::Button, "Create")
+            .click();
+        harness.run();
+        for (token, color) in [
+            ("app", "#0b1218"),
+            ("side", "#0e171f"),
+            ("main", "#121d27"),
+            ("surface", "#172530"),
+            ("raised", "#1d2d3a"),
+            ("accent", "#e0a35b"),
+            ("accent_ink", "#1d1206"),
+            ("accent_text", "#f0c48f"),
+            ("syntax_key", "#8fb8d0"),
+        ] {
+            harness
+                .get_by_role_and_label(Role::TextInput, token)
+                .focus();
+            harness.run();
+            harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+            harness
+                .get_by_role_and_label(Role::TextInput, token)
+                .type_text(color);
+            harness.run();
+        }
+        harness
+            .get_by_role_and_label(Role::TextInput, "Name")
+            .focus();
+        harness.run();
+        save(&mut harness, "theme-editor");
+        harness
+            .get_by_role_and_label(Role::Button, "Close theme editor")
+            .click();
+        harness.run();
+        save(&mut harness, "theme-editor-close");
+        harness
+            .get_by_role_and_label(Role::Button, "Discard")
+            .click();
         harness.run();
 
         harness.key_press(egui::Key::F1);

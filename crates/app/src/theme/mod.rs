@@ -14,8 +14,8 @@ use nordpil_query::Highlight;
 mod palette;
 mod resolve;
 
-pub use palette::{Palette, nordic_dark, nordic_light};
-pub use resolve::{Themes, builtin_name};
+pub use palette::{Colors, Group, Palette, Rgba, TOKENS, Token, nordic_dark, nordic_light};
+pub use resolve::{Entry, Resolved, Themes, builtin_id, builtin_name, overrides};
 
 static DARK: LazyLock<Arc<Palette>> = LazyLock::new(|| Arc::new(nordic_dark().palette()));
 static LIGHT: LazyLock<Arc<Palette>> = LazyLock::new(|| Arc::new(nordic_light().palette()));

@@ -66,6 +66,10 @@ pub enum Outcome {
 /// A theme button the app acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThemeAction {
+    /// Opens the theme in the editor; a built-in starts a new theme on it.
+    Edit(String),
+    /// Starts a new theme on this base.
+    New(String),
     Reload,
     OpenFolder,
 }
@@ -76,6 +80,7 @@ impl SettingsDialog {
         ctx: &egui::Context,
         settings: &mut Settings,
         themes: &Themes,
+        editing: bool,
     ) -> Outcome {
         let before = settings.clone();
         let mut outcome = Outcome::Open;
@@ -97,16 +102,27 @@ impl SettingsDialog {
                         .min_col_width(160.0);
                     grid.show(ui, |ui| {
                         described(ui, "Theme", "System follows your OS");
-                        kit::segmented(
-                            ui,
-                            &mut settings.themes.mode,
-                            &[
-                                (ThemeMode::System, None, "System"),
-                                (ThemeMode::Dark, None, "Dark"),
-                                (ThemeMode::Light, None, "Light"),
-                            ],
-                            38.0,
-                        );
+                        ui.vertical(|ui| {
+                            ui.add_enabled_ui(!editing, |ui| {
+                                kit::segmented(
+                                    ui,
+                                    &mut settings.themes.mode,
+                                    &[
+                                        (ThemeMode::System, None, "System"),
+                                        (ThemeMode::Dark, None, "Dark"),
+                                        (ThemeMode::Light, None, "Light"),
+                                    ],
+                                    38.0,
+                                );
+                            });
+                            if editing {
+                                ui.label(
+                                    RichText::new("Close the theme editor to change themes.")
+                                        .size(12.5)
+                                        .color(theme::palette(ui).warn),
+                                );
+                            }
+                        });
                         ui.end_row();
 
                         for dark in [true, false] {
@@ -117,7 +133,11 @@ impl SettingsDialog {
                             }
                             ui.vertical(|ui| {
                                 ui.set_width(330.0);
-                                theme_picker(ui, settings, themes, dark);
+                                ui.add_enabled_ui(!editing, |ui| {
+                                    if let Some(picked) = theme_picker(ui, settings, themes, dark) {
+                                        action = Some(picked);
+                                    }
+                                });
                             });
                             ui.end_row();
                         }
@@ -127,23 +147,32 @@ impl SettingsDialog {
                             ui.set_width(330.0);
                             ui.horizontal(|ui| {
                                 let height = 32.0;
-                                if kit::button(
-                                    ui,
-                                    Tone::Secondary,
-                                    Some(icons::REFRESH),
-                                    "Reload",
-                                    height,
-                                )
-                                .on_hover_text("Reads the theme files again")
-                                .clicked()
+                                let new = ui.add_enabled_ui(!editing, |ui| {
+                                    kit::button(
+                                        ui,
+                                        Tone::Secondary,
+                                        Some(icons::PLUS),
+                                        "New theme",
+                                        height,
+                                    )
+                                });
+                                if new.inner.clicked() {
+                                    let base = if ui.visuals().dark_mode {
+                                        &settings.themes.dark
+                                    } else {
+                                        &settings.themes.light
+                                    };
+                                    action = Some(ThemeAction::New(base.clone()));
+                                }
+                                if kit::icon_button(ui, icons::REFRESH, "Reload themes", height)
+                                    .clicked()
                                 {
                                     action = Some(ThemeAction::Reload);
                                 }
-                                if kit::button(
+                                if kit::icon_button(
                                     ui,
-                                    Tone::Secondary,
-                                    Some(icons::FOLDER_OPEN),
-                                    "Open folder",
+                                    icons::FOLDER_OPEN,
+                                    "Open themes folder",
                                     height,
                                 )
                                 .clicked()
@@ -391,9 +420,15 @@ fn ai_settings(ui: &mut egui::Ui, ai: &mut AiSettings, draft: &mut AiDraft) -> b
     lost_focus
 }
 
-/// The dark or light slot's theme, from the themes usable in that mode.
-/// Themes that can't be used are listed greyed out, with their error.
-fn theme_picker(ui: &mut egui::Ui, settings: &mut Settings, themes: &Themes, dark: bool) {
+/// The dark or light slot's theme, from the themes usable in that mode,
+/// and a button to edit it. Themes that can't be used are listed greyed
+/// out, with their error.
+fn theme_picker(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    themes: &Themes,
+    dark: bool,
+) -> Option<ThemeAction> {
     let palette = theme::palette(ui);
     let slot = themes.slot(&settings.themes, dark);
     let selected = if dark {
@@ -407,38 +442,59 @@ fn theme_picker(ui: &mut egui::Ui, settings: &mut Settings, themes: &Themes, dar
         |entry| entry.name.clone(),
     );
     let label = if dark { "Dark theme" } else { "Light theme" };
-    let combo = egui::ComboBox::from_id_salt(label)
-        .width(ui.available_width())
-        .selected_text(text)
-        .show_ui(ui, |ui| {
-            for entry in themes.entries.iter().filter(|entry| entry.usable_as(dark)) {
-                let mut name = entry.name.clone();
-                if !entry.warnings.is_empty() {
-                    name.push_str(&format!(" ({} warnings)", entry.warnings.len()));
+    let mut action = None;
+    let edit_width = kit::button_width(ui, Tone::Secondary, Some(icons::PENCIL), "Edit");
+    let combo_width = ui.available_width() - edit_width - ui.spacing().item_spacing.x;
+    ui.horizontal(|ui| {
+        let combo = egui::ComboBox::from_id_salt(label)
+            .width(combo_width)
+            .selected_text(text)
+            .show_ui(ui, |ui| {
+                for entry in themes.entries.iter().filter(|entry| entry.usable_as(dark)) {
+                    let mut name = entry.name.clone();
+                    if !entry.warnings.is_empty() {
+                        name.push_str(&format!(" ({} warnings)", entry.warnings.len()));
+                    }
+                    ui.selectable_value(selected, entry.id.clone(), name);
                 }
-                ui.selectable_value(selected, entry.id.clone(), name);
-            }
-            let broken: Vec<_> = themes
-                .entries
-                .iter()
-                .filter(|entry| entry.resolved.is_err())
-                .collect();
-            if !broken.is_empty() {
-                ui.separator();
-                ui.label(RichText::new("Can't be used").size(12.0).weak());
-                for entry in broken {
-                    let error = entry.resolved.as_ref().err().cloned().unwrap_or_default();
-                    ui.add_enabled(
-                        false,
-                        egui::Button::selectable(false, format!("{}.toml", entry.id)),
-                    )
-                    .on_disabled_hover_text(error);
+                let broken: Vec<_> = themes
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.resolved.is_err())
+                    .collect();
+                if !broken.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new("Can't be used").size(12.0).weak());
+                    for entry in broken {
+                        let error = entry.resolved.as_ref().err().cloned().unwrap_or_default();
+                        ui.add_enabled(
+                            false,
+                            egui::Button::selectable(false, format!("{}.toml", entry.id)),
+                        )
+                        .on_disabled_hover_text(error);
+                    }
                 }
-            }
-        });
-    combo
-        .response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, label));
+            });
+        combo
+            .response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, label));
+        let builtin = current.is_none_or(theme::Entry::builtin);
+        let hint = if builtin {
+            "Built-in themes don't change; this starts a new theme based on it"
+        } else {
+            "Opens the theme editor"
+        };
+        let edit = kit::button(ui, Tone::Secondary, Some(icons::PENCIL), "Edit", 32.0);
+        let edit_label = format!("Edit {}", label.to_lowercase());
+        edit.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &edit_label));
+        if edit.on_hover_text(hint).clicked() {
+            let id = current.map_or_else(
+                || theme::builtin_id(dark).to_owned(),
+                |entry| entry.id.clone(),
+            );
+            action = Some(ThemeAction::Edit(id));
+        }
+    });
     let note = |ui: &mut egui::Ui, icon: &str, text: String, color: egui::Color32| {
         ui.add(
             egui::Label::new(
@@ -461,6 +517,7 @@ fn theme_picker(ui: &mut egui::Ui, settings: &mut Settings, themes: &Themes, dar
         note(ui, icons::TRIANGLE_ALERT, text, palette.warn)
             .on_hover_text(entry.warnings.join("\n"));
     }
+    action
 }
 
 fn described(ui: &mut egui::Ui, title: &str, description: &str) {
