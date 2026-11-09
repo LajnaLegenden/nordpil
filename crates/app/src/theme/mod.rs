@@ -94,8 +94,8 @@ pub fn set_palettes(ctx: &egui::Context, dark: Arc<Palette>, light: Arc<Palette>
 
 /// Applies the theme and text size settings.
 pub fn apply_settings(ctx: &egui::Context, settings: &Settings) {
-    use nordpil_backend::settings::Theme as Setting;
-    ctx.set_theme(match settings.theme {
+    use nordpil_backend::settings::ThemeMode as Setting;
+    ctx.set_theme(match settings.themes.mode {
         Setting::System => ThemePreference::System,
         Setting::Dark => ThemePreference::Dark,
         Setting::Light => ThemePreference::Light,
