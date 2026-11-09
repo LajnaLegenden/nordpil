@@ -8,14 +8,34 @@ use crate::{Backend, BackendError, toml_file};
 
 const FILE_VERSION: u32 = 1;
 
+/// Whether the window is dark or light.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Theme {
+pub enum ThemeMode {
     /// Follows the operating system.
     #[default]
     System,
     Dark,
     Light,
+}
+
+/// The mode and the theme used for each of dark and light, by theme id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemeSettings {
+    pub mode: ThemeMode,
+    pub dark: String,
+    pub light: String,
+}
+
+impl Default for ThemeSettings {
+    fn default() -> Self {
+        Self {
+            mode: ThemeMode::System,
+            dark: crate::themes::NORDIC_DARK.to_owned(),
+            light: crate::themes::NORDIC_LIGHT.to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,7 +229,7 @@ impl Default for AiSettings {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub theme: Theme,
+    pub themes: ThemeSettings,
     pub text_size: TextSize,
     pub goto_scope: GotoScope,
     /// Right-clicking an id field like `userId` offers to open the document
@@ -226,6 +246,9 @@ pub struct Settings {
 #[derive(Serialize, Deserialize)]
 struct SettingsFile {
     version: u32,
+    /// Before custom themes, only the mode was stored, as `theme`.
+    #[serde(default, skip_serializing)]
+    theme: Option<ThemeMode>,
     #[serde(flatten)]
     settings: Settings,
 }
@@ -238,12 +261,17 @@ fn load(path: &Path) -> Result<Settings, BackendError> {
     if file.version > FILE_VERSION {
         return Err(toml_file::newer_version_error(path));
     }
-    Ok(file.settings)
+    let mut settings = file.settings;
+    if let Some(mode) = file.theme {
+        settings.themes.mode = mode;
+    }
+    Ok(settings)
 }
 
 fn save(path: &Path, settings: Settings) -> Result<(), BackendError> {
     let file = SettingsFile {
         version: FILE_VERSION,
+        theme: None,
         settings,
     };
     toml_file::write(path, &file)
@@ -275,7 +303,11 @@ mod tests {
         assert_eq!(load(&path).unwrap(), Settings::default());
 
         let settings = Settings {
-            theme: Theme::Light,
+            themes: ThemeSettings {
+                mode: ThemeMode::Light,
+                dark: "ocean".to_owned(),
+                light: "paper".to_owned(),
+            },
             text_size: TextSize::Large,
             goto_scope: GotoScope::OpenOnly,
             look_up_references: true,
@@ -308,6 +340,11 @@ mod tests {
 
         assert_eq!(load(&path).unwrap(), settings);
         let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("[themes]\nmode = \"light\"\ndark = \"ocean\""),
+            "{text}"
+        );
+        assert!(!text.contains("theme ="), "{text}");
         assert!(text.contains("goto_scope = \"open-only\""), "{text}");
         assert!(text.contains("look_up_references = true"), "{text}");
         assert!(text.contains("updates = \"notify\""), "{text}");
@@ -326,12 +363,40 @@ mod tests {
         std::fs::write(&path, "version = 1\ntheme = \"dark\"\n").unwrap();
 
         let settings = load(&path).unwrap();
-        assert_eq!(settings.theme, Theme::Dark);
+        assert_eq!(settings.themes.mode, ThemeMode::Dark);
+        assert_eq!(settings.themes.dark, "nordic-dark");
+        assert_eq!(settings.themes.light, "nordic-light");
         assert_eq!(settings.last_panel, Panel::Documents);
         assert_eq!(settings.shell, ShellLayout::default());
         assert_eq!(settings.aggregate, AggregateSettings::default());
         assert_eq!(settings.ai, AiSettings::default());
         assert_eq!(settings.ai.agent, AiAgent::Off);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_old_theme_key_becomes_the_mode() {
+        let dir = std::env::temp_dir().join(format!("nordpil-test-{}", Uuid::new_v4()));
+        let path = dir.join("config.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            "version = 1\ntheme = \"light\"\ntext_size = \"large\"\n",
+        )
+        .unwrap();
+
+        let settings = load(&path).unwrap();
+        let expected = ThemeSettings {
+            mode: ThemeMode::Light,
+            ..ThemeSettings::default()
+        };
+        assert_eq!(settings.themes, expected);
+        assert_eq!(settings.text_size, TextSize::Large);
+
+        save(&path, settings.clone()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("theme ="), "{text}");
+        assert_eq!(load(&path).unwrap(), settings);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

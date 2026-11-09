@@ -18,6 +18,7 @@ pub mod secrets;
 pub mod settings;
 mod shell;
 pub mod store;
+pub mod themes;
 mod toml_file;
 pub mod transfer;
 pub mod uri;
@@ -185,6 +186,14 @@ pub enum Command {
     Export(Box<transfer::ExportJob>),
     Import(Box<transfer::ImportJob>),
     SaveSettings(Settings),
+    /// Reads every theme file again.
+    LoadThemes,
+    SaveTheme {
+        id: String,
+        file: themes::ThemeFile,
+        write: themes::ThemeWrite,
+    },
+    OpenThemesFolder,
     /// Recent collections and remembered collection names, for Ctrl+K.
     LoadNavigation,
     /// Replaces the recent collections, newest first.
@@ -365,6 +374,11 @@ pub enum Response {
     },
     /// After a command that only writes a file, such as saving settings.
     Stored(Result<(), BackendError>),
+    Themes(Result<Vec<themes::LoadedTheme>, BackendError>),
+    ThemeSaved {
+        id: String,
+        result: Result<themes::ThemeSaved, BackendError>,
+    },
     ScriptFinished(Result<nordpil_shell::Outcome, BackendError>),
     /// The collection's scripts after a script command.
     Scripts {
@@ -401,6 +415,7 @@ pub struct Backend {
     scripts: Arc<tokio::sync::Mutex<ScriptStore>>,
     pipelines: Arc<tokio::sync::Mutex<PipelineStore>>,
     settings_path: std::path::PathBuf,
+    themes_dir: std::path::PathBuf,
     secrets: Arc<dyn SecretStore>,
     sessions: Mutex<HashMap<Uuid, Session>>,
     cursors: aggregation::Cursors,
@@ -417,6 +432,7 @@ impl Backend {
         let scripts = ScriptStore::new(dir.join("scripts.toml"));
         let pipelines = PipelineStore::new(dir.join("pipelines.toml"));
         let settings_path = store.path().with_file_name("config.toml");
+        let themes_dir = dir.join("themes");
         Self {
             store: Arc::new(tokio::sync::Mutex::new(store)),
             queries: Arc::new(tokio::sync::Mutex::new(queries)),
@@ -425,6 +441,7 @@ impl Backend {
             scripts: Arc::new(tokio::sync::Mutex::new(scripts)),
             pipelines: Arc::new(tokio::sync::Mutex::new(pipelines)),
             settings_path,
+            themes_dir,
             secrets: Arc::new(secrets),
             sessions: Mutex::default(),
             cursors: aggregation::Cursors::default(),
@@ -675,6 +692,12 @@ impl Handler for Backend {
                 }
             }
             Command::SaveSettings(settings) => Response::Stored(self.save_settings(settings).await),
+            Command::LoadThemes => Response::Themes(self.reload_themes().await),
+            Command::SaveTheme { id, file, write } => Response::ThemeSaved {
+                result: self.save_theme(id.clone(), file, write).await,
+                id,
+            },
+            Command::OpenThemesFolder => Response::Stored(self.open_themes_folder().await),
             Command::LoadNavigation => Response::Navigation(self.load_navigation().await),
             Command::SaveRecents(recents) => Response::Stored(self.save_recents(recents).await),
             Command::IndexCollections {

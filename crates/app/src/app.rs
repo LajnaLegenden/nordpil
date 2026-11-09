@@ -1812,6 +1812,7 @@ impl NordpilApp {
                     self.notify(error);
                 }
             }
+            Response::Themes(_) | Response::ThemeSaved { .. } => {}
             Response::ScriptFinished(result) => self.script_finished(request, result),
             Response::Scripts { namespace, result } => match result {
                 Ok(scripts) => {

@@ -3,7 +3,7 @@
 
 use eframe::egui::{self, CornerRadius, Frame, Margin, RichText, Stroke};
 use nordpil_backend::settings::{
-    AiAgent, AiSettings, GotoScope, Settings, TextSize, Theme, Updates,
+    AiAgent, AiSettings, GotoScope, Settings, TextSize, ThemeMode, Updates,
 };
 
 use crate::theme;
@@ -84,11 +84,11 @@ impl SettingsDialog {
                         described(ui, "Theme", "System follows your OS");
                         kit::segmented(
                             ui,
-                            &mut settings.theme,
+                            &mut settings.themes.mode,
                             &[
-                                (Theme::System, None, "System"),
-                                (Theme::Dark, None, "Dark"),
-                                (Theme::Light, None, "Light"),
+                                (ThemeMode::System, None, "System"),
+                                (ThemeMode::Dark, None, "Dark"),
+                                (ThemeMode::Light, None, "Light"),
                             ],
                             38.0,
                         );
