@@ -205,7 +205,7 @@ pub fn tab_bar(ui: &mut Ui, titles: &[TabTitle], active: Option<usize>) -> Optio
                         Align2::LEFT_CENTER,
                         icons::LAYERS,
                         FontId::proportional(15.0),
-                        tab_icon_color(palette, *color, selected),
+                        tab_icon_color(&palette, *color, selected),
                     );
                     let mut job = egui::text::LayoutJob::default();
                     job.append(
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn tab_icons_take_the_connection_color_dimmed_when_inactive() {
-        let palette = theme::of(&egui::Visuals::dark());
+        let palette = &*theme::builtin(true);
         let red = Color32::from_rgb(0xe5, 0x63, 0x6f);
 
         assert_eq!(tab_icon_color(palette, Some(red), true), red);

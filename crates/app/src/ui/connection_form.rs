@@ -401,10 +401,14 @@ impl ConnectionForm {
                 let (rect, response) =
                     ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::click());
                 let center = rect.center();
-                ui.painter().circle_filled(center, 10.0, color32(color));
+                ui.painter()
+                    .circle_filled(center, 10.0, color32(&palette, color));
                 if selected {
-                    ui.painter()
-                        .circle_stroke(center, 13.0, Stroke::new(2.0, color32(color)));
+                    ui.painter().circle_stroke(
+                        center,
+                        13.0,
+                        Stroke::new(2.0, color32(&palette, color)),
+                    );
                 } else if response.hovered() {
                     ui.painter()
                         .circle_stroke(center, 13.0, Stroke::new(1.0, palette.line_strong));

@@ -64,7 +64,7 @@ pub fn button(ui: &mut Ui, tone: Tone, icon: Option<&str>, label: &str, height: 
     };
     let response = ui.add(button);
     if matches!(tone, Tone::Primary | Tone::Danger) && response.hovered() && ui.is_enabled() {
-        hover_tint(ui, &response, palette);
+        hover_tint(ui, &response, &palette);
     }
     let enabled = ui.is_enabled();
     response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, label));
@@ -175,14 +175,8 @@ pub fn dialog_width(ui: &mut Ui, width: f32) {
 }
 
 fn hover_tint(ui: &Ui, response: &Response, palette: &Palette) {
-    let tint = if ui.visuals().dark_mode {
-        Color32::from_white_alpha(22)
-    } else {
-        Color32::from_black_alpha(18)
-    };
-    let _ = palette;
     ui.painter()
-        .rect_filled(response.rect, CornerRadius::same(9), tint);
+        .rect_filled(response.rect, CornerRadius::same(9), palette.hover_tint);
 }
 
 /// A row of mutually exclusive options in a sunken track, e.g. List, JSON,
@@ -385,7 +379,7 @@ pub fn divider(ui: &mut Ui, height: f32) {
 /// A dialog over a dimmed window, framed like the design's dialogs.
 pub fn modal(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
     let visuals = &ctx.global_style().visuals;
-    let palette = theme::of(visuals);
+    let palette = theme::of(ctx, visuals.dark_mode);
     egui::Modal::new(id).backdrop_color(palette.scrim).frame(
         Frame::new()
             .fill(palette.surface)

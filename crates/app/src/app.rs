@@ -466,7 +466,7 @@ impl NordpilApp {
 
     /// What Ctrl+K can open: the collections of open connections, and with
     /// [`GotoScope::AllSaved`], the remembered and recent ones of the rest.
-    fn goto_candidates(&self) -> Vec<goto::Candidate> {
+    fn goto_candidates(&self, palette: &theme::Palette) -> Vec<goto::Candidate> {
         let all_saved = self.settings.goto_scope == GotoScope::AllSaved;
         let mut candidates = Vec::new();
         for entry in &self.connections {
@@ -474,7 +474,7 @@ impl NordpilApp {
             let color = entry
                 .saved
                 .color
-                .map_or(theme::of(&egui::Visuals::dark()).subtle, sidebar::color32);
+                .map_or(palette.subtle, |color| sidebar::color32(palette, color));
             let mut push = |database: &str, collection: &str, kind, connected| {
                 let target = Selection {
                     connection: id,
@@ -2492,7 +2492,7 @@ impl NordpilApp {
                 color: self
                     .entry(tab.target.connection)
                     .and_then(|entry| entry.saved.color)
-                    .map(sidebar::color32),
+                    .map(|color| sidebar::color32(&palette, color)),
             })
             .collect();
         let bar = ui
@@ -2817,7 +2817,7 @@ impl NordpilApp {
         if self.goto.is_none() {
             return;
         }
-        let candidates = self.goto_candidates();
+        let candidates = self.goto_candidates(&theme::current(ctx));
         let searches_closed = self.settings.goto_scope == GotoScope::AllSaved;
         let current = self.selection().cloned();
         let Some(goto) = self.goto.as_mut() else {

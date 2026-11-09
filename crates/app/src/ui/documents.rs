@@ -1128,7 +1128,7 @@ fn field(
 }
 
 fn key_text(ui: &egui::Ui, key: &str) -> RichText {
-    let color = code_editor::color(Highlight::Key, ui.visuals());
+    let color = code_editor::color(Highlight::Key, ui);
     RichText::new(format!("{key}:")).monospace().color(color)
 }
 
@@ -1139,7 +1139,7 @@ fn mono(text: impl Into<String>) -> RichText {
 
 fn value_label(ui: &mut egui::Ui, value: &Bson, sense: Sense) -> egui::Response {
     let text = mono(format_value(value, Style::Compact))
-        .color(code_editor::color(value_highlight(value), ui.visuals()));
+        .color(code_editor::color(value_highlight(value), ui));
     let label = Label::new(text).truncate().sense(sense);
     // A label that can't be clicked must not select text either, so clicks
     // reach what is under it.
