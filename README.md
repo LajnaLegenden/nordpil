@@ -22,7 +22,8 @@ when idle, against roughly 1 GB for Compass.
   and operators such as `$in` insert their brackets. Ctrl+L focuses the filter. Project,
   sort, collation, hint, skip, limit and max time. A slow query has a Stop button,
   which ends it on the server too. Query history and favorites per collection.
-- **View**: list, JSON and table views with paging and counts.
+- **View**: list, JSON and table views with paging and counts. Right-click a field to add
+  it to the filter (an array as is or with `$in`) or copy its value, objects and arrays included.
 - **Edit**: insert, edit, clone and delete documents. Edits save only the changed fields
   and refuse to overwrite a document that changed since it was loaded. Bulk update and
   delete show how many documents match first.
