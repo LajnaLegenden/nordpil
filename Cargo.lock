@@ -3524,7 +3524,7 @@ dependencies = [
 
 [[package]]
 name = "nordpil"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bson",
  "crossbeam-channel",
@@ -3552,7 +3552,7 @@ dependencies = [
 
 [[package]]
 name = "nordpil-backend"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bson",
  "crossbeam-channel",
@@ -3579,7 +3579,7 @@ dependencies = [
 
 [[package]]
 name = "nordpil-query"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64 0.23.1",
  "bson",
@@ -3589,7 +3589,7 @@ dependencies = [
 
 [[package]]
 name = "nordpil-shell"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bson",
  "nordpil-query",
