@@ -206,21 +206,6 @@ struct Menus<'a> {
     references: Option<&'a References>,
 }
 
-impl Menus<'_> {
-    /// Whether an object or array at `place` gets a menu; values always
-    /// have one, with "Copy value".
-    fn offers(&self, place: &Place, value: &Bson) -> bool {
-        match (self.kind, self.references) {
-            // An array of ids can be looked up or linked; an object can't.
-            (FieldMenus::All, Some(_)) => matches!(value, Bson::Array(_)),
-            (FieldMenus::Lookups | FieldMenus::Pipeline, Some(references)) => {
-                matches!(value, Bson::Array(_)) && !lookups(place, value, references).is_empty()
-            }
-            _ => false,
-        }
-    }
-}
-
 /// Add to filter, exclude from filter, lookups and linking for a
 /// right-clicked value, as far as `menus` allows. Returns true when it
 /// showed anything.
@@ -976,10 +961,13 @@ fn document_menu(
     action: &mut Option<TabAction>,
 ) {
     response.context_menu(|ui| {
-        if let Some((place, value, menus)) = field
-            && field_menu(ui, place, value, menus, action)
-        {
-            ui.separator();
+        if let Some((place, value, menus)) = field {
+            if field_menu(ui, place, value, menus, action) {
+                ui.separator();
+            }
+            if ui.button("Copy value").clicked() {
+                ui.ctx().copy_text(copy_text(value));
+            }
         }
         if ui.button("Copy document").clicked() {
             ui.ctx()
@@ -1074,13 +1062,14 @@ fn field(
                 .italics()
                 .color(palette.subtle),
         );
-        // Objects and arrays can't go into the filter, but an array of ids
-        // can be looked up or linked.
-        if menus.offers(place, value) {
-            (label.clone() | summary).context_menu(|ui| {
-                field_menu(ui, place, value, menus, action);
-            });
-        }
+        (label.clone() | summary).context_menu(|ui| {
+            if field_menu(ui, place, value, menus, action) {
+                ui.separator();
+            }
+            if ui.button("Copy value").clicked() {
+                ui.ctx().copy_text(copy_text(value));
+            }
+        });
         chevron.clicked() || label.clicked()
     });
     if header.inner {
@@ -1584,6 +1573,48 @@ mod tests {
             harness.state().inputs.filter,
             "{ age: { $gt: 3 }, status: 'done' }"
         );
+    }
+
+    #[test]
+    fn right_click_copies_a_whole_object() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable as _;
+
+        let mut tab = CollectionTab::new(
+            1,
+            crate::connections::Selection {
+                connection: uuid::Uuid::nil(),
+                database: "db".to_owned(),
+                collection: "c".to_owned(),
+            },
+        );
+        tab.set_documents(vec![doc! { "_id": 1, "address": { "city": "Oslo" } }]);
+        let mut harness = Harness::builder()
+            .with_context_setup(theme::install)
+            .build_ui_state(
+                |ui, tab: &mut CollectionTab| {
+                    show(ui, tab, false, None, false);
+                },
+                tab,
+            );
+        harness.run();
+
+        harness.get_by_label("address:").click_secondary();
+        harness.run();
+        harness.get_by_label("Copy value").click();
+        // The copy is in the output of the frame that handles the click.
+        harness.step();
+
+        let copied = harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            });
+        assert_eq!(copied.as_deref(), Some("{\n  city: 'Oslo'\n}"));
     }
 
     #[test]
