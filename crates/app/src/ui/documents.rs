@@ -207,8 +207,10 @@ struct Menus<'a> {
 }
 
 /// Add to filter, exclude from filter, lookups and linking for a
-/// right-clicked value, as far as `menus` allows. Returns true when it
-/// showed anything.
+/// right-clicked value, as far as `menus` allows. An array goes into the
+/// filter as is or with `$in`; an object doesn't, since matching a whole
+/// subdocument depends on its field order. Returns true when it showed
+/// anything.
 fn field_menu(
     ui: &mut egui::Ui,
     place: &Place,
@@ -218,35 +220,55 @@ fn field_menu(
 ) -> bool {
     let all = menus.kind == FieldMenus::All;
     let filters = all || menus.kind == FieldMenus::Pipeline;
-    let leaf = filters && !matches!(value, Bson::Document(_) | Bson::Array(_));
-    let (add, exclude) = if all {
-        ("Add to filter", "Exclude from filter")
+    let filtered = filters && !matches!(value, Bson::Document(_));
+    let (add, add_in, exclude) = if all {
+        (
+            "Add to filter",
+            "Add to filter with $in",
+            "Exclude from filter",
+        )
     } else {
-        ("Add to $match", "Exclude in $match")
+        (
+            "Add to $match",
+            "Add to $match with $in",
+            "Exclude in $match",
+        )
     };
-    if leaf {
+    let mut filter = None;
+    if filtered {
         if ui.button(add).clicked() {
-            *action = Some(TabAction::AddToFilter {
-                path: place.path.clone(),
-                value: value.clone(),
-            });
+            filter = Some(value.clone());
         }
-        if ui.button(exclude).clicked() {
-            *action = Some(TabAction::AddToFilter {
-                path: place.path.clone(),
-                value: Bson::Document(doc! { "$ne": value.clone() }),
-            });
+        match value {
+            // `$in: []` matches nothing.
+            Bson::Array(items) if items.is_empty() => {}
+            Bson::Array(_) => {
+                if ui.button(add_in).clicked() {
+                    filter = Some(Bson::Document(doc! { "$in": value.clone() }));
+                }
+            }
+            _ => {
+                if ui.button(exclude).clicked() {
+                    filter = Some(Bson::Document(doc! { "$ne": value.clone() }));
+                }
+            }
         }
+    }
+    if let Some(value) = filter {
+        *action = Some(TabAction::AddToFilter {
+            path: place.path.clone(),
+            value,
+        });
     }
     // An object can't be an id.
     let Some(references) = menus
         .references
         .filter(|_| menus.kind != FieldMenus::Off && !matches!(value, Bson::Document(_)))
     else {
-        return leaf;
+        return filtered;
     };
     let targets = lookups(place, value, references);
-    if leaf {
+    if filtered {
         ui.separator();
     }
     let looked_up = !targets.is_empty();
@@ -1572,6 +1594,42 @@ mod tests {
         assert_eq!(
             harness.state().inputs.filter,
             "{ age: { $gt: 3 }, status: 'done' }"
+        );
+    }
+
+    #[test]
+    fn right_click_adds_an_array_to_the_filter_with_in() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable as _;
+
+        let mut tab = CollectionTab::new(
+            1,
+            crate::connections::Selection {
+                connection: uuid::Uuid::nil(),
+                database: "db".to_owned(),
+                collection: "c".to_owned(),
+            },
+        );
+        tab.inputs.filter = "{}".to_owned();
+        tab.set_documents(vec![doc! { "_id": 1, "tags": ["a", "b"] }]);
+        let mut harness = Harness::builder()
+            .with_context_setup(theme::install)
+            .build_ui_state(
+                |ui, tab: &mut CollectionTab| {
+                    show(ui, tab, false, None, false);
+                },
+                tab,
+            );
+        harness.run();
+
+        harness.get_by_label("tags:").click_secondary();
+        harness.run();
+        harness.get_by_label("Add to filter with $in").click();
+        harness.run();
+
+        assert_eq!(
+            harness.state().inputs.filter,
+            "{ tags: { $in: [ 'a', 'b' ] } }"
         );
     }
 
