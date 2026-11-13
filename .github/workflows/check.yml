@@ -51,8 +51,9 @@ jobs:
       - run: cargo test --workspace --locked -- --ignored
 
   # The macOS menu bar only compiles there, so the Linux job can't see it.
+  # The shortcut tests run here too: macOS gets its own keys.
   macos:
-    name: macOS clippy
+    name: macOS clippy and shortcut tests
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
@@ -74,3 +75,4 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: scripts/bump-version.sh "$VERSION"
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test -p nordpil --locked shortcuts::tests
