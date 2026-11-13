@@ -3216,7 +3216,7 @@ impl eframe::App for NordpilApp {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use eframe::egui::{Key, Modifiers, Role};
+    use eframe::egui::{Key, KeyboardShortcut, Modifiers, Role};
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable as _;
     use nordpil_backend::secrets::MemorySecrets;
@@ -3711,18 +3711,18 @@ mod tests {
     }
 
     #[test]
-    fn alt_digits_switch_the_panel() {
+    fn panel_keys_switch_the_panel() {
         let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
-        let mut press = |key| {
-            harness.key_press_modifiers(Modifiers::ALT, key);
+        let mut press = |shortcut: KeyboardShortcut| {
+            harness.key_press_modifiers(shortcut.modifiers, shortcut.logical_key);
             harness.run();
             harness.state().tabs[0].panel
         };
 
-        assert_eq!(press(Key::Num4), Panel::Aggregate);
-        assert_eq!(press(Key::Num3), Panel::Shell);
-        assert_eq!(press(Key::Num2), Panel::Indexes);
-        assert_eq!(press(Key::Num1), Panel::Documents);
+        assert_eq!(press(shortcuts::AGGREGATE), Panel::Aggregate);
+        assert_eq!(press(shortcuts::SHELL), Panel::Shell);
+        assert_eq!(press(shortcuts::INDEXES), Panel::Indexes);
+        assert_eq!(press(shortcuts::DOCUMENTS), Panel::Documents);
     }
 
     #[test]
@@ -3965,7 +3965,11 @@ mod tests {
             };
             harness.state_mut().push_tab(target, String::new());
         }
-        harness.key_press_modifiers(Modifiers::ALT, Key::Num4);
+        let KeyboardShortcut {
+            modifiers,
+            logical_key,
+        } = shortcuts::AGGREGATE;
+        harness.key_press_modifiers(modifiers, logical_key);
         harness.run();
         let index = harness.state().tabs.len() - 1;
         assert_eq!(harness.state().tabs[index].panel, Panel::Aggregate);

@@ -66,7 +66,8 @@ when idle, against roughly 1 GB for Compass.
 - **Keyboard**: F1 lists every shortcut. Ctrl+W closes a tab and Ctrl+Shift+T brings it
   back, Ctrl+Tab and Ctrl+1–9 switch tabs, Alt+1/2/3/4 switch between Documents, Indexes,
   Shell and Aggregation, Ctrl+R reruns the query or pipeline, Ctrl+I asks AI and Ctrl+, opens the settings. On macOS the keys use
-  ⌘ and the same commands sit in the menu bar. Tabs carry their connection's color.
+  ⌘ and the same commands sit in the menu bar; panels take ⌥⌘1–4, since Option+digit types
+  a character there. Tabs carry their connection's color.
 
 | Go to collection (Ctrl+K) | Values from the results |
 | --- | --- |
