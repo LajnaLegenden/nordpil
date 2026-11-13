@@ -226,6 +226,7 @@ fn accelerator(shortcut: &KeyboardShortcut) -> Option<Accelerator> {
         Key::Num1 => Code::Digit1,
         Key::Num2 => Code::Digit2,
         Key::Num3 => Code::Digit3,
+        Key::Num4 => Code::Digit4,
         Key::Num9 => Code::Digit9,
         _ => return None,
     };

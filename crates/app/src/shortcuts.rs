@@ -96,10 +96,17 @@ pub const NEXT_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Ke
 pub const PREVIOUS_TAB: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::Tab);
 pub const LAST_TAB: KeyboardShortcut = command(Key::Num9);
-pub const DOCUMENTS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Num1);
-pub const INDEXES: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Num2);
-pub const SHELL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Num3);
-pub const AGGREGATE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Num4);
+/// Option+digit types a character on macOS (⌥4 is `$` on a Swedish Mac), so
+/// panels take ⌥⌘ there. Ctrl+Alt elsewhere would be AltGr on Windows.
+const PANEL: Modifiers = if cfg!(target_os = "macos") {
+    Modifiers::COMMAND.plus(Modifiers::ALT)
+} else {
+    Modifiers::ALT
+};
+pub const DOCUMENTS: KeyboardShortcut = KeyboardShortcut::new(PANEL, Key::Num1);
+pub const INDEXES: KeyboardShortcut = KeyboardShortcut::new(PANEL, Key::Num2);
+pub const SHELL: KeyboardShortcut = KeyboardShortcut::new(PANEL, Key::Num3);
+pub const AGGREGATE: KeyboardShortcut = KeyboardShortcut::new(PANEL, Key::Num4);
 pub const REFRESH: KeyboardShortcut = command(Key::R);
 pub const REFRESH_F5: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
 pub const SETTINGS: KeyboardShortcut = command(Key::Comma);
@@ -424,6 +431,16 @@ mod tests {
         for (index, key) in keys.iter().enumerate() {
             assert!(!keys[index + 1..].contains(key), "{key:?} is bound twice");
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn option_keys_need_command_on_mac() {
+        let typing_key = BINDINGS
+            .iter()
+            .flat_map(|binding| binding.keys)
+            .find(|key| key.modifiers.alt && !key.modifiers.command);
+        assert_eq!(typing_key, None);
     }
 
     #[test]
