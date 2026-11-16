@@ -121,6 +121,8 @@ pub const ESCAPE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key:
 pub const SAVE_SCRIPT: KeyboardShortcut = command(Key::S);
 pub const OPEN_SCRIPT: KeyboardShortcut = command(Key::O);
 pub const STOP_SCRIPT: KeyboardShortcut = command(Key::Period);
+/// Redo in a vim editor's normal mode. Ctrl on macOS too, where Cmd+R refreshes.
+pub const VIM_REDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::R);
 /// Asks an editor for completions; handled there.
 pub const COMPLETE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Space);
 
@@ -335,8 +337,11 @@ pub fn take_vim_redo(input: &mut InputState) -> Vec<Event> {
         .partition(|event| {
             matches!(
                 event,
-                Event::Key { key: Key::R, pressed: true, modifiers, .. }
-                    if modifiers.ctrl && !modifiers.shift && !modifiers.alt
+                Event::Key { key, pressed: true, modifiers, .. }
+                    if *key == VIM_REDO.logical_key
+                        && modifiers.ctrl
+                        && !modifiers.shift
+                        && !modifiers.alt
             )
         });
     input.events = rest;

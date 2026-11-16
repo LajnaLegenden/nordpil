@@ -3201,7 +3201,7 @@ impl NordpilApp {
         self.show_settings(&ctx);
         self.show_new_theme(&ctx);
         if self.shortcuts_sheet {
-            self.shortcuts_sheet = shortcuts_dialog::show(&ctx);
+            self.shortcuts_sheet = shortcuts_dialog::show(&ctx, self.settings.vim);
         }
         self.show_mappings_dialog(&ctx);
         self.show_goto(&ctx);
@@ -3866,6 +3866,35 @@ mod tests {
         harness.run();
         let tab = &harness.state().tabs[0];
         assert_eq!(tab.applied, Some(build_query(&tab.inputs).unwrap()));
+    }
+
+    #[test]
+    fn the_shortcuts_sheet_lists_vim_keys_only_while_they_are_on() {
+        let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
+        harness.key_press(Key::F1);
+        harness.run();
+        assert!(harness.query_by_label("Select chars, lines").is_none());
+
+        harness.state_mut().settings.vim = true;
+        harness.run();
+        assert!(harness.query_by_label("Select chars, lines").is_some());
+    }
+
+    #[test]
+    fn the_vim_keys_setting_turns_them_on() {
+        let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
+        harness.state_mut().settings_dialog = Some(SettingsDialog::default());
+        harness.run();
+        let label = "Use vim keys in the shell and the filter bar";
+        harness.get_by_label(label).scroll_to_me();
+        harness.run();
+        harness.get_by_label(label).click();
+        harness.run();
+        assert!(harness.state().settings.vim);
+
+        let ctx = harness.ctx.clone();
+        let filter = &harness.state().tabs[0].editors.filter;
+        assert_eq!(filter.vim_mode(&ctx), Some(vim::Mode::Normal));
     }
 
     #[test]

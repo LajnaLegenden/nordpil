@@ -249,6 +249,29 @@ impl SettingsDialog {
                         });
                         ui.end_row();
 
+                        described(ui, "Vim keys", "Off by default");
+                        ui.vertical(|ui| {
+                            ui.set_width(330.0);
+                            ui.checkbox(
+                                &mut settings.vim,
+                                "Use vim keys in the shell and the filter bar",
+                            );
+                            ui.horizontal(|ui| {
+                                ui.add_space(26.0);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(
+                                            "Normal, insert and visual mode. F1 lists the keys.",
+                                        )
+                                        .size(13.0)
+                                        .color(theme::palette(ui).muted),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                        });
+                        ui.end_row();
+
                         described(ui, "Preview sample", "Aggregation stage previews");
                         ui.horizontal(|ui| {
                             ui.add(
