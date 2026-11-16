@@ -39,6 +39,7 @@ use crate::ui::{Action, chrome, documents, sidebar};
 use crate::update::{self, Updater};
 use crate::widgets::code_editor;
 use crate::widgets::kit::{self, Tone};
+use crate::widgets::vim;
 use crate::{icons, theme};
 
 /// What a script key does on `panel`: nothing off the Shell panel.
@@ -2713,7 +2714,17 @@ impl NordpilApp {
 
     /// App-wide keys; see [`shortcuts::BINDINGS`].
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        let mut commands = ctx.input_mut(shortcuts::pressed);
+        let vim_redo = self.focused_vim_mode(ctx) == Some(vim::Mode::Normal);
+        let mut commands = ctx.input_mut(|input| {
+            let redo = if vim_redo {
+                shortcuts::take_vim_redo(input)
+            } else {
+                Vec::new()
+            };
+            let commands = shortcuts::pressed(input);
+            input.events.extend(redo);
+            commands
+        });
         #[cfg(target_os = "macos")]
         if let Some(menu) = &mut self.menu {
             commands.extend(menu.commands());
@@ -2736,7 +2747,7 @@ impl NordpilApp {
     }
 
     /// Escape stops the active tab's script unless a popup or dialog would
-    /// close on it instead.
+    /// close on it instead, or a vim editor has it.
     fn escape_stops_script(&self, ctx: &egui::Context) -> bool {
         let Some(tab) = self.active_tab.map(|index| &self.tabs[index]) else {
             return false;
@@ -2753,7 +2764,20 @@ impl NordpilApp {
             }
             Panel::Documents | Panel::Indexes => false,
         };
-        running && !egui::Popup::is_any_open(ctx) && self.open_modal().is_none()
+        running
+            && !egui::Popup::is_any_open(ctx)
+            && self.open_modal().is_none()
+            && self.focused_vim_mode(ctx).is_none()
+    }
+
+    /// The vim mode of the active tab's focused editor, when it has vim
+    /// keys. Its Escape and Ctrl+R are its own.
+    fn focused_vim_mode(&self, ctx: &egui::Context) -> Option<vim::Mode> {
+        let tab = &self.tabs[self.active_tab?];
+        [&tab.shell.editor, &tab.editors.filter]
+            .into_iter()
+            .find(|editor| ctx.memory(|memory| memory.has_focus(editor.id())))?
+            .vim_mode(ctx)
     }
 
     /// Which modal is open. App-wide keys wait while one is, except the key
@@ -3100,8 +3124,8 @@ impl NordpilApp {
         self.poll_shells(&ctx);
         self.poll_aggregates(&ctx);
         self.poll_ask_ai(&ctx);
-        self.shortcuts(&ctx);
         code_editor::set_vim(&ctx, self.settings.vim);
+        self.shortcuts(&ctx);
         if let Some(announce) = self.restyle.take() {
             self.apply_themes(&ctx, announce);
         }
@@ -3606,6 +3630,36 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs Docker"]
+    fn escape_in_a_vim_shell_editor_leaves_the_script_running() {
+        let mongo = Mongo::default().with_tag("8.0").start().unwrap();
+        let port = mongo.get_host_port_ipv4(27017).unwrap();
+        let mut harness = connected_shell_harness(port);
+        harness.state_mut().settings.vim = true;
+        let ctx = harness.ctx.clone();
+        let editor = harness.state().tabs[0].shell.editor.id();
+        harness.state().tabs[0].shell.editor.focus_at(&ctx, 0);
+        harness.run();
+        harness
+            .state_mut()
+            .run_script(0, "while (true) {}".to_owned());
+        // The spinner keeps repainting while it runs.
+        harness.step();
+
+        harness.key_press(Key::Escape);
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(20));
+            harness.step();
+        }
+        assert!(harness.state().tabs[0].shell.running.is_some());
+
+        ctx.memory_mut(|memory| memory.surrender_focus(editor));
+        harness.step();
+        harness.key_press(Key::Escape);
+        run_until(&mut harness, |app| app.tabs[0].shell.running.is_none());
+    }
+
+    #[test]
     fn script_keys_only_work_on_the_shell_panel() {
         // Pressing them on the Shell panel would open a real file dialog.
         let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
@@ -3774,6 +3828,44 @@ mod tests {
         run_until(&mut harness, |app| {
             app.tabs[0].indexes_request.is_some() || matches!(app.tabs[0].indexes, Some(Err(_)))
         });
+    }
+
+    #[test]
+    fn ctrl_r_redoes_in_a_vim_filter_and_refreshes_from_insert_mode() {
+        let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
+        let app = harness.state_mut();
+        app.settings.vim = true;
+        app.tabs[0].inputs.filter = "{ a: 12 }".to_owned();
+        harness.run();
+        // Ctrl as Linux and Windows report it.
+        let ctrl = Modifiers {
+            ctrl: true,
+            command: true,
+            ..Modifiers::NONE
+        };
+        let press = |harness: &mut Harness<'_, NordpilApp>, keys: &str| {
+            for c in keys.chars() {
+                harness.event(egui::Event::Text(c.to_string()));
+                harness.run();
+            }
+        };
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::L);
+        harness.run();
+        harness.key_press(Key::Escape);
+        harness.run();
+        press(&mut harness, "0f2xu");
+
+        harness.key_press_modifiers(ctrl, Key::R);
+        harness.run();
+        let tab = &harness.state().tabs[0];
+        assert_eq!(tab.inputs.filter, "{ a: 1 }");
+        assert_eq!(tab.applied, None);
+
+        press(&mut harness, "i");
+        harness.key_press_modifiers(ctrl, Key::R);
+        harness.run();
+        let tab = &harness.state().tabs[0];
+        assert_eq!(tab.applied, Some(build_query(&tab.inputs).unwrap()));
     }
 
     #[test]

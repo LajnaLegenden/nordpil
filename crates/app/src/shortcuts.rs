@@ -326,6 +326,23 @@ pub fn pressed(input: &mut InputState) -> Vec<AppCommand> {
     commands
 }
 
+/// Takes this frame's Ctrl+R presses out of `input`. In a focused editor's
+/// vim normal mode Ctrl+R is redo, which Refresh mustn't take; the caller
+/// puts them back once the app-wide keys are read.
+pub fn take_vim_redo(input: &mut InputState) -> Vec<Event> {
+    let (redo, rest) = std::mem::take(&mut input.events)
+        .into_iter()
+        .partition(|event| {
+            matches!(
+                event,
+                Event::Key { key: Key::R, pressed: true, modifiers, .. }
+                    if modifiers.ctrl && !modifiers.shift && !modifiers.alt
+            )
+        });
+    input.events = rest;
+    redo
+}
+
 /// Like [`InputState::consume_shortcut`], but Alt must match too: on Windows
 /// AltGr arrives as Ctrl+Alt, and AltGr+7 typing `{` mustn't count as Ctrl+7.
 /// Extra Shift is still allowed, since some layouts need it for `/`.
