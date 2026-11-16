@@ -19,6 +19,7 @@ use crate::tabs::{CollectionTab, PAGE_SIZES, QueryInputs, Results, View};
 use crate::theme;
 use crate::widgets::code_editor::{self, CodeEditor};
 use crate::widgets::kit::{self, Tone};
+use crate::widgets::vim;
 
 pub enum TabAction {
     /// Run the query from the inputs, from the first page.
@@ -431,7 +432,12 @@ fn filter_field(ui: &mut egui::Ui, tab: &mut CollectionTab) -> bool {
                         .color(palette.subtle),
                 );
                 kit::divider(ui, 18.0);
-                let keys_width = if focused { 0.0 } else { 64.0 };
+                let has_vim = tab.editors.filter.vim_mode(ui.ctx()).is_some();
+                let keys_width = match (focused, has_vim) {
+                    (false, _) => 64.0,
+                    (true, true) => 70.0,
+                    (true, false) => 0.0,
+                };
                 let editor_width = (ui.available_width() - keys_width).max(80.0);
                 ui.allocate_ui(egui::vec2(editor_width, kit::QUERY_HEIGHT - 2.0), |ui| {
                     ui.set_width(editor_width);
@@ -445,6 +451,8 @@ fn filter_field(ui: &mut egui::Ui, tab: &mut CollectionTab) -> bool {
                 });
                 if !focused {
                     kit::shortcut(ui, &crate::shortcuts::FOCUS_EDITOR);
+                } else if let Some(mode) = tab.editors.filter.vim_mode(ui.ctx()) {
+                    kit::pill(ui, mode.label(), mode != vim::Mode::Insert);
                 }
             });
         })

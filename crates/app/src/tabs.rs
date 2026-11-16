@@ -11,7 +11,7 @@ use nordpil_query::{FieldHint, Preview, ValueHint};
 use crate::aggregate::AggregateState;
 use crate::connections::Selection;
 use crate::shell::ShellState;
-use crate::widgets::code_editor::{CodeEditor, is_empty_object};
+use crate::widgets::code_editor::{CodeEditor, VimFocus, is_empty_object};
 
 pub const PAGE_SIZES: [u64; 7] = [10, 20, 50, 100, 250, 500, 1000];
 const DEFAULT_PAGE_SIZE: u64 = 20;
@@ -117,7 +117,10 @@ impl CollectionTab {
             target,
             inputs: QueryInputs::default(),
             editors: QueryEditors {
-                filter: editor("filter", "{ field: 'value' }").frameless().object(),
+                filter: editor("filter", "{ field: 'value' }")
+                    .frameless()
+                    .object()
+                    .vim(VimFocus::Insert),
                 project: editor("project", "{ field: 1 }").object(),
                 sort: editor("sort", "{ field: -1 }").object(),
                 collation: editor("collation", "{ locale: 'en' }").object(),

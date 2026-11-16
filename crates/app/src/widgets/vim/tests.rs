@@ -1210,7 +1210,24 @@ fn select_starts_visual_mode_from_the_mouse() {
     assert_eq!(session.selected(), "[abc]d");
 }
 
+#[test]
+fn select_from_visual_lines_goes_back_to_chars() {
+    let mut session = Session::new("ab|cd", true);
+    session.press("V");
+    session.vim.select(1);
+    assert_eq!(session.selected(), "a[bc]d");
+}
+
 // Undo -------------------------------------------------------------------
+
+#[test]
+fn a_change_made_outside_vim_undoes() {
+    let mut session = Session::new("a|b", true);
+    session.vim.changed_outside("ab", 1);
+    session.text = "axb".to_owned();
+    session.press("u");
+    assert_eq!(session.marked(), "a|b");
+}
 
 #[test]
 fn u_undoes_a_delete() {

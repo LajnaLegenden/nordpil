@@ -114,10 +114,13 @@ impl Vim {
     /// the cursor at the other end.
     pub fn select(&mut self, anchor: usize) {
         self.pending.clear();
-        if !self.mode.is_visual() {
-            self.mode = Mode::Visual;
-        }
+        self.mode = Mode::Visual;
         self.anchor = anchor;
+    }
+
+    /// Makes a change made outside vim, like a paste, one undo step.
+    pub fn changed_outside(&mut self, before: &str, cursor: usize) {
+        self.push_undo((before.to_owned(), cursor));
     }
 
     /// Back to normal mode, e.g. after a click ends a visual selection.

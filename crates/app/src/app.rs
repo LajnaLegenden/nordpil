@@ -37,6 +37,7 @@ use crate::ui::theme_editor::{self, NewThemeDialog, ThemeEditor};
 use crate::ui::transfer_dialog::{self, TransferDialog};
 use crate::ui::{Action, chrome, documents, sidebar};
 use crate::update::{self, Updater};
+use crate::widgets::code_editor;
 use crate::widgets::kit::{self, Tone};
 use crate::{icons, theme};
 
@@ -3100,6 +3101,7 @@ impl NordpilApp {
         self.poll_aggregates(&ctx);
         self.poll_ask_ai(&ctx);
         self.shortcuts(&ctx);
+        code_editor::set_vim(&ctx, self.settings.vim);
         if let Some(announce) = self.restyle.take() {
             self.apply_themes(&ctx, announce);
         }
