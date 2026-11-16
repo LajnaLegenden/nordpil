@@ -5114,6 +5114,35 @@ mod screenshots {
         save(&mut harness, "shell-side-by-side");
         harness.state_mut().settings.shell = Default::default();
 
+        harness.state_mut().settings.vim = true;
+        let ctx = harness.ctx.clone();
+        let press = |harness: &mut Harness<'_, NordpilApp>, keys: &str| {
+            for c in keys.chars() {
+                harness.event(egui::Event::Text(c.to_string()));
+                harness.run();
+            }
+        };
+        harness.state().tabs[0].shell.editor.focus_at(&ctx, 0);
+        harness.run();
+        press(&mut harness, "jw");
+        save(&mut harness, "shell-vim-normal");
+        press(&mut harness, "f{va{");
+        save(&mut harness, "shell-vim-visual");
+        harness.key_press(egui::Key::Escape);
+        harness.state_mut().tabs[0].panel = Panel::Documents;
+        harness.run();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::L);
+        harness.run();
+        save(&mut harness, "filter-vim-insert");
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        press(&mut harness, "0w");
+        save(&mut harness, "filter-vim-normal");
+        let filter = harness.state().tabs[0].editors.filter.id();
+        ctx.memory_mut(|memory| memory.surrender_focus(filter));
+        harness.state_mut().settings.vim = false;
+        harness.run();
+
         {
             use bson::doc;
             let app = harness.state_mut();

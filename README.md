@@ -68,6 +68,16 @@ when idle, against roughly 1 GB for Compass.
   Shell and Aggregation, Ctrl+R reruns the query or pipeline, Ctrl+I asks AI and Ctrl+, opens the settings. On macOS the keys use
   ⌘ and the same commands sit in the menu bar; panels take ⌥⌘1–4, since Option+digit types
   a character there. Tabs carry their connection's color.
+- **Vim keys**: opt in under Settings → Vim keys, for the shell editor and the filter bar.
+  Normal, insert, visual and visual-line mode, with counts: `hjkl`, `w b e W B E`, `0 ^ $`,
+  `gg G`, `f t F T ; ,` and `%`; `d c y` over any motion, `dd cc yy D C Y x X s S`, text
+  objects for words, quotes and brackets (`ciw`, `di'`, `ca{`, `vi(`), `p P`, `r J ~`,
+  `i a I A o O`, and `u` with Ctrl+R to redo. A pill in the editor shows the mode, and F1
+  lists the keys. Where it differs from vim: the filter bar starts in insert mode each time
+  it gets focus, while the shell keeps its mode. Esc in normal mode does nothing, so in the
+  shell Ctrl+. stops a script. Ctrl+R redoes only in normal mode and refreshes elsewhere.
+  There is one register, separate from the system clipboard, which Ctrl+C and Ctrl+V still
+  use. `Y` copies to the line end, as in Neovim. No `.`, macros, marks, search or `:` commands.
 
 | Go to collection (Ctrl+K) | Values from the results |
 | --- | --- |
