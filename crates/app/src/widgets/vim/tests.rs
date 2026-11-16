@@ -44,6 +44,7 @@ fn named_key(name: &str) -> Option<Key> {
 /// does, without the self-closing brackets.
 struct Session {
     vim: Vim,
+    multiline: bool,
     text: String,
     cursor: usize,
     register: Register,
@@ -55,6 +56,7 @@ impl Session {
         let cursor = marked.chars().position(|c| c == '|').expect("a | cursor");
         Self {
             vim: Vim::new(multiline),
+            multiline,
             text: marked.replacen('|', "", 1),
             cursor,
             register: Register::default(),
@@ -87,7 +89,7 @@ impl Session {
                 self.text.insert(at, c);
                 self.cursor += 1;
             }
-            Key::Enter => {
+            Key::Enter if self.multiline => {
                 self.text.insert(at, '\n');
                 self.cursor += 1;
             }
@@ -1362,4 +1364,138 @@ fn clamp_allows_an_empty_line() {
 #[test]
 fn a_cursor_past_the_end_is_brought_back() {
     assert_eq!(run("ab|", "x"), "|a");
+}
+
+// Fuzzing ----------------------------------------------------------------
+
+mod fuzz {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    const KEYS: &[&str] = &[
+        "h", "j", "k", "l", "w", "b", "e", "W", "B", "E", "0", "^", "$", "G", "g", "f", "F", "t",
+        "T", ";", ",", "%", "d", "c", "y", "x", "X", "s", "S", "D", "C", "Y", "i", "a", "I", "A",
+        "o", "O", "p", "P", "r", "J", "~", "v", "V", "u", "1", "2", "3", "{", "}", "(", ")", "[",
+        "]", "'", "\"", "`", "b", "B", " ", "q", "<esc>", "<cr>", "<bs>", "<del>", "<left>",
+        "<right>", "<up>", "<down>", "<home>", "<end>", "<c-z>", "<c-r>",
+    ];
+    const TEXT: &[char] = &[
+        'a', 'b', ' ', ' ', '\n', '\n', '{', '}', '(', ')', '[', ']', '\'', '"', '_', '.', '$',
+        'é', '\t', ',',
+    ];
+
+    fn typed() -> impl Strategy<Value = String> {
+        proptest::collection::vec(proptest::sample::select(KEYS), 0..60)
+            .prop_map(|keys| keys.concat())
+    }
+
+    fn text(multiline: bool) -> impl Strategy<Value = String> {
+        proptest::collection::vec(proptest::sample::select(TEXT), 0..40).prop_map(move |chars| {
+            chars
+                .into_iter()
+                .filter(|&c| multiline || c != '\n')
+                .collect()
+        })
+    }
+
+    fn session(text: String, cursor: usize, multiline: bool) -> Session {
+        let cursor = cursor.min(text.chars().count());
+        Session {
+            vim: Vim::new(multiline),
+            multiline,
+            text,
+            cursor,
+            register: Register::default(),
+        }
+    }
+
+    /// Each key, one at a time, so every state in between is checked.
+    fn press_each(session: &mut Session, typed: &str) -> Result<(), TestCaseError> {
+        for key in keys(typed) {
+            let one: String = match key {
+                Key::Char(c) => c.to_string(),
+                other => format!("<{}>", name(other)),
+            };
+            session.press(&one);
+            let len = session.text.chars().count();
+            prop_assert!(
+                session.cursor <= len,
+                "cursor {} past {len}",
+                session.cursor
+            );
+            if session.vim.mode() != Mode::Insert {
+                let clamped = session.vim.clamp(&session.text, session.cursor);
+                prop_assert_eq!(
+                    clamped,
+                    session.cursor,
+                    "cursor off a char in {:?}",
+                    session.text
+                );
+            }
+            if let Some(range) = session.vim.selection(&session.text, session.cursor) {
+                prop_assert!(range.start <= range.end && range.end <= len);
+            }
+            if !session.multiline {
+                prop_assert!(
+                    !session.text.contains('\n'),
+                    "newline in {:?}",
+                    session.text
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn name(key: Key) -> &'static str {
+        match key {
+            Key::Escape => "esc",
+            Key::Enter => "cr",
+            Key::Backspace => "bs",
+            Key::Delete => "del",
+            Key::Left => "left",
+            Key::Right => "right",
+            Key::Up => "up",
+            Key::Down => "down",
+            Key::Home => "home",
+            Key::End => "end",
+            Key::Undo => "c-z",
+            Key::Redo => "c-r",
+            Key::Char(_) => unreachable!(),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn any_keys_keep_the_cursor_on_the_text(
+            text in text(true),
+            cursor in 0usize..50,
+            typed in typed(),
+        ) {
+            press_each(&mut session(text, cursor, true), &typed)?;
+        }
+
+        #[test]
+        fn any_keys_keep_a_single_line_on_one_line(
+            text in text(false),
+            cursor in 0usize..50,
+            typed in typed(),
+        ) {
+            press_each(&mut session(text, cursor, false), &typed)?;
+        }
+
+        #[test]
+        fn undoing_everything_brings_the_text_back(
+            text in text(true),
+            cursor in 0usize..50,
+            typed in typed(),
+        ) {
+            let mut session = session(text.clone(), cursor, true);
+            session.press(&typed).press("<esc><esc>");
+            for _ in 0..KEYS.len() * 2 {
+                session.press("u");
+            }
+            prop_assert_eq!(session.text, text);
+        }
+    }
 }

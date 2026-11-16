@@ -65,4 +65,5 @@ workspace = true
 [dev-dependencies]
 nordpil-backend = { workspace = true, features = ["test-support"] }
 egui_kittest = "0.37"
+proptest = "1.12"
 testcontainers-modules = { version = "0.15", features = ["mongo", "blocking"] }

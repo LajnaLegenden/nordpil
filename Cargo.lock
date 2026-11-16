@@ -3537,6 +3537,7 @@ dependencies = [
  "nordpil-backend",
  "nordpil-query",
  "nordpil-shell",
+ "proptest",
  "rfd",
  "semver",
  "serde",
