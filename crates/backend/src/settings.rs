@@ -235,6 +235,8 @@ pub struct Settings {
     /// Right-clicking an id field like `userId` offers to open the document
     /// it refers to, in a collection of the same database like `users`.
     pub look_up_references: bool,
+    /// Vim keys in the shell editor and the filter bar.
+    pub vim: bool,
     pub updates: Updates,
     /// The panel the active tab showed last; new tabs open on it.
     pub last_panel: Panel,
@@ -311,6 +313,7 @@ mod tests {
             text_size: TextSize::Large,
             goto_scope: GotoScope::OpenOnly,
             look_up_references: true,
+            vim: true,
             updates: Updates::Notify,
             last_panel: Panel::Shell,
             shell: ShellLayout {
@@ -347,6 +350,7 @@ mod tests {
         assert!(!text.contains("theme ="), "{text}");
         assert!(text.contains("goto_scope = \"open-only\""), "{text}");
         assert!(text.contains("look_up_references = true"), "{text}");
+        assert!(text.contains("vim = true"), "{text}");
         assert!(text.contains("updates = \"notify\""), "{text}");
         assert!(text.contains("last_panel = \"shell\""), "{text}");
         assert!(text.contains("orientation = \"side-by-side\""), "{text}");
@@ -371,6 +375,7 @@ mod tests {
         assert_eq!(settings.aggregate, AggregateSettings::default());
         assert_eq!(settings.ai, AiSettings::default());
         assert_eq!(settings.ai.agent, AiAgent::Off);
+        assert!(!settings.vim);
         let _ = std::fs::remove_dir_all(dir);
     }
 
