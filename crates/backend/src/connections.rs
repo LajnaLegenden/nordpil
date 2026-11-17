@@ -1,9 +1,11 @@
 //! Saving, deleting and opening connections.
 
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
+use aws_config::default_provider::credentials::DefaultCredentialsChain;
 use aws_config::profile::ProfileFileCredentialsProvider;
-use aws_credential_types::provider::SharedCredentialsProvider;
+use aws_credential_types::Credentials;
+use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider, future};
 use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
 use mongodb::Client;
 use mongodb::bson::doc;
@@ -137,11 +139,14 @@ impl Backend {
             .as_ref()
             .is_some_and(|c| c.mechanism == Some(AuthMechanism::MongoDbAws));
         let aws_profile = saved.aws_profile.as_deref().filter(|p| !p.is_empty());
-        if aws
-            && let Some(credential) = options.credential.as_mut()
-            && let Some(provider) = aws_credentials(aws_profile, self.aws_profile_files.as_ref())
-        {
-            credential.aws_credential_provider = Some(provider);
+        if aws && let Some(credential) = options.credential.as_mut() {
+            // Keys in the connection string win over the default lookup, as
+            // in the driver; a chosen profile wins over both.
+            let uri_keys = credential.username.is_some();
+            if aws_profile.is_some() || self.aws_profile_files.is_some() || !uri_keys {
+                credential.aws_credential_provider =
+                    Some(aws_credentials(aws_profile, self.aws_profile_files.as_ref()).await);
+            }
         }
         options.app_name.get_or_insert_with(|| "nordpil".to_owned());
         options
@@ -214,15 +219,17 @@ fn parse_uri(uri: &str) -> Result<ConnectionUri, BackendError> {
     ConnectionUri::parse(uri).map_err(|error| BackendError::new(error.to_string()))
 }
 
-/// Credentials for a `MONGODB-AWS` connection with a chosen profile. `None`
-/// leaves it to the driver, which uses the AWS SDK's default lookup:
-/// environment, `AWS_PROFILE` or the default profile, then ECS or EC2.
-fn aws_credentials(
+/// Credentials for a `MONGODB-AWS` connection: the chosen profile, or with
+/// none the AWS SDK's default lookup (environment, `AWS_PROFILE` or the
+/// default profile, then ECS or EC2). Either way they are cached, see
+/// [`CachedCredentials`].
+async fn aws_credentials(
     profile: Option<&str>,
     files: Option<&AwsProfileFiles>,
-) -> Option<SharedCredentialsProvider> {
+) -> SharedCredentialsProvider {
     if profile.is_none() && files.is_none() {
-        return None;
+        let chain = DefaultCredentialsChain::builder().build().await;
+        return SharedCredentialsProvider::new(CachedCredentials::new(chain));
     }
     let mut builder = ProfileFileCredentialsProvider::builder();
     if let Some(profile) = profile {
@@ -236,7 +243,63 @@ fn aws_credentials(
                 .build(),
         );
     }
-    Some(SharedCredentialsProvider::new(builder.build()))
+    SharedCredentialsProvider::new(CachedCredentials::new(builder.build()))
+}
+
+/// Refetch this long before credentials expire, so a handshake never signs
+/// with ones about to lapse.
+const AWS_EXPIRY_MARGIN: Duration = Duration::from_secs(5 * 60);
+/// How long credentials without an expiry (static keys) are kept, so edits to
+/// `~/.aws/credentials` still get picked up.
+const AWS_STATIC_LIFETIME: Duration = Duration::from_secs(15 * 60);
+
+/// The driver asks for AWS credentials on every new pooled connection and
+/// doesn't cache them. Uncached, each one re-reads `~/.aws`, and SSO and
+/// `credential_process` profiles call AWS or spawn a process every time.
+/// The lock is held while fetching, so connections opened together share one
+/// lookup. Failures are not cached.
+#[derive(Debug)]
+struct CachedCredentials<P> {
+    inner: P,
+    cached: tokio::sync::Mutex<Option<(Credentials, Instant)>>,
+}
+
+impl<P> CachedCredentials<P> {
+    fn new(inner: P) -> Self {
+        Self {
+            inner,
+            cached: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
+/// Whether credentials fetched at `fetched` can still be used.
+fn aws_credentials_fresh(credentials: &Credentials, fetched: Instant) -> bool {
+    match credentials.expiry() {
+        Some(expiry) => expiry
+            .duration_since(SystemTime::now())
+            .is_ok_and(|left| left > AWS_EXPIRY_MARGIN),
+        None => fetched.elapsed() < AWS_STATIC_LIFETIME,
+    }
+}
+
+impl<P: ProvideCredentials> ProvideCredentials for CachedCredentials<P> {
+    fn provide_credentials<'a>(&'a self) -> future::ProvideCredentials<'a>
+    where
+        Self: 'a,
+    {
+        future::ProvideCredentials::new(async move {
+            let mut cached = self.cached.lock().await;
+            if let Some((credentials, fetched)) = cached.as_ref()
+                && aws_credentials_fresh(credentials, *fetched)
+            {
+                return Ok(credentials.clone());
+            }
+            let credentials = self.inner.provide_credentials().await?;
+            *cached = Some((credentials.clone(), Instant::now()));
+            Ok(credentials)
+        })
+    }
 }
 
 /// The driver reports missing, expired and rejected AWS credentials alike as
@@ -256,5 +319,58 @@ fn aws_error(error: BackendError, profile: Option<&str>) -> BackendError {
         kind: ErrorKind::AwsCredentials,
         message,
         detail: error.detail,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// Counts lookups; hands out credentials that expire `lifetime` from now.
+    #[derive(Debug)]
+    struct Counting {
+        calls: AtomicUsize,
+        lifetime: Option<Duration>,
+    }
+
+    impl ProvideCredentials for Counting {
+        fn provide_credentials<'a>(&'a self) -> future::ProvideCredentials<'a>
+        where
+            Self: 'a,
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let expiry = self.lifetime.map(|lifetime| SystemTime::now() + lifetime);
+            future::ProvideCredentials::ready(Ok(Credentials::new(
+                "AKID", "secret", None, expiry, "test",
+            )))
+        }
+    }
+
+    fn counting(lifetime: Option<Duration>) -> CachedCredentials<Counting> {
+        CachedCredentials::new(Counting {
+            calls: AtomicUsize::new(0),
+            lifetime,
+        })
+    }
+
+    #[tokio::test]
+    async fn aws_credentials_are_fetched_once_while_fresh() {
+        for lifetime in [Some(Duration::from_secs(3600)), None] {
+            let cached = counting(lifetime);
+            for _ in 0..3 {
+                cached.provide_credentials().await.unwrap();
+            }
+            assert_eq!(cached.inner.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn aws_credentials_close_to_expiry_are_fetched_again() {
+        let cached = counting(Some(AWS_EXPIRY_MARGIN / 2));
+        cached.provide_credentials().await.unwrap();
+        cached.provide_credentials().await.unwrap();
+        assert_eq!(cached.inner.calls.load(Ordering::SeqCst), 2);
     }
 }
