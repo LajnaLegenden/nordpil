@@ -57,7 +57,8 @@ when idle, against roughly 1 GB for Compass.
   names and types, the index keys, the collections you linked, and your current query
   with every value replaced by a placeholder that nordpil puts back in the answer. The
   built-in agents run without tools, in an empty folder, so they can't look anything up.
-  The answer opens in an editable preview with a one-line explanation; refine it, see
+  Settings narrow down what it gets: all fields, top-level fields only or none, with or
+  without types, and with or without indexes, linked collections and your query. The answer opens in an editable preview with a one-line explanation; refine it, see
   exactly what was sent, then apply it. Off until you pick an agent in Settings.
 - **Import and export**: JSON, JSON lines and CSV, streamed with progress and cancel.
 - **Themes**: dark, light or system mode, with a theme picked for each. Make your own

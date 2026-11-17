@@ -3,8 +3,10 @@
 //!
 //! The agent never sees data: the prompt holds field paths and types, index
 //! keys, the collections the user linked, and the current query with every
-//! value masked (see [`nordpil_query::mask`]). The built-in agents run
-//! without tools, in an empty directory, so they can't look anything up.
+//! value masked (see [`nordpil_query::mask`]). Settings ([`AiShare`]) can
+//! narrow that down further, as far as the request alone. The built-in
+//! agents run without tools, in an empty directory, so they can't look
+//! anything up.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -18,7 +20,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use crate::settings::{AiAgent, AiCustom, AiPreset, AiSettings};
+use crate::settings::{AiAgent, AiCustom, AiFields, AiPreset, AiSettings, AiShare};
 use crate::{BackendError, ErrorKind, FieldInfo, IndexInfo};
 
 /// Placeholder in a custom agent's arguments for the answer's JSON Schema file.
@@ -100,6 +102,9 @@ pub struct Prompt {
     pub read_only: bool,
     /// E.g. `2026-11-06T10:22:00Z`, for requests like "last week".
     pub now: String,
+    /// What the settings let through; `schema`, `indexes`, `linked` and
+    /// `current` already follow it, see [`share_fields`] and [`index_keys`].
+    pub share: AiShare,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,11 +175,34 @@ pub fn schema_fields(fields: &[FieldInfo]) -> Vec<SchemaField> {
     .collect()
 }
 
+/// The fields `share` lets through: none, the top-level ones, or all, with
+/// or without their types.
+pub fn share_fields(mut fields: Vec<SchemaField>, share: &AiShare) -> Vec<SchemaField> {
+    match share.fields {
+        AiFields::All => {}
+        AiFields::TopLevel => fields.retain(|field| !field.path.contains('.')),
+        AiFields::None => fields.clear(),
+    }
+    if !share.types {
+        for field in &mut fields {
+            field.types.clear();
+        }
+    }
+    fields
+}
+
 /// Key patterns only: never `partialFilterExpression` or other options that
-/// can hold values.
-pub fn index_keys(indexes: &[IndexInfo]) -> Vec<IndexKeys> {
+/// can hold values. Only indexes on fields `share` lets through, so keys
+/// don't give away nested names.
+pub fn index_keys(indexes: &[IndexInfo], share: &AiShare) -> Vec<IndexKeys> {
+    if !share.indexes || share.fields == AiFields::None {
+        return Vec::new();
+    }
     indexes
         .iter()
+        .filter(|index| {
+            share.fields == AiFields::All || index.keys().keys().all(|path| !path.contains('.'))
+        })
         .map(|index| {
             let mut keys = Document::new();
             for (path, direction) in index.keys() {
@@ -271,7 +299,7 @@ The current time is {now}.",
 
 fn user_message(prompt: &Prompt) -> String {
     let mut out = String::from("## Collection fields\n");
-    write_fields(&mut out, &prompt.schema);
+    write_fields(&mut out, &prompt.schema, &prompt.share);
     if !prompt.indexes.is_empty() {
         out.push_str("\n## Indexes\n");
         for index in &prompt.indexes {
@@ -301,7 +329,7 @@ fn user_message(prompt: &Prompt) -> String {
                 linked.name
             ));
         }
-        write_fields(&mut out, &linked.fields);
+        write_fields(&mut out, &linked.fields, &prompt.share);
     }
     if let Some(current) = &prompt.current {
         out.push_str("\n## Current query (values hidden)\n");
@@ -345,12 +373,28 @@ fn user_message(prompt: &Prompt) -> String {
     out
 }
 
-fn write_fields(out: &mut String, fields: &[SchemaField]) {
+fn write_fields(out: &mut String, fields: &[SchemaField], share: &AiShare) {
+    match share.fields {
+        AiFields::None => {
+            out.push_str(
+                "(not shared: use the field names given in the request and the current query)\n",
+            );
+            return;
+        }
+        AiFields::TopLevel => {
+            out.push_str("(top level only: nested fields exist but are not listed)\n");
+        }
+        AiFields::All => {}
+    }
     if fields.is_empty() {
         out.push_str("(no fields sampled)\n");
     }
     for field in fields {
-        out.push_str(&format!("- {}: {}\n", field.path, field.types.join(", ")));
+        if field.types.is_empty() {
+            out.push_str(&format!("- {}\n", field.path));
+        } else {
+            out.push_str(&format!("- {}: {}\n", field.path, field.types.join(", ")));
+        }
     }
 }
 
