@@ -10,6 +10,8 @@ pub enum ErrorKind {
     /// The connection has a username but no password is known.
     PasswordRequired,
     AuthenticationFailed,
+    /// `MONGODB-AWS` failed: credentials missing, expired or rejected.
+    AwsCredentials,
     ReadOnly,
     /// The document changed or was deleted since it was loaded.
     Conflict,
