@@ -432,6 +432,14 @@ pub struct Backend {
     secrets: Arc<dyn SecretStore>,
     sessions: Mutex<HashMap<Uuid, Session>>,
     cursors: aggregation::Cursors,
+    /// Replaces `~/.aws/config` and `~/.aws/credentials`, for tests.
+    aws_profile_files: Option<AwsProfileFiles>,
+}
+
+#[derive(Debug, Clone)]
+struct AwsProfileFiles {
+    config: std::path::PathBuf,
+    credentials: std::path::PathBuf,
 }
 
 impl Backend {
@@ -458,7 +466,23 @@ impl Backend {
             secrets: Arc::new(secrets),
             sessions: Mutex::default(),
             cursors: aggregation::Cursors::default(),
+            aws_profile_files: None,
         }
+    }
+
+    /// Reads AWS profiles from these files instead of `~/.aws`, so tests
+    /// don't depend on the machine's AWS setup.
+    #[cfg(feature = "test-support")]
+    pub fn with_aws_profile_files(
+        mut self,
+        config: impl Into<std::path::PathBuf>,
+        credentials: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.aws_profile_files = Some(AwsProfileFiles {
+            config: config.into(),
+            credentials: credentials.into(),
+        });
+        self
     }
 
     fn session(&self, id: Uuid) -> Result<Session, BackendError> {
@@ -854,6 +878,7 @@ mod tests {
             uri: uri.to_owned(),
             color: None,
             read_only: false,
+            aws_profile: None,
         }
     }
 

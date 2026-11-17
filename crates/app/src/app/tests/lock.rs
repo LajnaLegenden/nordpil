@@ -128,6 +128,7 @@ fn tab_harness_in(dir: &Path) -> Harness<'static, NordpilApp> {
         uri: "mongodb://localhost:27017".to_owned(),
         color: None,
         read_only: false,
+        aws_profile: None,
     });
     entry.state = ConnectionState::Connected(Vec::new());
     let target = Selection {
@@ -661,6 +662,7 @@ fn unlock_leaves_connections_without_a_saved_password_disconnected() {
             uri: "mongodb://bob@localhost:1/".to_owned(),
             color: None,
             read_only: false,
+            aws_profile: None,
         }])
         .unwrap();
     let mut harness = harness_in(&dir);

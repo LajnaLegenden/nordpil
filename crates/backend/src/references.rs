@@ -129,6 +129,7 @@ mod tests {
             uri: "mongodb://localhost".to_owned(),
             color: None,
             read_only: false,
+            aws_profile: None,
         };
         let (a, b) = (saved("a"), saved("b"));
         store.save(&[a.clone(), b.clone()]).unwrap();
