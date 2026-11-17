@@ -14,7 +14,7 @@ use mongodb::bson::{Bson, Document};
 use nordpil_query::mask::{DYNAMIC_KEY, collapse_paths, is_dynamic_segment};
 use nordpil_query::{Style, format_document};
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -27,6 +27,10 @@ pub const SCHEMA_FILE: &str = "{schema_file}";
 pub const MAX_LINKED: usize = 5;
 const LOOKUP_TIME_LIMIT: Duration = Duration::from_secs(5);
 const STDERR_LINES: usize = 20;
+/// The most of an agent's stdout kept; an answer is far smaller.
+const MAX_STDOUT: usize = 8 * 1024 * 1024;
+/// How much of the end of stderr is kept, for the last `STDERR_LINES`.
+const STDERR_TAIL: usize = 64 * 1024;
 
 /// Where the answer goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -672,8 +676,66 @@ async fn run(
             let _ = stdin.write_all(text.as_bytes()).await;
         }
     };
-    let (_, output) = tokio::join!(write, child.wait_with_output());
-    output.map_err(|error| BackendError::new("The agent stopped unexpectedly.").with_detail(error))
+    // Read the pipes ourselves rather than with `wait_with_output`, which
+    // keeps everything a chatty agent prints. Reading on past the limits
+    // keeps the agent from blocking on a full pipe.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (_, stdout, stderr, status) = tokio::join!(
+        write,
+        read_limited(stdout, MAX_STDOUT, false),
+        read_limited(stderr, STDERR_TAIL, true),
+        child.wait(),
+    );
+    let stopped = |error: std::io::Error| {
+        BackendError::new("The agent stopped unexpectedly.").with_detail(error)
+    };
+    let (stdout, overflow) = stdout.map_err(stopped)?;
+    if overflow {
+        return Err(BackendError::new(format!(
+            "The agent printed more than {} MB.",
+            MAX_STDOUT / (1024 * 1024)
+        )));
+    }
+    Ok(std::process::Output {
+        status: status.map_err(stopped)?,
+        stdout,
+        stderr: stderr.map_err(stopped)?.0,
+    })
+}
+
+/// Reads `reader` to the end, keeping at most `limit` bytes: the first ones,
+/// or with `tail` the last ones. Also says whether anything was dropped.
+async fn read_limited(
+    reader: Option<impl AsyncRead + Unpin>,
+    limit: usize,
+    tail: bool,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut kept = Vec::new();
+    let mut dropped = false;
+    let Some(mut reader) = reader else {
+        return Ok((kept, dropped));
+    };
+    let mut chunk = vec![0; 16 * 1024];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok((kept, dropped));
+        }
+        let chunk = &chunk[..read];
+        if tail {
+            kept.extend_from_slice(chunk);
+            // Trim in batches so each byte moves at most a few times.
+            if kept.len() > 2 * limit {
+                kept.drain(..kept.len() - limit);
+                dropped = true;
+            }
+        } else {
+            let room = limit.saturating_sub(kept.len());
+            kept.extend_from_slice(&chunk[..room.min(read)]);
+            dropped |= read > room;
+        }
+    }
 }
 
 /// Kills the agent's process group when dropped: after it ends, on timeout,
