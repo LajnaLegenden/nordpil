@@ -1905,22 +1905,25 @@ impl NordpilApp {
                 }
                 Err(error) => self.notify(error),
             },
+            // Found first so a page of up to 1000 documents moves into its
+            // tab instead of being cloned for every tab tried.
             Response::AggregatePage(result) => {
-                for tab in &mut self.tabs {
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.aggregate.owns_page(request))
+                {
                     let page_size = tab.page_size;
-                    if tab
-                        .aggregate
-                        .page_arrived(request, result.clone(), page_size)
-                    {
-                        return;
-                    }
+                    tab.aggregate.page_arrived(request, result, page_size);
                 }
             }
             Response::Explained(result) => {
-                for tab in &mut self.tabs {
-                    if tab.aggregate.explain_arrived(request, result.clone()) {
-                        return;
-                    }
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.aggregate.owns_explain(request))
+                {
+                    tab.aggregate.explain_arrived(request, result);
                 }
             }
             Response::AggregateWritten(result) => {
@@ -4009,7 +4012,11 @@ mod tests {
         run_until(&mut harness, |app| {
             matches!(
                 &aggregate(app).stages[1].preview,
-                Preview::Documents { documents, sampled: true, .. } if documents.len() == 10
+                Preview::Documents {
+                    count: 10,
+                    sampled: true,
+                    ..
+                }
             )
         });
         assert_eq!(harness.query_all_by_label("10 documents").count(), 2);
