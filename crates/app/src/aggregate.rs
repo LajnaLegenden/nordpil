@@ -2,6 +2,7 @@
 //! preview of each stage's output, and the run, whose pages come from a
 //! server cursor that stays open between pages.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -63,15 +64,22 @@ fn next_cursor_key() -> CursorKey {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Fields and values for completion, shared by a preview and the stages after it.
+pub type Hints = (Arc<[FieldHint]>, Arc<[ValueHint]>);
+
 /// What a stage's preview last showed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Preview {
     /// Not run yet.
     None,
     Documents {
-        documents: Vec<Document>,
+        count: usize,
         /// Each document's start as highlighted text, for its card.
         texts: Vec<(String, Vec<Span>)>,
+        /// Fields and values in the documents, for completing the next
+        /// stages. Worked out once here: cards ask for them every frame.
+        fields: Arc<[FieldHint]>,
+        values: Arc<[ValueHint]>,
         /// Read from a sample of the collection.
         sampled: bool,
     },
@@ -79,6 +87,26 @@ pub enum Preview {
     TimedOut,
     /// Why the stage has no preview, e.g. it is off.
     Skipped(String),
+}
+
+impl Preview {
+    /// Keeps what the card and the stages after it need, not the documents.
+    fn documents(documents: &[Document], sampled: bool) -> Self {
+        let fields = nordpil_backend::field_paths(documents)
+            .into_iter()
+            .map(|field| FieldHint {
+                path: field.path,
+                detail: field.types.join(", "),
+            })
+            .collect();
+        Self::Documents {
+            count: documents.len(),
+            texts: documents.iter().map(preview_text).collect(),
+            fields,
+            values: nordpil_query::value_hints(documents).into(),
+            sampled,
+        }
+    }
 }
 
 pub struct StageCard {
@@ -654,11 +682,7 @@ impl AggregateState {
         };
         card.request = None;
         card.preview = match result {
-            Ok(documents) => Preview::Documents {
-                texts: documents.iter().map(preview_text).collect(),
-                documents,
-                sampled,
-            },
+            Ok(documents) => Preview::documents(&documents, sampled),
             Err(error) if error.kind == ErrorKind::TimedOut => Preview::TimedOut,
             Err(error) => Preview::Failed(error.message),
         };
@@ -669,35 +693,33 @@ impl AggregateState {
         self.stages.iter().any(|card| card.request == Some(request))
     }
 
-    /// Fields for completing stage `index`: what the stage before it gave in
-    /// its preview, else the collection's sampled fields.
-    pub fn fields_for(
-        &self,
-        index: usize,
-        collection: &[FieldHint],
-    ) -> (Vec<FieldHint>, Vec<ValueHint>) {
-        let before = self.stages[..index]
+    pub fn owns_page(&self, request: RequestId) -> bool {
+        self.run
+            .as_ref()
+            .is_some_and(|run| run.pending_page == Some(request))
+    }
+
+    pub fn owns_explain(&self, request: RequestId) -> bool {
+        self.explain
+            .as_ref()
+            .is_some_and(|explain| explain.request == Some(request))
+    }
+
+    /// Fields and values for completing stage `index`: what the stage before
+    /// it gave in its preview. `None` means the collection's sampled fields.
+    pub fn fields_for(&self, index: usize) -> Option<Hints> {
+        self.stages[..index]
             .iter()
             .rev()
             .find_map(|card| match &card.preview {
-                Preview::Documents { documents, .. } if card.enabled && !documents.is_empty() => {
-                    Some(documents)
-                }
+                Preview::Documents {
+                    count,
+                    fields,
+                    values,
+                    ..
+                } if card.enabled && *count > 0 => Some((fields.clone(), values.clone())),
                 _ => None,
-            });
-        match before {
-            Some(documents) => {
-                let fields = nordpil_backend::field_paths(documents)
-                    .into_iter()
-                    .map(|field| FieldHint {
-                        path: field.path,
-                        detail: field.types.join(", "),
-                    })
-                    .collect();
-                (fields, nordpil_query::value_hints(documents))
-            }
-            None => (collection.to_vec(), Vec::new()),
-        }
+            })
     }
 
     // --- Running ---
@@ -1218,11 +1240,7 @@ impl AggregateState {
         for (card, documents) in self.stages.iter_mut().zip(previews) {
             card.queued = false;
             card.request = None;
-            card.preview = Preview::Documents {
-                texts: documents.iter().map(preview_text).collect(),
-                documents,
-                sampled: true,
-            };
+            card.preview = Preview::documents(&documents, true);
         }
         let mut run = Run::new(PipelineQuery::default());
         run.documents = results
@@ -1400,7 +1418,11 @@ mod tests {
         assert_eq!(requests.previews().len(), MAX_PREVIEWS + 1);
         assert!(matches!(
             &state.stages[0].preview,
-            Preview::Documents { documents, sampled: true, .. } if documents.len() == 3
+            Preview::Documents {
+                count: 3,
+                sampled: true,
+                ..
+            }
         ));
     }
 

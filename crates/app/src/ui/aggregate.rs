@@ -355,7 +355,11 @@ fn stage_card(
 ) -> Option<AggregateAction> {
     let palette = theme::palette(ui);
     let mut action = None;
-    let (fields, values) = tab.aggregate.fields_for(index, &tab.fields);
+    let before = tab.aggregate.fields_for(index);
+    let (fields, values): (&[_], &[_]) = match &before {
+        Some((fields, values)) => (fields, values),
+        None => (&tab.fields, &[]),
+    };
     let state = &mut tab.aggregate;
     let card_id = state.stages[index].id;
     let focus = state.focus.take_if(|(id, _)| *id == card_id);
@@ -454,7 +458,7 @@ fn stage_card(
             }
             let mode =
                 nordpil_query::pipeline::stage(&card.name).map_or(Mode::Document, Mode::Stage);
-            let language = QueryLanguage::new(mode, &fields, &values).collections(collections);
+            let language = QueryLanguage::new(mode, fields, values).collections(collections);
             if let Some((_, cursor)) = focus {
                 card.editor.focus_at(ui.ctx(), cursor);
             }
@@ -518,8 +522,8 @@ fn preview_status(ui: &mut egui::Ui, card: &StageCard) {
         return;
     }
     let text = match &card.preview {
-        Preview::Documents { documents, .. } if documents.is_empty() => "no documents".to_owned(),
-        Preview::Documents { documents, .. } => documents::plural(documents.len(), "document"),
+        Preview::Documents { count: 0, .. } => "no documents".to_owned(),
+        Preview::Documents { count, .. } => documents::plural(*count, "document"),
         Preview::TimedOut => "timed out".to_owned(),
         Preview::Failed(_) => "failed".to_owned(),
         Preview::Skipped(_) | Preview::None => return,
