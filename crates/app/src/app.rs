@@ -3393,6 +3393,7 @@ mod tests {
             uri: "mongodb://localhost:27017".to_owned(),
             color: None,
             read_only: false,
+            aws_profile: None,
         });
         entry.state = ConnectionState::Connected(vec![DatabaseNode {
             info: DatabaseInfo {
@@ -4539,6 +4540,38 @@ fi"#,
         assert!(!harness.ctx.global_style().visuals.dark_mode);
         let _ = std::fs::remove_dir_all(dir);
     }
+    #[test]
+    fn aws_sign_in_failure_does_not_ask_for_a_password() {
+        let dir = std::env::temp_dir().join(format!("nordpil-ui-{}", Uuid::new_v4()));
+        let backend = Backend::new(
+            ConnectionStore::new(dir.join("connections.toml")),
+            MemorySecrets::default(),
+        );
+        let mut app = NordpilApp::new(&egui::Context::default(), backend).unwrap();
+        // Let the initial (empty) load finish so it doesn't replace the entry.
+        while !app.keyring_available {
+            std::thread::sleep(Duration::from_millis(5));
+            app.process_events();
+        }
+        let id = Uuid::new_v4();
+        app.connections = vec![ConnectionEntry::new(SavedConnection {
+            id,
+            name: "prod".to_owned(),
+            uri: "mongodb://db/?authMechanism=MONGODB-AWS&authSource=$external".to_owned(),
+            color: None,
+            read_only: false,
+            aws_profile: Some("prod".to_owned()),
+        })];
+        let error = BackendError::new("AWS sign-in failed.").with_kind(ErrorKind::AwsCredentials);
+
+        app.connected(id, Err(error));
+
+        assert!(!matches!(app.dialog, Some(Dialog::Password(_))));
+        assert!(matches!(
+            &app.connections[0].state,
+            ConnectionState::Failed(failed) if failed.kind == ErrorKind::AwsCredentials
+        ));
+    }
 }
 
 #[cfg(all(test, feature = "screenshots"))]
@@ -4592,6 +4625,7 @@ mod screenshots {
             uri: "mongodb://localhost:27017".to_owned(),
             color,
             read_only,
+            aws_profile: None,
         };
         let mut local =
             ConnectionEntry::new(saved("Local dev", Some(ConnectionColor::Green), false));

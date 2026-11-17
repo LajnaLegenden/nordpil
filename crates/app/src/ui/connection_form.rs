@@ -39,6 +39,8 @@ pub struct ConnectionForm {
     fields: Fields,
     password: String,
     password_changed: bool,
+    /// AWS profile for AWS IAM connections; empty means the default.
+    aws_profile: String,
     color: Option<ConnectionColor>,
     read_only: bool,
     pub saving: bool,
@@ -51,6 +53,8 @@ struct Fields {
     username: String,
     auth_source: String,
     tls: bool,
+    /// AWS IAM (`MONGODB-AWS`) instead of username and password.
+    aws: bool,
 }
 
 impl Fields {
@@ -61,11 +65,15 @@ impl Fields {
             username: uri.username.clone().unwrap_or_default(),
             auth_source: uri.option("authSource").unwrap_or_default(),
             tls: uri.tls(),
+            aws: uri.option("authMechanism").as_deref() == Some(AWS_MECHANISM),
         }
     }
 }
 
 const DEFAULT_URI: &str = "mongodb://localhost:27017";
+const AWS_MECHANISM: &str = "MONGODB-AWS";
+/// Where MongoDB keeps users that authenticate externally, e.g. IAM ARNs.
+const EXTERNAL_AUTH_SOURCE: &str = "$external";
 
 impl ConnectionForm {
     pub fn new() -> Self {
@@ -73,14 +81,16 @@ impl ConnectionForm {
     }
 
     pub fn edit(saved: &SavedConnection) -> Self {
-        Self::from_parts(
+        let mut form = Self::from_parts(
             saved.id,
             false,
             &saved.name,
             &saved.uri,
             saved.color,
             saved.read_only,
-        )
+        );
+        form.aws_profile = saved.aws_profile.clone().unwrap_or_default();
+        form
     }
 
     fn from_parts(
@@ -104,6 +114,7 @@ impl ConnectionForm {
             uri,
             password: String::new(),
             password_changed: false,
+            aws_profile: String::new(),
             color,
             read_only,
             saving: false,
@@ -153,8 +164,17 @@ impl ConnectionForm {
                 *host = name.to_owned();
             }
         }
-        uri.username = non_empty(&self.fields.username);
+        // With AWS IAM the username field is hidden. A username from the
+        // connection string (an access key ID) is left as it is.
+        if !self.fields.aws {
+            uri.username = non_empty(&self.fields.username);
+        }
         uri.set_option("authSource", non_empty(&self.fields.auth_source).as_deref());
+        if self.fields.aws {
+            uri.set_option("authMechanism", Some(AWS_MECHANISM));
+        } else if uri.option("authMechanism").as_deref() == Some(AWS_MECHANISM) {
+            uri.set_option("authMechanism", None);
+        }
         uri.set_tls(self.fields.tls);
 
         self.uri_text = uri.to_string();
@@ -170,6 +190,31 @@ impl ConnectionForm {
         self.fields.tls = srv;
         self.fields_changed();
         self.fields.hosts = self.uri.hosts.join(", ");
+    }
+
+    /// Switches between username and password and AWS IAM, which signs in
+    /// with AWS credentials against users in `$external`.
+    fn set_aws(&mut self, aws: bool) {
+        self.fields.aws = aws;
+        if aws {
+            self.fields.username.clear();
+            self.uri.username = None;
+            self.fields.auth_source = EXTERNAL_AUTH_SOURCE.to_owned();
+            // A database password has no use any more; drop the stored one.
+            self.password.clear();
+            self.password_changed = true;
+        } else if self.fields.auth_source == EXTERNAL_AUTH_SOURCE {
+            self.fields.auth_source.clear();
+        }
+        self.fields_changed();
+    }
+
+    /// AWS session tokens are temporary, and connection strings are saved as
+    /// plain text, so a token there is worth a warning.
+    fn has_session_token(&self) -> bool {
+        self.uri
+            .option("authMechanismProperties")
+            .is_some_and(|properties| properties.contains("AWS_SESSION_TOKEN"))
     }
 
     pub fn show(&mut self, ctx: &egui::Context, keyring_available: bool) -> FormResult {
@@ -341,26 +386,46 @@ impl ConnectionForm {
                     &mut self.fields.hosts,
                     "host:27017, host2:27017",
                 );
-                changed |= text_row(ui, "Username", &mut self.fields.username, "");
-
-                let label = ui.label("Password");
-                let hint = if self.is_new || !keyring_available {
-                    ""
-                } else {
-                    "unchanged"
-                };
-                let response = ui
-                    .add(
-                        TextEdit::singleline(&mut self.password)
-                            .password(true)
-                            .hint_text(hint)
-                            .desired_width(f32::INFINITY),
-                    )
-                    .labelled_by(label.id);
-                self.password_changed |= response.changed();
+                ui.label("Authentication");
+                let mut aws = self.fields.aws;
+                if kit::segmented(
+                    ui,
+                    &mut aws,
+                    &[
+                        (false, None, "Username and password"),
+                        (true, None, "AWS IAM"),
+                    ],
+                    30.0,
+                ) {
+                    self.set_aws(aws);
+                }
                 ui.end_row();
 
-                changed |= text_row(ui, "Auth database", &mut self.fields.auth_source, "admin");
+                if self.fields.aws {
+                    // Not part of the connection string, so no `changed`.
+                    text_row(ui, "AWS profile", &mut self.aws_profile, "default");
+                } else {
+                    changed |= text_row(ui, "Username", &mut self.fields.username, "");
+
+                    let label = ui.label("Password");
+                    let hint = if self.is_new || !keyring_available {
+                        ""
+                    } else {
+                        "unchanged"
+                    };
+                    let response = ui
+                        .add(
+                            TextEdit::singleline(&mut self.password)
+                                .password(true)
+                                .hint_text(hint)
+                                .desired_width(f32::INFINITY),
+                        )
+                        .labelled_by(label.id);
+                    self.password_changed |= response.changed();
+                    ui.end_row();
+
+                    changed |= text_row(ui, "Auth database", &mut self.fields.auth_source, "admin");
+                }
 
                 ui.label("");
                 changed |= ui.checkbox(&mut self.fields.tls, "TLS").changed();
@@ -369,7 +434,19 @@ impl ConnectionForm {
         if changed {
             self.fields_changed();
         }
-        if !keyring_available {
+        if self.fields.aws {
+            ui.weak(
+                "Signs in with your AWS credentials, e.g. after aws sso login. \
+                 Leave the profile empty to use the default one or AWS_PROFILE.",
+            );
+            if self.has_session_token() {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "The connection string holds an AWS session token. It expires, and \
+                     connection strings are saved as plain text: use an AWS profile instead.",
+                );
+            }
+        } else if !keyring_available {
             ui.weak(
                 "No system keyring found, so the password is not saved. \
                  You'll be asked for it when connecting.",
@@ -447,6 +524,11 @@ impl ConnectionForm {
                 uri: self.uri_text.trim().to_owned(),
                 color: self.color,
                 read_only: self.read_only,
+                aws_profile: self
+                    .fields
+                    .aws
+                    .then(|| non_empty(&self.aws_profile))
+                    .flatten(),
             },
             password,
             typed_password,
@@ -532,5 +614,72 @@ mod tests {
 
         assert!(form.uri_error.is_some());
         assert_eq!(form.fields.username, "bob");
+    }
+
+    #[test]
+    fn aws_connection_string_selects_aws_iam() {
+        let form = form_with_uri(
+            "mongodb+srv://c.example.net/?authMechanism=MONGODB-AWS&authSource=$external",
+        );
+
+        assert!(form.fields.aws);
+    }
+
+    #[test]
+    fn choosing_aws_iam_rewrites_connection_string() {
+        let mut form = form_with_uri("mongodb://bob@a:1/?authSource=admin");
+        form.password = "s3cret".to_owned();
+
+        form.set_aws(true);
+
+        assert_eq!(
+            form.uri_text,
+            "mongodb://a:1/?authSource=$external&authMechanism=MONGODB-AWS"
+        );
+        assert_eq!(form.fields.username, "");
+        assert_eq!(form.fields.auth_source, "$external");
+        // AWS credentials replace the stored password.
+        assert!(form.password.is_empty());
+        assert!(form.password_changed);
+
+        form.set_aws(false);
+
+        assert_eq!(form.uri_text, "mongodb://a:1");
+        assert_eq!(form.fields.auth_source, "");
+    }
+
+    #[test]
+    fn aws_profile_is_saved_for_aws_iam_only() {
+        let mut form = ConnectionForm::edit(&SavedConnection {
+            id: Uuid::new_v4(),
+            name: "prod".to_owned(),
+            uri: "mongodb://a:1/?authMechanism=MONGODB-AWS&authSource=$external".to_owned(),
+            color: None,
+            read_only: false,
+            aws_profile: Some("dev".to_owned()),
+        });
+        assert_eq!(form.aws_profile, "dev");
+
+        let FormResult::Save { connection, .. } = form.save(false) else {
+            panic!("expected a save");
+        };
+        assert_eq!(connection.aws_profile.as_deref(), Some("dev"));
+
+        form.set_aws(false);
+        let FormResult::Save { connection, .. } = form.save(false) else {
+            panic!("expected a save");
+        };
+        assert_eq!(connection.aws_profile, None);
+    }
+
+    #[test]
+    fn notices_a_session_token_in_the_connection_string() {
+        let form = form_with_uri(
+            "mongodb://AKID@a:1/?authMechanism=MONGODB-AWS\
+             &authMechanismProperties=AWS_SESSION_TOKEN:abc",
+        );
+
+        assert!(form.has_session_token());
+        assert!(!form_with_uri("mongodb://a:1").has_session_token());
     }
 }

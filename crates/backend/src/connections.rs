@@ -2,14 +2,20 @@
 
 use std::time::Duration;
 
+use aws_config::profile::ProfileFileCredentialsProvider;
+use aws_credential_types::provider::SharedCredentialsProvider;
+use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
 use mongodb::Client;
 use mongodb::bson::doc;
-use mongodb::options::ClientOptions;
+use mongodb::options::{AuthMechanism, ClientOptions};
 use uuid::Uuid;
 
 use crate::store::SavedConnection;
 use crate::uri::ConnectionUri;
-use crate::{Backend, BackendError, DatabaseInfo, ErrorKind, Password, PasswordChange, Session};
+use crate::{
+    AwsProfileFiles, Backend, BackendError, DatabaseInfo, ErrorKind, Password, PasswordChange,
+    Session,
+};
 
 /// Used unless the connection string sets its own timeouts. The driver's
 /// 30 s default is too long to stare at a spinner.
@@ -126,6 +132,17 @@ impl Backend {
         if let (Some(credential), Some(password)) = (options.credential.as_mut(), &password) {
             credential.password = Some(password.expose().to_owned());
         }
+        let aws = options
+            .credential
+            .as_ref()
+            .is_some_and(|c| c.mechanism == Some(AuthMechanism::MongoDbAws));
+        let aws_profile = saved.aws_profile.as_deref().filter(|p| !p.is_empty());
+        if aws
+            && let Some(credential) = options.credential.as_mut()
+            && let Some(provider) = aws_credentials(aws_profile, self.aws_profile_files.as_ref())
+        {
+            credential.aws_credential_provider = Some(provider);
+        }
         options.app_name.get_or_insert_with(|| "nordpil".to_owned());
         options
             .server_selection_timeout
@@ -136,7 +153,15 @@ impl Backend {
         client
             .database("admin")
             .run_command(doc! { "ping": 1 })
-            .await?;
+            .await
+            .map_err(|error| {
+                let error = BackendError::from(error);
+                if aws && error.kind == ErrorKind::AuthenticationFailed {
+                    aws_error(error, aws_profile)
+                } else {
+                    error
+                }
+            })?;
         let databases = crate::databases::list(&client).await?;
 
         if typed
@@ -187,4 +212,49 @@ impl Backend {
 
 fn parse_uri(uri: &str) -> Result<ConnectionUri, BackendError> {
     ConnectionUri::parse(uri).map_err(|error| BackendError::new(error.to_string()))
+}
+
+/// Credentials for a `MONGODB-AWS` connection with a chosen profile. `None`
+/// leaves it to the driver, which uses the AWS SDK's default lookup:
+/// environment, `AWS_PROFILE` or the default profile, then ECS or EC2.
+fn aws_credentials(
+    profile: Option<&str>,
+    files: Option<&AwsProfileFiles>,
+) -> Option<SharedCredentialsProvider> {
+    if profile.is_none() && files.is_none() {
+        return None;
+    }
+    let mut builder = ProfileFileCredentialsProvider::builder();
+    if let Some(profile) = profile {
+        builder = builder.profile_name(profile);
+    }
+    if let Some(files) = files {
+        builder = builder.profile_files(
+            EnvConfigFiles::builder()
+                .with_file(EnvConfigFileKind::Config, &files.config)
+                .with_file(EnvConfigFileKind::Credentials, &files.credentials)
+                .build(),
+        );
+    }
+    Some(SharedCredentialsProvider::new(builder.build()))
+}
+
+/// The driver reports missing, expired and rejected AWS credentials alike as
+/// an authentication failure; its text is kept as the detail.
+fn aws_error(error: BackendError, profile: Option<&str>) -> BackendError {
+    let message = match profile {
+        Some(profile) => format!(
+            "AWS sign-in with profile \"{profile}\" failed. Check that the profile exists and \
+             is signed in (aws sso login --profile {profile}), and that its IAM identity has \
+             a database user."
+        ),
+        None => "AWS sign-in failed. Check that AWS credentials are available and signed in \
+                 (aws sso login), and that the IAM identity has a database user."
+            .to_owned(),
+    };
+    BackendError {
+        kind: ErrorKind::AwsCredentials,
+        message,
+        detail: error.detail,
+    }
 }
