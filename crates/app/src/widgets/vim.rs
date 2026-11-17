@@ -1389,10 +1389,11 @@ fn quote_object(chars: &[char], at: usize, quote: char, around: bool) -> Option<
     let quotes: Vec<usize> = (start..end)
         .filter(|&i| chars[i] == quote && (i == start || chars[i - 1] != '\\'))
         .collect();
-    let (open, close) = quotes
-        .chunks_exact(2)
-        .map(|pair| (pair[0], pair[1]))
-        .find(|&(_, close)| at <= close)?;
+    let &[open, close] = quotes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .find(|[_, close]| at <= *close)?;
     if !around {
         return Some(open + 1..close);
     }
