@@ -37,6 +37,7 @@ async fn connected_backend(read_only: bool) -> (ContainerAsync<Mongo>, Backend, 
         uri: uri.clone(),
         color: None,
         read_only,
+        aws_profile: None,
     };
     let save = Command::SaveConnection {
         connection,

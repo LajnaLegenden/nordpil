@@ -10,8 +10,10 @@ when idle, against roughly 1 GB for Compass.
 
 - **Connections**: saved connections, edited as a connection string or as separate fields
   kept in sync. Passwords are stored in the system keyring, or asked for on each connect
-  when there is none. Connections can be colored and marked read-only, which blocks every
-  write.
+  when there is none. AWS IAM sign-in (`MONGODB-AWS`, e.g. Atlas with IAM database users)
+  uses your AWS credentials instead: pick a profile from `~/.aws/config`, SSO profiles
+  included, or leave it empty for the default one or `AWS_PROFILE`. Connections can be
+  colored and marked read-only, which blocks every write.
 - **Browse**: a tree of databases and collections (with views, time series and capped
   collections marked). Create and drop databases and collections.
 - **Go to collection**: Ctrl+K finds any collection by name, recent ones first, across

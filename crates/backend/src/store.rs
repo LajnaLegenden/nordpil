@@ -19,6 +19,10 @@ pub struct SavedConnection {
     /// Blocks every write: inserts, updates, deletes, drops, index changes.
     #[serde(default)]
     pub read_only: bool,
+    /// AWS profile (from `~/.aws/config`) for `MONGODB-AWS` connections.
+    /// Unset uses the AWS SDK's default lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_profile: Option<String>,
 }
 
 /// Tags a connection, e.g. red for production.
@@ -122,6 +126,7 @@ mod tests {
                 uri: "mongodb://localhost".to_owned(),
                 color: None,
                 read_only: false,
+                aws_profile: None,
             },
             SavedConnection {
                 id: Uuid::new_v4(),
@@ -129,6 +134,7 @@ mod tests {
                 uri: "mongodb+srv://admin@prod.example.net".to_owned(),
                 color: Some(ConnectionColor::Red),
                 read_only: true,
+                aws_profile: None,
             },
         ];
 
