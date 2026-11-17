@@ -126,6 +126,9 @@ pub struct Masks {
     /// Names the agent already knows: schema path segments and keys.
     names: HashSet<String>,
     hidden: Vec<Hidden>,
+    /// Index into `hidden` by original and whether it is a key segment, so
+    /// a big `$in` doesn't make hiding quadratic.
+    by_original: HashMap<(String, bool), usize>,
 }
 
 impl Masks {
@@ -249,11 +252,11 @@ impl Masks {
     /// The placeholder for a value of type `kind`, or for a key segment when
     /// `kind` is `None`; the same one again for the same original.
     fn hide(&mut self, original: &str, kind: Option<&str>) -> String {
-        if let Some(hidden) = self.hidden.iter().find(|hidden| {
-            hidden.original == original && is_key_kind(&hidden.placeholder) == kind.is_none()
-        }) {
-            return hidden.placeholder.clone();
+        let key = (original.to_owned(), kind.is_none());
+        if let Some(&index) = self.by_original.get(&key) {
+            return self.hidden[index].placeholder.clone();
         }
+        self.by_original.insert(key, self.hidden.len());
         let n = self.hidden.len() + 1;
         let placeholder = match kind {
             Some(kind) => format!("__v{n}_{kind}__"),
@@ -297,10 +300,18 @@ impl Masks {
         if placeholders.is_empty() {
             return Ok(None);
         }
+        // `__v{n}_…__` and `__k{n}__` are number n in `hidden`.
         let find = |placeholder: &str| {
-            self.hidden
-                .iter()
-                .find(|hidden| hidden.placeholder == placeholder)
+            placeholder
+                .get(3..)
+                .map(|rest| {
+                    rest.split(|c: char| !c.is_ascii_digit())
+                        .next()
+                        .unwrap_or("")
+                })
+                .and_then(|n| n.parse::<usize>().ok())
+                .and_then(|n| self.hidden.get(n.checked_sub(1)?))
+                .filter(|hidden| hidden.placeholder == placeholder)
                 .ok_or_else(|| format!("Unknown placeholder {placeholder}."))
         };
         if let [(range, placeholder)] = placeholders.as_slice()
