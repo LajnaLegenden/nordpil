@@ -21,6 +21,7 @@ fn prompt(surface: Surface) -> Prompt {
         request: "orders over 100".to_owned(),
         read_only: false,
         now: "2026-11-06T10:00:00Z".to_owned(),
+        share: AiShare::default(),
     }
 }
 
@@ -103,16 +104,19 @@ fn index_keys_drop_options_and_dynamic_names() {
         ops: None,
         since: None,
     };
-    let keys = index_keys(&[
-        index(
-            "status_1",
-            doc! { "key": { "status": 1 }, "unique": true, "partialFilterExpression": { "status": "SECRET" } },
-        ),
-        index(
-            "scores.507f1f77bcf86cd799439011_-1",
-            doc! { "key": { "scores.507f1f77bcf86cd799439011": -1 } },
-        ),
-    ]);
+    let keys = index_keys(
+        &[
+            index(
+                "status_1",
+                doc! { "key": { "status": 1 }, "unique": true, "partialFilterExpression": { "status": "SECRET" } },
+            ),
+            index(
+                "scores.507f1f77bcf86cd799439011_-1",
+                doc! { "key": { "scores.507f1f77bcf86cd799439011": -1 } },
+            ),
+        ],
+        &AiShare::default(),
+    );
     assert_eq!(keys[0].name.as_deref(), Some("status_1"));
     assert_eq!(keys[0].keys, "{ status: 1 }");
     assert!(keys[0].unique);
@@ -123,6 +127,90 @@ fn index_keys_drop_options_and_dynamic_names() {
     let (system, user) = build_prompt(&with_indexes);
     assert!(!format!("{system}{user}").contains("SECRET"));
     assert!(!format!("{system}{user}").contains("507f"));
+}
+
+fn info(name: &str, key: Document) -> IndexInfo {
+    IndexInfo {
+        name: name.to_owned(),
+        spec: doc! { "key": key },
+        size: None,
+        ops: None,
+        since: None,
+    }
+}
+
+fn nested_schema() -> Vec<SchemaField> {
+    ["total", "address", "address.city"]
+        .map(|path| SchemaField {
+            path: path.to_owned(),
+            types: vec!["String".to_owned()],
+        })
+        .to_vec()
+}
+
+#[test]
+fn top_level_sharing_drops_nested_fields_and_their_indexes() {
+    let share = AiShare {
+        fields: AiFields::TopLevel,
+        ..AiShare::default()
+    };
+    let fields = share_fields(nested_schema(), &share);
+    let paths: Vec<&str> = fields.iter().map(|field| field.path.as_str()).collect();
+    assert_eq!(paths, ["total", "address"]);
+    let indexes = [
+        info("total_1", doc! { "total": 1 }),
+        info("city", doc! { "address.city": 1 }),
+    ];
+    let keys = index_keys(&indexes, &share);
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].keys, "{ total: 1 }");
+
+    let mut prompt = prompt(Surface::Find);
+    prompt.schema = fields;
+    prompt.indexes = keys;
+    prompt.share = share;
+    let (_, user) = build_prompt(&prompt);
+    assert!(user.contains("top level only"));
+    assert!(!user.contains("city"));
+}
+
+#[test]
+fn names_only_sharing_sends_no_types() {
+    let share = AiShare {
+        types: false,
+        ..AiShare::default()
+    };
+    let mut prompt = prompt(Surface::Find);
+    prompt.schema = share_fields(nested_schema(), &share);
+    prompt.share = share;
+    let (_, user) = build_prompt(&prompt);
+    assert!(user.contains("- address.city\n"));
+    assert!(!user.contains("String"));
+}
+
+#[test]
+fn no_field_sharing_sends_no_fields_or_indexes() {
+    let share = AiShare {
+        fields: AiFields::None,
+        ..AiShare::default()
+    };
+    assert!(share_fields(nested_schema(), &share).is_empty());
+    assert!(index_keys(&[info("total_1", doc! { "total": 1 })], &share).is_empty());
+    let mut prompt = prompt(Surface::Find);
+    prompt.schema = Vec::new();
+    prompt.share = share;
+    let (_, user) = build_prompt(&prompt);
+    assert!(user.contains("not shared"));
+    assert!(!user.contains("no fields sampled"));
+}
+
+#[test]
+fn indexes_can_be_left_out() {
+    let share = AiShare {
+        indexes: false,
+        ..AiShare::default()
+    };
+    assert!(index_keys(&[info("total_1", doc! { "total": 1 })], &share).is_empty());
 }
 
 /// Values use letters that no key, type name or prompt text uses.
@@ -204,6 +292,7 @@ proptest! {
             request: "newest first".to_owned(),
             read_only: false,
             now: "2026-11-06T10:00:00Z".to_owned(),
+            share: AiShare::default(),
         };
         let (system, user) = build_prompt(&prompt);
         let sent = format!("{system}\n{user}");

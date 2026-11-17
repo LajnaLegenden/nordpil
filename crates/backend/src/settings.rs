@@ -200,6 +200,47 @@ pub struct AiCustom {
     pub args: Vec<String>,
 }
 
+/// How much of a collection's fields Ask AI shares with the agent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiFields {
+    /// Every field path, nested ones included.
+    #[default]
+    All,
+    /// Only the document's own keys, e.g. `address` but not `address.city`.
+    TopLevel,
+    /// No fields; the agent goes by the request and the current query.
+    None,
+}
+
+/// What Ask AI sends the agent besides the request. Values never are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiShare {
+    pub fields: AiFields,
+    /// The BSON types seen at each field; off sends the names alone.
+    pub types: bool,
+    /// Index key patterns, for fields the agent is shown.
+    pub indexes: bool,
+    /// Collections the agent may join, from reference mappings and the
+    /// request.
+    pub linked: bool,
+    /// The tab's query or pipeline, its values hidden.
+    pub query: bool,
+}
+
+impl Default for AiShare {
+    fn default() -> Self {
+        Self {
+            fields: AiFields::All,
+            types: true,
+            indexes: true,
+            linked: true,
+            query: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiSettings {
@@ -209,6 +250,7 @@ pub struct AiSettings {
     pub custom: AiCustom,
     /// The agent is stopped after this long.
     pub timeout_secs: u64,
+    pub share: AiShare,
 }
 
 impl AiSettings {
@@ -223,6 +265,7 @@ impl Default for AiSettings {
             codex: AiPreset::default(),
             custom: AiCustom::default(),
             timeout_secs: Self::TIMEOUT_SECS,
+            share: AiShare::default(),
         }
     }
 }
@@ -378,6 +421,13 @@ mod tests {
                     args: vec!["--schema".to_owned(), "{schema_file}".to_owned()],
                 },
                 timeout_secs: 30,
+                share: AiShare {
+                    fields: AiFields::TopLevel,
+                    types: false,
+                    indexes: true,
+                    linked: false,
+                    query: true,
+                },
             },
             lock: LockSettings::default(),
         };
