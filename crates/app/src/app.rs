@@ -2,10 +2,12 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Frame, Margin, RichText, Stroke};
-use nordpil_backend::ai::{Agent, AgentRequest, LinkedCollection, Prompt, Surface, Turn};
+use nordpil_backend::ai::{
+    Agent, AgentRequest, LinkedCollection, Prompt, Surface, Turn, share_fields,
+};
 use nordpil_backend::navigation::{KnownDatabase, Recent};
 use nordpil_backend::references::{DatabaseMappings, Mapping};
-use nordpil_backend::settings::{AiAgent, GotoScope, Settings};
+use nordpil_backend::settings::{AiAgent, AiFields, GotoScope, Settings};
 use nordpil_backend::store::SavedConnection;
 use nordpil_backend::themes::{LoadedTheme, ThemeSaved};
 use nordpil_backend::{
@@ -1125,19 +1127,28 @@ impl NordpilApp {
         let collections = self.collection_names(target.connection, &target.database);
         let mappings = self.database_mappings(target.connection, &target.database);
         let words = format!("{} {}", ask.prompt, pending.text);
-        let linked = crate::ai::linked_collections(
-            &target.collection,
-            &tab.fields,
-            mappings,
-            &collections,
-            &words,
-        );
+        let share = self.settings.ai.share;
+        // Nothing is gathered that isn't going to be sent.
+        let linked = if share.linked {
+            crate::ai::linked_collections(
+                &target.collection,
+                &tab.fields,
+                mappings,
+                &collections,
+                &words,
+            )
+        } else {
+            Vec::new()
+        };
         let missing: Vec<String> = linked
             .iter()
             .map(|(name, _)| name.clone())
             .filter(|name| !tab.shell.fields.contains_key(name))
             .collect();
-        let waiting = tab.indexes.is_none() || tab.fields.is_empty() || !missing.is_empty();
+        let fields = share.fields != AiFields::None;
+        let waiting = (fields && share.indexes && tab.indexes.is_none())
+            || (fields && tab.fields.is_empty())
+            || !missing.is_empty();
         if waiting && pending.since.elapsed() < crate::ai::GATHER_TIME {
             let tab = &mut self.tabs[index];
             for collection in missing {
@@ -1160,20 +1171,23 @@ impl NordpilApp {
             .entry(self.tabs[index].target.connection)
             .is_none_or(|entry| entry.saved.read_only);
         let tab = &self.tabs[index];
-        let schema = crate::ai::schema(&tab.fields);
+        let share = self.settings.ai.share;
+        let schema = share_fields(crate::ai::schema(&tab.fields), &share);
         let indexes = match &tab.indexes {
-            Some(Ok(indexes)) => nordpil_backend::ai::index_keys(indexes),
+            Some(Ok(indexes)) => nordpil_backend::ai::index_keys(indexes, &share),
             _ => Vec::new(),
         };
         let linked: Vec<LinkedCollection> = linked
             .into_iter()
             .map(|(name, via)| LinkedCollection {
-                fields: tab
-                    .shell
-                    .fields
-                    .get(&name)
-                    .map(|fields| crate::ai::schema(fields))
-                    .unwrap_or_default(),
+                fields: share_fields(
+                    tab.shell
+                        .fields
+                        .get(&name)
+                        .map(|fields| crate::ai::schema(fields))
+                        .unwrap_or_default(),
+                    &share,
+                ),
                 name,
                 via,
             })
@@ -1207,7 +1221,12 @@ impl NordpilApp {
                 .map(|field| field.path.as_str());
             nordpil_query::mask::Masks::new(paths)
         });
-        let current = crate::ai::masked_current(masks, ask.preview.as_ref().unwrap_or(&tab_query));
+        // The masks know only the names shared above, so a `'$path'` string
+        // naming a field the agent isn't shown is hidden like a value.
+        let current = share
+            .query
+            .then(|| crate::ai::masked_current(masks, ask.preview.as_ref().unwrap_or(&tab_query)))
+            .flatten();
         let Some(pending) = &mut ask.pending else {
             return;
         };
@@ -1223,6 +1242,7 @@ impl NordpilApp {
             now: bson::DateTime::now()
                 .try_to_rfc3339_string()
                 .unwrap_or_default(),
+            share,
         };
         let (system, user) = nordpil_backend::ai::build_prompt(&prompt);
         ask.sent = Some(format!("{system}\n\n{user}"));
@@ -4830,7 +4850,7 @@ mod screenshots {
         harness.run();
         // The theme rows push the AI options down; scroll to them.
         harness
-            .get_by_role_and_label(Role::MultilineTextInput, "Arguments")
+            .get_by_role_and_label(Role::CheckBox, "Current query")
             .scroll_to_me();
         harness.run();
         save(&mut harness, "settings-ai");
