@@ -5,7 +5,8 @@
 use eframe::egui::{self, CornerRadius, Frame, Key, Margin, RichText, Stroke, TextEdit};
 use nordpil_backend::Password;
 use nordpil_backend::settings::{
-    AiAgent, AiSettings, GotoScope, LockTimeout, Settings, TextSize, ThemeMode, Updates,
+    AiAgent, AiFields, AiSettings, AiShare, GotoScope, LockTimeout, Settings, TextSize, ThemeMode,
+    Updates,
 };
 
 use crate::icons;
@@ -583,19 +584,82 @@ fn ai_settings(ui: &mut egui::Ui, ai: &mut AiSettings, draft: &mut AiDraft) -> b
                     .suffix(" s"),
             );
         });
-        ui.add(
-            egui::Label::new(
-                RichText::new(
-                    "The agent gets field names, types and indexes, never values. \
-                     Values in your query are hidden.",
-                )
-                .size(12.5)
-                .color(palette.muted),
-            )
-            .wrap(),
-        );
+        share_settings(ui, &mut ai.share);
     }
     lost_focus
+}
+
+/// What the agent is sent besides the request.
+fn share_settings(ui: &mut egui::Ui, share: &mut AiShare) {
+    let palette = theme::palette(ui);
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new("Share with the agent")
+            .size(12.5)
+            .color(palette.muted),
+    );
+    kit::segmented(
+        ui,
+        &mut share.fields,
+        &[
+            (AiFields::All, None, "All fields"),
+            (AiFields::TopLevel, None, "Top level"),
+            (AiFields::None, None, "No fields"),
+        ],
+        30.0,
+    );
+    let fields = share.fields != AiFields::None;
+    ui.add_enabled(fields, egui::Checkbox::new(&mut share.types, "Field types"))
+        .on_hover_text("Off sends field names alone, e.g. createdAt but not Date.");
+    ui.add_enabled(fields, egui::Checkbox::new(&mut share.indexes, "Indexes"))
+        .on_hover_text("Key patterns of indexes on the fields shared.");
+    ui.checkbox(&mut share.linked, "Linked collections")
+        .on_hover_text(
+            "Collections to join: those your reference mappings link, and those the \
+             request names. Their fields follow the choice above.",
+        );
+    ui.checkbox(&mut share.query, "Current query")
+        .on_hover_text("The tab's query or pipeline, its values hidden.");
+    ui.add(
+        egui::Label::new(
+            RichText::new(share_summary(share))
+                .size(12.5)
+                .color(palette.muted),
+        )
+        .wrap(),
+    );
+}
+
+/// E.g. "The agent gets field names, types and indexes, never values."
+fn share_summary(share: &AiShare) -> String {
+    let mut parts = Vec::new();
+    match share.fields {
+        AiFields::All => parts.push("field names"),
+        AiFields::TopLevel => parts.push("top-level field names"),
+        AiFields::None => {}
+    }
+    if share.fields != AiFields::None {
+        if share.types {
+            parts.push("types");
+        }
+        if share.indexes {
+            parts.push("indexes");
+        }
+    }
+    if share.linked {
+        parts.push("linked collections");
+    }
+    if share.query {
+        parts.push("your query with its values hidden");
+    }
+    match parts.as_slice() {
+        [] => "The agent gets only your request.".to_owned(),
+        [one] => format!("The agent gets your request and {one}, never values."),
+        [rest @ .., last] => format!(
+            "The agent gets your request, {} and {last}, never values.",
+            rest.join(", ")
+        ),
+    }
 }
 
 /// The dark or light slot's theme, from the themes usable in that mode,
@@ -745,5 +809,37 @@ fn choice(ui: &mut egui::Ui, value: &mut GotoScope, option: GotoScope, title: &s
         .interact(egui::Sense::click());
     if response.clicked() {
         *value = option;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn share_summary_lists_what_is_sent() {
+        assert_eq!(
+            share_summary(&AiShare::default()),
+            "The agent gets your request, field names, types, indexes, linked collections \
+             and your query with its values hidden, never values."
+        );
+        let nothing = AiShare {
+            fields: AiFields::None,
+            linked: false,
+            query: false,
+            ..AiShare::default()
+        };
+        assert_eq!(share_summary(&nothing), "The agent gets only your request.");
+        let names = AiShare {
+            fields: AiFields::TopLevel,
+            types: false,
+            indexes: false,
+            linked: false,
+            query: false,
+        };
+        assert_eq!(
+            share_summary(&names),
+            "The agent gets your request and top-level field names, never values."
+        );
     }
 }
