@@ -58,6 +58,21 @@ impl Backend {
         Ok(connection)
     }
 
+    /// `index` is the connection's place once it is out of its old one.
+    pub(crate) async fn move_connection(&self, id: Uuid, index: usize) -> Result<(), BackendError> {
+        self.with_store(move |store| {
+            let mut connections = store.load()?;
+            let from = connections
+                .iter()
+                .position(|c| c.id == id)
+                .ok_or_else(|| BackendError::new("This connection no longer exists."))?;
+            let moved = connections.remove(from);
+            connections.insert(index.min(connections.len()), moved);
+            store.save(&connections)
+        })
+        .await
+    }
+
     pub(crate) async fn delete_connection(&self, id: Uuid) -> Result<(), BackendError> {
         self.lock_sessions().remove(&id);
         self.with_store(move |store| {
