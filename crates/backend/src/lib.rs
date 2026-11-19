@@ -89,6 +89,11 @@ pub enum Command {
         password: PasswordChange,
     },
     DeleteConnection(Uuid),
+    /// Moves a saved connection to `index` in the saved order.
+    MoveConnection {
+        id: Uuid,
+        index: usize,
+    },
     /// Without a `password`, the keyring password is used.
     Connect {
         id: Uuid,
@@ -302,6 +307,11 @@ pub enum Response {
     ConnectionDeleted {
         id: Uuid,
         result: Result<(), BackendError>,
+    },
+    ConnectionMoved {
+        result: Result<(), BackendError>,
+        /// The saved order after the move, or as it still is when it failed.
+        order: Vec<Uuid>,
     },
     Connected {
         id: Uuid,
@@ -538,6 +548,18 @@ impl Handler for Backend {
                 id,
                 result: self.delete_connection(id).await,
             },
+            Command::MoveConnection { id, index } => {
+                let result = self.move_connection(id, index).await;
+                let saved = self.with_store(ConnectionStore::load).await;
+                Response::ConnectionMoved {
+                    result,
+                    order: saved
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|connection| connection.id)
+                        .collect(),
+                }
+            }
             Command::Connect {
                 id,
                 password,
@@ -860,6 +882,39 @@ mod tests {
             panic!("unexpected response");
         };
         assert_eq!(result.unwrap(), [saved]);
+    }
+
+    #[tokio::test]
+    async fn move_changes_the_saved_order() {
+        let backend = backend();
+        let mut ids = Vec::new();
+        for host in ["a", "b", "c"] {
+            let connection = connection(&format!("mongodb://{host}/"));
+            ids.push(connection.id);
+            send(
+                &backend,
+                Command::SaveConnection {
+                    connection,
+                    password: PasswordChange::Keep,
+                },
+            )
+            .await;
+        }
+
+        let Response::ConnectionMoved { result, order } = send(
+            &backend,
+            Command::MoveConnection {
+                id: ids[0],
+                index: 2,
+            },
+        )
+        .await
+        else {
+            panic!("unexpected response");
+        };
+
+        result.unwrap();
+        assert_eq!(order, [ids[1], ids[2], ids[0]]);
     }
 
     #[tokio::test]
