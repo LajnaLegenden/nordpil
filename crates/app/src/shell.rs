@@ -18,7 +18,7 @@ use nordpil_query::{FieldHint, ScriptHints, Style, ValueHint};
 use nordpil_shell::{Event, Query, QueryKind, ResultValue, ScriptError};
 
 use crate::tabs::{Results, View, page_window};
-use crate::widgets::code_editor::{CodeEditor, Completion, Language, Span};
+use crate::widgets::code_editor::{CodeEditor, Completion, Language, Span, VimFocus};
 
 /// How long typing must pause before the draft is saved.
 pub const DRAFT_DELAY: Duration = Duration::from_secs(1);
@@ -129,7 +129,8 @@ impl ShellState {
                 .frameless()
                 .rows(1)
                 .line_numbers()
-                .hint("db.collection.find({})"),
+                .hint("db.collection.find({})")
+                .vim(VimFocus::Keep),
             text: String::new(),
             loaded: false,
             saved_text: String::new(),

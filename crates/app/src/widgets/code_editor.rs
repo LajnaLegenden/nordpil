@@ -1,18 +1,19 @@
 //! A text editor for queries and documents: syntax highlighting, a
-//! keyboard-driven completion popup, and brackets and quotes that close
-//! themselves.
+//! keyboard-driven completion popup, brackets and quotes that close
+//! themselves, and opt-in vim keys.
 
 use std::ops::Range;
 
 use eframe::egui::text::{CCursor, CCursorRange, LayoutJob};
-use eframe::egui::text_edit::TextEditState;
+use eframe::egui::text_edit::{TextEditOutput, TextEditState};
 use eframe::egui::{
-    self, Align2, CompletionPopup, CornerRadius, Event, FontId, Frame, Key, Margin, Modifiers,
-    RectAlign, Stroke, Suggestion, TextFormat, TextStyle,
+    self, Align2, Color32, CompletionPopup, CornerRadius, Event, EventFilter, FontId, Frame, Key,
+    Margin, Modifiers, RectAlign, Stroke, Suggestion, TextFormat, TextStyle,
 };
 use nordpil_query::Highlight;
 
 use crate::theme;
+use crate::widgets::vim::{self, Edit, Register, Vim};
 
 /// Highlighted byte range of the editor text.
 pub type Span = (Range<usize>, Highlight);
@@ -72,6 +73,35 @@ pub struct CodeEditor {
     /// The word a completion just inserted, so the popup doesn't reopen for it.
     accepted_word: Option<String>,
     highlight_cache: Option<(String, Vec<Span>)>,
+    /// Set by [`Self::vim`]; used while vim keys are on.
+    vim: Option<VimState>,
+}
+
+/// The mode an editor with vim keys takes when it gains focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VimFocus {
+    /// Insert, for a field you go to in order to type, like the filter bar.
+    Insert,
+    /// The mode it had when it lost focus.
+    Keep,
+}
+
+/// An editor's vim keys, kept across frames.
+struct VimState {
+    focus: VimFocus,
+    vim: Vim,
+    /// The moving end of a visual selection, on a char. Outside visual mode
+    /// the text edit's cursor is vim's.
+    cursor: usize,
+    /// The selection last put on the text edit, so a mouse change shows.
+    shown: Option<Range<usize>>,
+    /// The text after vim's keys last ran, before the text edit, so a
+    /// change made around vim, like a paste, shows next frame.
+    last_text: Option<String>,
+    /// Keys after a mode change, held for the next frame so each frame's
+    /// keys run in one mode.
+    deferred: Vec<Event>,
+    had_focus: bool,
 }
 
 impl CodeEditor {
@@ -89,6 +119,7 @@ impl CodeEditor {
             explicit: false,
             accepted_word: None,
             highlight_cache: None,
+            vim: None,
         }
     }
 
@@ -122,6 +153,26 @@ impl CodeEditor {
     pub fn object(mut self) -> Self {
         self.object = true;
         self
+    }
+
+    /// Vim keys while they are turned on with [`set_vim`].
+    pub fn vim(mut self, focus: VimFocus) -> Self {
+        self.vim = Some(VimState {
+            focus,
+            vim: Vim::new(self.multiline),
+            cursor: 0,
+            shown: None,
+            last_text: None,
+            deferred: Vec::new(),
+            had_focus: false,
+        });
+        self
+    }
+
+    /// The vim mode, when this editor has vim keys and they are on.
+    pub fn vim_mode(&self, ctx: &egui::Context) -> Option<vim::Mode> {
+        let state = self.vim.as_ref().filter(|_| vim_enabled(ctx))?;
+        Some(state.vim.mode())
     }
 
     pub fn id(&self) -> egui::Id {
@@ -196,6 +247,10 @@ impl CodeEditor {
         language: &dyn Language,
     ) -> CodeEditorOutput {
         let focused = ui.memory(|m| m.has_focus(self.id));
+        let vim_on = self.vim.is_some() && vim_enabled(ui.ctx());
+        if vim_on {
+            self.vim_focus(ui, text, focused);
+        }
         let mut submitted = false;
         if focused {
             ui.input_mut(|input| {
@@ -213,9 +268,15 @@ impl CodeEditor {
                 }
             });
             if ui.is_enabled() {
-                self.type_with_pairs(ui, text);
+                if vim_on {
+                    self.vim_keys(ui, text);
+                }
+                if !self.in_vim_command_mode(ui.ctx()) {
+                    self.type_with_pairs(ui, text);
+                }
             }
         }
+        let command_mode = self.in_vim_command_mode(ui.ctx());
 
         let cache = &mut self.highlight_cache;
         let multiline = self.multiline;
@@ -254,13 +315,26 @@ impl CodeEditor {
             (true, false) => Frame::new().inner_margin(Margin::symmetric(0, 4)),
             (false, _) => frame(ui, focused).inner_margin(margin),
         };
-        let edit = edit
+        let mut edit = edit
             .min_size(egui::vec2(0.0, self.min_height))
             .font(TextStyle::Monospace)
             .hint_text(self.hint.clone())
             .desired_width(f32::INFINITY)
             .frame(frame)
             .layouter(&mut layouter);
+        if vim_on {
+            // Escape switches modes, so it mustn't take the focus away.
+            let filter = edit.get_event_filter();
+            edit = edit.event_filter(EventFilter {
+                escape: true,
+                ..filter
+            });
+        }
+        // Normal and visual mode draw a block cursor instead.
+        let caret = ui.visuals().text_cursor.stroke;
+        if command_mode {
+            ui.visuals_mut().text_cursor.stroke.color = Color32::TRANSPARENT;
+        }
 
         let explicit = self.explicit;
         let accepted_word = &mut self.accepted_word;
@@ -270,7 +344,7 @@ impl CodeEditor {
             .align(RectAlign::BOTTOM_START)
             .max_height(280.0)
             .show(ui, edit, |query| {
-                if accepted_word.as_deref() == Some(query.word) {
+                if command_mode || accepted_word.as_deref() == Some(query.word) {
                     return Vec::new();
                 }
                 *accepted_word = None;
@@ -285,6 +359,7 @@ impl CodeEditor {
                     })
                     .collect()
             });
+        ui.visuals_mut().text_cursor.stroke = caret;
 
         if let Some(accepted) = &output.accepted
             && let Some(completion) = offered.iter().find(|c| c.insert == accepted.insert)
@@ -296,9 +371,12 @@ impl CodeEditor {
         if !output.is_open {
             self.explicit = false;
         }
-        let response = output.text_edit.response.response;
+        let response = output.text_edit.response.response.clone();
         if self.object {
             self.fill_empty_object(ui.ctx(), &response, text);
+        }
+        if vim_on && focused {
+            self.vim_after(ui, text, &output.text_edit);
         }
         if self.line_numbers {
             paint_line_numbers(
@@ -372,6 +450,173 @@ impl CodeEditor {
             .map_or(0, |(index, c)| index + c.len_utf8());
         let word = &before[word_start..];
         self.accepted_word = (!word.is_empty()).then(|| word.to_owned());
+    }
+
+    /// In vim's normal or visual mode, where keys are commands.
+    fn in_vim_command_mode(&self, ctx: &egui::Context) -> bool {
+        self.vim_mode(ctx)
+            .is_some_and(|mode| mode != vim::Mode::Insert)
+    }
+
+    /// Starts insert mode when an [`VimFocus::Insert`] editor gains focus,
+    /// and hands back the keys held from the last frame.
+    fn vim_focus(&mut self, ui: &egui::Ui, text: &str, focused: bool) {
+        let id = self.id;
+        let Some(state) = &mut self.vim else {
+            return;
+        };
+        let gained = focused && !state.had_focus;
+        state.had_focus = focused;
+        if !focused {
+            state.deferred.clear();
+            return;
+        }
+        if gained && state.focus == VimFocus::Insert {
+            state.vim.start_insert(text, cursor_of(ui.ctx(), id, text));
+        }
+        if !state.deferred.is_empty() {
+            let deferred = std::mem::take(&mut state.deferred);
+            ui.input_mut(|input| {
+                input.events.splice(0..0, deferred);
+            });
+        }
+    }
+
+    /// Runs this frame's keys through vim. In insert mode only Escape and
+    /// undo are vim's; everything else is typed as usual.
+    fn vim_keys(&mut self, ui: &egui::Ui, text: &mut String) {
+        let (id, multiline, popup_open) = (self.id, self.multiline, self.popup_open);
+        let Some(state) = &mut self.vim else {
+            return;
+        };
+        let ctx = ui.ctx();
+        let mut text_state = TextEditState::load(ctx, id).unwrap_or_default();
+        let range = text_state.cursor.char_range();
+        let primary = range.map_or(text.chars().count(), |range| range.primary.index.0);
+        let was_inserting = state.vim.mode() == vim::Mode::Insert;
+        if !was_inserting
+            && let Some(last) = &state.last_text
+            && last != text
+        {
+            state.vim.changed_outside(last, primary);
+        }
+        let shown = range.map(|range| sorted(&range));
+        let mut cursor = if state.vim.mode().is_visual() && shown == state.shown {
+            state.cursor
+        } else {
+            primary
+        };
+        let mut register = ctx
+            .data(|data| data.get_temp::<Register>(register_id()))
+            .unwrap_or_default();
+        let mut handled = false;
+        let mut press = |vim: &mut Vim, key: vim::Key| {
+            let mut edit = Edit {
+                text: &mut *text,
+                cursor,
+                register: &mut register,
+            };
+            vim.key(key, &mut edit);
+            cursor = edit.cursor;
+            handled = true;
+        };
+        ui.input_mut(|input| {
+            let mut kept = Vec::new();
+            for event in std::mem::take(&mut input.events) {
+                let switched = |vim: &Vim| (vim.mode() == vim::Mode::Insert) != was_inserting;
+                if switched(&state.vim) && is_keyboard(&event) {
+                    state.deferred.push(event);
+                    continue;
+                }
+                if let Event::Text(typed) = &event
+                    && !was_inserting
+                {
+                    for (index, c) in typed.char_indices() {
+                        if switched(&state.vim) {
+                            state.deferred.push(Event::Text(typed[index..].to_owned()));
+                            break;
+                        }
+                        press(&mut state.vim, vim::Key::Char(c));
+                    }
+                    continue;
+                }
+                match vim_event(&event, state.vim.mode(), multiline, popup_open) {
+                    Some(VimEvent::Key(key)) => press(&mut state.vim, key),
+                    Some(VimEvent::Drop) => {}
+                    None => kept.push(event),
+                }
+            }
+            input.events = kept;
+        });
+        state.last_text = Some(text.clone());
+        if !handled {
+            return;
+        }
+        ctx.data_mut(|data| data.insert_temp(register_id(), register));
+        let selection = state.vim.selection(text, cursor);
+        let new_range = match &selection {
+            Some(selection) => {
+                CCursorRange::two(CCursor::new(selection.start), CCursor::new(selection.end))
+            }
+            None => CCursorRange::one(CCursor::new(cursor)),
+        };
+        state.cursor = cursor;
+        state.shown = selection;
+        text_state.cursor.set_char_range(Some(new_range));
+        text_state.store(ctx, id);
+        if !state.deferred.is_empty() {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Follows the mouse: a drag or double click starts visual mode, a click
+    /// ends it. Then draws the block cursor of normal and visual mode.
+    fn vim_after(&mut self, ui: &egui::Ui, text: &str, output: &TextEditOutput) {
+        let id = self.id;
+        let Some(state) = &mut self.vim else {
+            return;
+        };
+        let mode = state.vim.mode();
+        if mode == vim::Mode::Insert {
+            return;
+        }
+        let ctx = ui.ctx();
+        let Some(mut text_state) = TextEditState::load(ctx, id) else {
+            return;
+        };
+        let Some(range) = text_state.cursor.char_range() else {
+            return;
+        };
+        let (primary, secondary) = (range.primary.index.0, range.secondary.index.0);
+        let shown = sorted(&range);
+        let cursor = if mode.is_visual() && state.shown.as_ref() == Some(&shown) {
+            state.cursor
+        } else if primary != secondary {
+            let (anchor, cursor) = if primary > secondary {
+                (secondary, primary - 1)
+            } else {
+                (secondary - 1, primary)
+            };
+            state.vim.select(anchor);
+            state.cursor = cursor;
+            state.shown = Some(shown);
+            cursor
+        } else {
+            if mode.is_visual() {
+                state.vim.normal();
+            }
+            state.shown = None;
+            let cursor = state.vim.clamp(text, primary);
+            if cursor != primary {
+                text_state
+                    .cursor
+                    .set_char_range(Some(CCursorRange::one(CCursor::new(cursor))));
+                text_state.store(ctx, id);
+                ctx.request_repaint();
+            }
+            cursor
+        };
+        paint_block_cursor(ui, output, text, cursor);
     }
 
     /// Types the text events into `text` itself, so brackets and quotes can
@@ -572,6 +817,158 @@ pub fn frame(ui: &egui::Ui, focused: bool) -> Frame {
                 palette.line_strong
             },
         ))
+}
+
+/// Turns vim keys on or off for the editors built with [`CodeEditor::vim`].
+pub fn set_vim(ctx: &egui::Context, enabled: bool) {
+    ctx.data_mut(|data| data.insert_temp(vim_id(), enabled));
+}
+
+fn vim_enabled(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp::<bool>(vim_id()))
+        .unwrap_or(false)
+}
+
+fn vim_id() -> egui::Id {
+    egui::Id::unique("vim_keys")
+}
+
+/// One register for every editor, so a yank in the shell puts in the filter.
+fn register_id() -> egui::Id {
+    egui::Id::unique("vim_register")
+}
+
+fn cursor_of(ctx: &egui::Context, id: egui::Id, text: &str) -> usize {
+    TextEditState::load(ctx, id)
+        .and_then(|state| state.cursor.char_range())
+        .map_or(text.chars().count(), |range| range.primary.index.0)
+}
+
+fn sorted(range: &CCursorRange) -> Range<usize> {
+    let range = range.as_sorted_char_range();
+    range.start.0..range.end.0
+}
+
+fn is_keyboard(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Text(_)
+            | Event::Key { .. }
+            | Event::Paste(_)
+            | Event::Copy
+            | Event::Cut
+            | Event::Ime(_)
+    )
+}
+
+enum VimEvent {
+    Key(vim::Key),
+    /// Swallowed, e.g. Tab in normal mode.
+    Drop,
+}
+
+/// What vim does with an event other than typed text; `None` leaves it to
+/// the text edit.
+fn vim_event(
+    event: &Event,
+    mode: vim::Mode,
+    multiline: bool,
+    popup_open: bool,
+) -> Option<VimEvent> {
+    let Event::Key {
+        key,
+        pressed,
+        modifiers,
+        ..
+    } = event
+    else {
+        let ime = matches!(event, Event::Ime(_));
+        return (ime && mode != vim::Mode::Insert).then_some(VimEvent::Drop);
+    };
+    if !pressed {
+        return None;
+    }
+    if let Some(key) = undo_key(*key, *modifiers) {
+        return Some(VimEvent::Key(key));
+    }
+    if mode == vim::Mode::Insert {
+        let escape = *key == Key::Escape && modifiers.is_none() && !popup_open;
+        return escape.then_some(VimEvent::Key(vim::Key::Escape));
+    }
+    if modifiers.ctrl && !modifiers.shift && *key == Key::R {
+        return Some(VimEvent::Key(vim::Key::Redo));
+    }
+    // Ctrl+A, Shift+arrows and the like select, and a selection starts visual
+    // mode. The text edit's editing combos stay out of normal mode.
+    if modifiers.command || modifiers.ctrl || modifiers.alt {
+        let edits = matches!(
+            key,
+            Key::Backspace | Key::Delete | Key::H | Key::K | Key::U | Key::W
+        );
+        return edits.then_some(VimEvent::Drop);
+    }
+    if modifiers.shift && is_move(*key) {
+        return None;
+    }
+    let vim_key = match key {
+        Key::Escape => vim::Key::Escape,
+        Key::Enter => vim::Key::Enter,
+        Key::Backspace => vim::Key::Backspace,
+        Key::Delete => vim::Key::Delete,
+        Key::ArrowLeft => vim::Key::Left,
+        Key::ArrowRight => vim::Key::Right,
+        Key::ArrowUp => vim::Key::Up,
+        Key::ArrowDown => vim::Key::Down,
+        Key::Home => vim::Key::Home,
+        Key::End => vim::Key::End,
+        Key::Tab if !multiline => return None,
+        _ => return Some(VimEvent::Drop),
+    };
+    Some(VimEvent::Key(vim_key))
+}
+
+/// Ctrl+Z, and Ctrl+Shift+Z or Ctrl+Y; Cmd on a Mac.
+fn undo_key(key: Key, modifiers: Modifiers) -> Option<vim::Key> {
+    if !modifiers.command || modifiers.alt {
+        return None;
+    }
+    match key {
+        Key::Z if modifiers.shift => Some(vim::Key::Redo),
+        Key::Z => Some(vim::Key::Undo),
+        Key::Y => Some(vim::Key::Redo),
+        _ => None,
+    }
+}
+
+fn is_move(key: Key) -> bool {
+    matches!(
+        key,
+        Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown | Key::Home | Key::End
+    )
+}
+
+/// A block over the char at `at`, with the char drawn on it.
+fn paint_block_cursor(ui: &egui::Ui, output: &TextEditOutput, text: &str, at: usize) {
+    let galley = &output.galley;
+    let origin = output.galley_pos - egui::vec2(galley.rect.left(), 0.0);
+    let spot = galley
+        .pos_from_cursor(CCursor::new(at))
+        .translate(origin.to_vec2());
+    let under = text.chars().nth(at).filter(|&c| c != '\n');
+    let font = TextStyle::Monospace.resolve(ui.style());
+    let width = ui.fonts_mut(|fonts| fonts.glyph_width(&font, under.unwrap_or(' ')));
+    let rect = egui::Rect::from_min_size(spot.min, egui::vec2(width.max(2.0), spot.height()));
+    let painter = ui.painter_at(output.text_clip_rect);
+    painter.rect_filled(rect, 1.0, ui.visuals().text_cursor.stroke.color);
+    if let Some(c) = under {
+        painter.text(
+            rect.left_center(),
+            Align2::LEFT_CENTER,
+            c,
+            font,
+            ui.visuals().text_edit_bg_color(),
+        );
+    }
 }
 
 /// The focus ring around a framed editor at `rect`.
@@ -839,5 +1236,327 @@ mod tests {
         harness.run();
 
         assert_eq!(with_cursor(&harness), "{\n  |\n}");
+    }
+
+    // Vim keys -----------------------------------------------------------
+
+    fn keep(multiline: bool) -> CodeEditor {
+        CodeEditor::new(egui::Id::unique("editor"), multiline).vim(VimFocus::Keep)
+    }
+
+    fn insert(multiline: bool) -> CodeEditor {
+        CodeEditor::new(egui::Id::unique("editor"), multiline).vim(VimFocus::Insert)
+    }
+
+    /// An editor holding `text`, with vim keys on, focused.
+    fn vim_harness(text: &str, editor: CodeEditor) -> Harness<'static, State> {
+        let mut harness = harness_with(editor);
+        set_vim(&harness.ctx, true);
+        harness.state_mut().text = text.to_owned();
+        harness.run();
+        focus(&mut harness);
+        harness
+    }
+
+    fn focus(harness: &mut Harness<'_, State>) {
+        let role = if harness.state().editor.multiline {
+            Role::MultilineTextInput
+        } else {
+            Role::TextInput
+        };
+        harness.get_by_role(role).focus();
+        harness.run();
+    }
+
+    /// Types each char as its own frame, like a person would.
+    fn press(harness: &mut Harness<'_, State>, keys: &str) {
+        for c in keys.chars() {
+            harness.event(Event::Text(c.to_string()));
+            harness.run();
+        }
+    }
+
+    fn key(harness: &mut Harness<'_, State>, key: Key) {
+        harness.key_press(key);
+        harness.run();
+    }
+
+    fn mode(harness: &Harness<'_, State>) -> Option<vim::Mode> {
+        harness.state().editor.vim_mode(&harness.ctx)
+    }
+
+    fn has_focus(harness: &Harness<'_, State>) -> bool {
+        let id = harness.state().editor.id;
+        harness.ctx.memory(|memory| memory.has_focus(id))
+    }
+
+    #[test]
+    fn vim_keys_off_types_as_before() {
+        let mut harness = harness_with(keep(false));
+        type_text(&mut harness, "w");
+        assert_eq!(harness.state().text, "w");
+        assert_eq!(mode(&harness), None);
+    }
+
+    #[test]
+    fn normal_mode_keys_are_commands() {
+        let mut harness = vim_harness("foo bar", keep(false));
+        press(&mut harness, "0wx");
+        assert_eq!(with_cursor(&harness), "foo |ar");
+    }
+
+    #[test]
+    fn an_operator_waits_for_its_motion_across_frames() {
+        let mut harness = vim_harness("foo bar", keep(false));
+        press(&mut harness, "0dw");
+        assert_eq!(with_cursor(&harness), "|bar");
+    }
+
+    #[test]
+    fn normal_mode_keeps_the_cursor_on_a_char() {
+        let harness = vim_harness("ab", keep(false));
+        assert_eq!(with_cursor(&harness), "a|b");
+    }
+
+    #[test]
+    fn i_types_and_escape_goes_back_to_normal() {
+        let mut harness = vim_harness("ab", keep(false));
+        press(&mut harness, "0ix");
+        assert_eq!(mode(&harness), Some(vim::Mode::Insert));
+        key(&mut harness, Key::Escape);
+        assert_eq!(with_cursor(&harness), "|xab");
+        assert_eq!(mode(&harness), Some(vim::Mode::Normal));
+    }
+
+    #[test]
+    fn insert_mode_keeps_self_closing_brackets() {
+        let mut harness = vim_harness("", keep(false));
+        press(&mut harness, "i{");
+        assert_eq!(with_cursor(&harness), "{|}");
+    }
+
+    #[test]
+    fn a_filter_style_editor_starts_in_insert_mode() {
+        let mut harness = vim_harness("", insert(false));
+        assert_eq!(mode(&harness), Some(vim::Mode::Insert));
+        press(&mut harness, "x");
+        assert_eq!(harness.state().text, "x");
+    }
+
+    #[test]
+    fn a_filter_style_editor_is_back_in_insert_mode_on_focus() {
+        let mut harness = vim_harness("ab", insert(false));
+        key(&mut harness, Key::Escape);
+        assert_eq!(mode(&harness), Some(vim::Mode::Normal));
+        let id = harness.state().editor.id;
+        harness.ctx.memory_mut(|memory| memory.surrender_focus(id));
+        harness.run();
+        focus(&mut harness);
+        assert_eq!(mode(&harness), Some(vim::Mode::Insert));
+    }
+
+    #[test]
+    fn a_shell_style_editor_keeps_its_mode_across_focus() {
+        let mut harness = vim_harness("ab", keep(true));
+        assert_eq!(mode(&harness), Some(vim::Mode::Normal));
+        press(&mut harness, "i");
+        let id = harness.state().editor.id;
+        harness.ctx.memory_mut(|memory| memory.surrender_focus(id));
+        harness.run();
+        focus(&mut harness);
+        assert_eq!(mode(&harness), Some(vim::Mode::Insert));
+    }
+
+    #[test]
+    fn escape_in_normal_mode_keeps_the_focus() {
+        let mut harness = vim_harness("ab", keep(false));
+        key(&mut harness, Key::Escape);
+        assert!(has_focus(&harness));
+        assert_eq!(mode(&harness), Some(vim::Mode::Normal));
+    }
+
+    #[test]
+    fn escape_closes_the_popup_before_leaving_insert_mode() {
+        let mut harness = vim_harness("", insert(false));
+        press(&mut harness, "{ status: '");
+        assert!(harness.state().editor.popup_open);
+
+        key(&mut harness, Key::Escape);
+        assert!(!harness.state().editor.popup_open);
+        assert_eq!(mode(&harness), Some(vim::Mode::Insert));
+
+        key(&mut harness, Key::Escape);
+        assert_eq!(mode(&harness), Some(vim::Mode::Normal));
+        assert!(has_focus(&harness));
+    }
+
+    #[test]
+    fn the_popup_stays_closed_in_normal_mode() {
+        let mut harness = vim_harness("", insert(false));
+        press(&mut harness, "{ status: '");
+        key(&mut harness, Key::Escape);
+        key(&mut harness, Key::Escape);
+        press(&mut harness, "hl");
+        assert!(!harness.state().editor.popup_open);
+    }
+
+    #[test]
+    fn enter_submits_a_single_line_in_normal_mode() {
+        let mut harness = vim_harness("{ a: 1 }", keep(false));
+        key(&mut harness, Key::Enter);
+        assert!(harness.state().submitted);
+        assert_eq!(harness.state().text, "{ a: 1 }");
+    }
+
+    #[test]
+    fn enter_moves_down_in_multiline_normal_mode() {
+        let mut harness = vim_harness("a\n  b", keep(true));
+        press(&mut harness, "gg");
+        key(&mut harness, Key::Enter);
+        assert_eq!(with_cursor(&harness), "a\n  |b");
+        assert!(!harness.state().submitted);
+    }
+
+    #[test]
+    fn editing_combos_edit_nothing_in_normal_mode() {
+        let mut harness = vim_harness("foo bar", keep(false));
+        harness.key_press_modifiers(Modifiers::CTRL, Key::U);
+        harness.key_press_modifiers(Modifiers::ALT, Key::Backspace);
+        harness.run();
+        assert_eq!(harness.state().text, "foo bar");
+    }
+
+    #[test]
+    fn tab_in_normal_mode_types_nothing() {
+        let mut harness = vim_harness("ab", keep(true));
+        key(&mut harness, Key::Tab);
+        assert_eq!(harness.state().text, "ab");
+    }
+
+    #[test]
+    fn keys_after_a_mode_switch_wait_for_the_next_frame() {
+        let mut harness = vim_harness("ab", keep(false));
+        harness.event(Event::Text("0ix".to_owned()));
+        harness.run();
+        assert_eq!(harness.state().text, "xab");
+        assert_eq!(mode(&harness), Some(vim::Mode::Insert));
+    }
+
+    #[test]
+    fn ctrl_z_undoes_and_ctrl_r_redoes() {
+        let mut harness = vim_harness("ab", keep(false));
+        press(&mut harness, "x");
+        assert_eq!(harness.state().text, "a");
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+        harness.run();
+        assert_eq!(harness.state().text, "ab");
+        harness.key_press_modifiers(Modifiers::CTRL, Key::R);
+        harness.run();
+        assert_eq!(harness.state().text, "a");
+    }
+
+    #[test]
+    fn ctrl_z_in_insert_mode_undoes_the_typing() {
+        let mut harness = vim_harness("ab", keep(false));
+        press(&mut harness, "Axy");
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+        harness.run();
+        assert_eq!(harness.state().text, "ab");
+        assert_eq!(mode(&harness), Some(vim::Mode::Insert));
+    }
+
+    #[test]
+    fn a_paste_in_normal_mode_undoes_as_one_step() {
+        let mut harness = vim_harness("ab", keep(false));
+        harness.event(Event::Paste("xy".to_owned()));
+        harness.run();
+        assert_eq!(harness.state().text, "axyb");
+        press(&mut harness, "u");
+        assert_eq!(harness.state().text, "ab");
+    }
+
+    #[test]
+    fn a_mouse_selection_starts_visual_mode() {
+        let mut harness = vim_harness("abc", keep(false));
+        let id = harness.state().editor.id;
+        let mut state = TextEditState::load(&harness.ctx, id).unwrap();
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(2))));
+        state.store(&harness.ctx, id);
+        harness.run();
+        assert_eq!(mode(&harness), Some(vim::Mode::Visual));
+
+        press(&mut harness, "d");
+        assert_eq!(harness.state().text, "c");
+    }
+
+    #[test]
+    fn a_click_ends_visual_mode() {
+        let mut harness = vim_harness("abc", keep(false));
+        press(&mut harness, "0vl");
+        assert_eq!(mode(&harness), Some(vim::Mode::Visual));
+        let id = harness.state().editor.id;
+        let mut state = TextEditState::load(&harness.ctx, id).unwrap();
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(2))));
+        state.store(&harness.ctx, id);
+        harness.run();
+        assert_eq!(mode(&harness), Some(vim::Mode::Normal));
+        assert_eq!(with_cursor(&harness), "ab|c");
+    }
+
+    #[test]
+    fn visual_mode_shows_as_the_selection() {
+        let mut harness = vim_harness("abcd", keep(false));
+        press(&mut harness, "0lvl");
+        let range = harness
+            .state()
+            .editor
+            .selection(&harness.ctx, &harness.state().text);
+        assert_eq!(range, Some(1..3));
+    }
+
+    #[test]
+    fn the_register_is_shared_between_editors() {
+        struct Two {
+            shell: (String, CodeEditor),
+            filter: (String, CodeEditor),
+        }
+        let mut harness = Harness::new_ui_state(
+            |ui, two: &mut Two| {
+                let language = QueryLanguage::new(Mode::Filter, &[], &[]);
+                for (text, editor) in [&mut two.shell, &mut two.filter] {
+                    let label = ui.label("Editor");
+                    editor
+                        .show(ui, text, &language)
+                        .response
+                        .labelled_by(label.id);
+                }
+            },
+            Two {
+                shell: (
+                    "db.users".to_owned(),
+                    CodeEditor::new(egui::Id::unique("shell"), true).vim(VimFocus::Keep),
+                ),
+                filter: (
+                    "{ }".to_owned(),
+                    CodeEditor::new(egui::Id::unique("filter"), false).vim(VimFocus::Keep),
+                ),
+            },
+        );
+        set_vim(&harness.ctx, true);
+        harness.get_by_role(Role::MultilineTextInput).focus();
+        harness.run();
+        for c in "0yiw".chars() {
+            harness.event(Event::Text(c.to_string()));
+            harness.run();
+        }
+        harness.get_by_role(Role::TextInput).focus();
+        harness.run();
+        harness.event(Event::Text("P".to_owned()));
+        harness.run();
+        assert_eq!(harness.state().filter.0, "{ db}");
     }
 }

@@ -7,8 +7,38 @@ use crate::shortcuts::{self, BINDINGS, Group, SHEET_LINES};
 use crate::theme;
 use crate::widgets::kit::{self, Tone};
 
-/// Shows the sheet; returns false once it should close.
-pub fn show(ctx: &egui::Context) -> bool {
+/// Vim keys in the shell and the filter bar, with what they do.
+const VIM_LINES: &[(&str, &[&str])] = &[
+    ("Normal mode", &["Esc"]),
+    (
+        "Insert before, after, at line start, at line end",
+        &["i", "a", "I", "A"],
+    ),
+    ("Open a line below, above", &["o", "O"]),
+    ("Move by char and line", &["h", "j", "k", "l"]),
+    ("Move by word", &["w", "b", "e", "W", "B", "E"]),
+    ("Line start, first non-blank, line end", &["0", "^", "$"]),
+    ("First line, last line", &["gg", "G"]),
+    (
+        "To a char on the line, again, back",
+        &["f", "t", "F", "T", ";", ","],
+    ),
+    ("Matching bracket", &["%"]),
+    ("Delete, change, copy over a motion", &["d", "c", "y"]),
+    ("Delete, change, copy lines", &["dd", "cc", "yy"]),
+    ("Inside or around a word", &["iw", "aw"]),
+    ("Inside or around quotes", &["i'", "a\""]),
+    ("Inside or around brackets", &["i{", "a(", "i["]),
+    ("Delete chars, to line end", &["x", "X", "D", "C", "Y"]),
+    ("Paste after, before", &["p", "P"]),
+    ("Replace a char, join lines, toggle case", &["r", "J", "~"]),
+    ("Select chars, lines", &["v", "V"]),
+    ("Undo", &["u"]),
+];
+
+/// Shows the sheet, with vim keys while `vim` is on; returns false once it
+/// should close.
+pub fn show(ctx: &egui::Context, vim: bool) -> bool {
     let mut open = true;
     let modal = kit::modal(ctx, egui::Id::unique("shortcuts_dialog")).show(ctx, |ui| {
         kit::dialog_width(ui, 820.0);
@@ -20,6 +50,9 @@ pub fn show(ctx: &egui::Context) -> bool {
                 if ui.available_width() >= 700.0 {
                     ui.columns(2, |columns| {
                         groups(&mut columns[0], &[Group::General, Group::Tabs]);
+                        if vim {
+                            vim_group(&mut columns[0]);
+                        }
                         groups(
                             &mut columns[1],
                             &[Group::Documents, Group::Shell, Group::Aggregation],
@@ -27,6 +60,9 @@ pub fn show(ctx: &egui::Context) -> bool {
                     });
                 } else {
                     groups(ui, &Group::ALL);
+                    if vim {
+                        vim_group(ui);
+                    }
                 }
             });
         kit::dialog_footer(ui, |ui| {
@@ -55,6 +91,26 @@ fn groups(ui: &mut egui::Ui, groups: &[Group]) {
                 }
             });
     }
+}
+
+fn vim_group(ui: &mut egui::Ui) {
+    ui.add_space(8.0);
+    kit::section_label(ui, "Vim");
+    ui.add_space(2.0);
+    egui::Grid::new("shortcuts_vim")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .min_col_width(250.0)
+        .show(ui, |ui| {
+            for (label, keys) in VIM_LINES {
+                ui.label(*label);
+                ui.horizontal(|ui| kit::keys(ui, keys));
+                ui.end_row();
+            }
+            ui.label("Redo");
+            ui.horizontal(|ui| keys_cell(ui, &[shortcuts::VIM_REDO], None));
+            ui.end_row();
+        });
 }
 
 type Line = (

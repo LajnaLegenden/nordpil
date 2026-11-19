@@ -21,6 +21,7 @@ use crate::ui::documents::{self, DocumentPage, FieldMenus, TabAction, VIEWS, pag
 use crate::widgets::code_editor;
 use crate::widgets::kit::{self, Tone};
 use crate::widgets::split::{Pane, Split};
+use crate::widgets::vim;
 
 pub enum ShellAction {
     /// Run this script.
@@ -169,6 +170,16 @@ fn toolbar(
     action
 }
 
+/// The vim mode in the editor's bottom-right corner, over the text.
+fn vim_pill(ui: &mut egui::Ui, editor: egui::Rect, mode: vim::Mode) {
+    let label = mode.label();
+    let width = kit::text_width(ui, label, egui::FontId::proportional(12.0)) + 16.0;
+    let corner = editor.right_bottom() - egui::vec2(width + 10.0, 30.0);
+    let rect = egui::Rect::from_min_size(corner, egui::vec2(width, 20.0));
+    let mut pill = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    kit::pill(&mut pill, label, mode != vim::Mode::Insert);
+}
+
 /// The statement at the cursor, or the selection, as a run.
 fn run_statement(ctx: &egui::Context, shell: &ShellState) -> Option<ShellAction> {
     let selection = shell
@@ -298,6 +309,9 @@ fn editor(
         });
     if focused {
         code_editor::paint_focus_ring(ui, framed.response.rect);
+        if let Some(mode) = shell.editor.vim_mode(ui.ctx()) {
+            vim_pill(ui, framed.response.rect, mode);
+        }
     }
     let output = framed.inner;
     let wanted = language.wanted.into_inner();

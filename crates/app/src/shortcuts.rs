@@ -121,6 +121,8 @@ pub const ESCAPE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key:
 pub const SAVE_SCRIPT: KeyboardShortcut = command(Key::S);
 pub const OPEN_SCRIPT: KeyboardShortcut = command(Key::O);
 pub const STOP_SCRIPT: KeyboardShortcut = command(Key::Period);
+/// Redo in a vim editor's normal mode. Ctrl on macOS too, where Cmd+R refreshes.
+pub const VIM_REDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::R);
 /// Asks an editor for completions; handled there.
 pub const COMPLETE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Space);
 
@@ -324,6 +326,26 @@ pub fn pressed(input: &mut InputState) -> Vec<AppCommand> {
         }
     }
     commands
+}
+
+/// Takes this frame's Ctrl+R presses out of `input`. In a focused editor's
+/// vim normal mode Ctrl+R is redo, which Refresh mustn't take; the caller
+/// puts them back once the app-wide keys are read.
+pub fn take_vim_redo(input: &mut InputState) -> Vec<Event> {
+    let (redo, rest) = std::mem::take(&mut input.events)
+        .into_iter()
+        .partition(|event| {
+            matches!(
+                event,
+                Event::Key { key, pressed: true, modifiers, .. }
+                    if *key == VIM_REDO.logical_key
+                        && modifiers.ctrl
+                        && !modifiers.shift
+                        && !modifiers.alt
+            )
+        });
+    input.events = rest;
+    redo
 }
 
 /// Like [`InputState::consume_shortcut`], but Alt must match too: on Windows
