@@ -62,12 +62,23 @@ pub fn show(
         .show(ui, |ui| {
             Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                for entry in entries {
-                    connection(ui, entry, selection, links, actions);
+                for (index, entry) in entries.iter().enumerate() {
+                    let place = Place {
+                        index,
+                        last: index + 1 == entries.len(),
+                    };
+                    connection(ui, entry, place, selection, links, actions);
                     ui.add_space(4.0);
                 }
             });
         });
+}
+
+/// Where a connection is in the list.
+#[derive(Clone, Copy)]
+struct Place {
+    index: usize,
+    last: bool,
 }
 
 /// What a tree row shows after its label.
@@ -260,6 +271,7 @@ fn paint_trailing(
 fn connection(
     ui: &mut egui::Ui,
     entry: &ConnectionEntry,
+    place: Place,
     selection: Option<&Selection>,
     links: bool,
     actions: &mut Vec<Action>,
@@ -328,7 +340,7 @@ fn connection(
                 if !connecting && ui.button("Connect").clicked() {
                     actions.push(Action::Connect(id));
                 }
-                connection_menu_common(ui, id, actions);
+                connection_menu_common(ui, id, place, actions);
             });
         return;
     };
@@ -364,7 +376,7 @@ fn connection(
                 database: None,
             });
         }
-        connection_menu_common(ui, id, actions);
+        connection_menu_common(ui, id, place, actions);
     });
     if open {
         for database in databases {
@@ -383,7 +395,32 @@ fn host(uri: &str) -> Option<String> {
     Some(host.to_owned())
 }
 
-fn connection_menu_common(ui: &mut egui::Ui, id: uuid::Uuid, actions: &mut Vec<Action>) {
+fn connection_menu_common(
+    ui: &mut egui::Ui,
+    id: uuid::Uuid,
+    place: Place,
+    actions: &mut Vec<Action>,
+) {
+    let Place { index, last } = place;
+    ui.separator();
+    if ui
+        .add_enabled(index > 0, egui::Button::new("Move up"))
+        .clicked()
+    {
+        actions.push(Action::MoveConnection {
+            id,
+            index: index.saturating_sub(1),
+        });
+    }
+    if ui
+        .add_enabled(!last, egui::Button::new("Move down"))
+        .clicked()
+    {
+        actions.push(Action::MoveConnection {
+            id,
+            index: index + 1,
+        });
+    }
     ui.separator();
     if ui.button("Edit…").clicked() {
         actions.push(Action::EditConnection(id));

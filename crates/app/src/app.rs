@@ -1646,6 +1646,18 @@ impl NordpilApp {
                 }
                 Err(error) => self.notify(error),
             },
+            Response::ConnectionMoved { result, order } => {
+                if let Err(error) = result {
+                    self.notify(error);
+                    // Back to the saved order; a connection it lacks stays last.
+                    self.connections.sort_by_key(|entry| {
+                        order
+                            .iter()
+                            .position(|id| *id == entry.saved.id)
+                            .unwrap_or(usize::MAX)
+                    });
+                }
+            }
             Response::Connected { id, result } => self.connected(id, result),
             Response::Disconnected(id) => {
                 if let Some(entry) = self.entry_mut(id) {
@@ -1990,6 +2002,20 @@ impl NordpilApp {
         }
     }
 
+    /// Shows the new order at once; the backend's answer undoes it on failure.
+    fn move_connection(&mut self, id: Uuid, index: usize) {
+        let Some(from) = self.connections.iter().position(|e| e.saved.id == id) else {
+            return;
+        };
+        let index = index.min(self.connections.len() - 1);
+        if index == from {
+            return;
+        }
+        let entry = self.connections.remove(from);
+        self.connections.insert(index, entry);
+        self.backend.send(Command::MoveConnection { id, index });
+    }
+
     fn connected(&mut self, id: Uuid, result: Result<Vec<DatabaseInfo>, BackendError>) {
         let keyring_available = self.keyring_available;
         let remember = self.settings.goto_scope == GotoScope::AllSaved;
@@ -2156,6 +2182,7 @@ impl NordpilApp {
             Action::DeleteConnectionConfirmed(id) => {
                 self.backend.send(Command::DeleteConnection(id));
             }
+            Action::MoveConnection { id, index } => self.move_connection(id, index),
             Action::Connect(id) => self.connect(id, None, false),
             Action::ConnectWithPassword {
                 id,
@@ -3528,6 +3555,51 @@ mod tests {
         harness.run();
         assert!(harness.state().tabs.is_empty());
         assert_eq!(harness.state().active_tab, None);
+    }
+
+    /// Three saved connections, "one", "two" and "three", and their store.
+    fn saved_connections_harness() -> (Harness<'static, NordpilApp>, ConnectionStore) {
+        let dir = std::env::temp_dir().join(format!("nordpil-ui-{}", Uuid::new_v4()));
+        let store = ConnectionStore::new(dir.join("connections.toml"));
+        let connections = ["one", "two", "three"].map(|name| SavedConnection {
+            id: Uuid::new_v4(),
+            name: name.to_owned(),
+            uri: "mongodb://localhost".to_owned(),
+            color: None,
+            read_only: false,
+        });
+        store.save(&connections).unwrap();
+        let mut harness = harness_in(&dir);
+        run_until(&mut harness, |app| app.connections.len() == 3);
+        (harness, store)
+    }
+
+    fn saved_names(store: &ConnectionStore) -> Vec<String> {
+        let saved = store.load().unwrap();
+        saved.into_iter().map(|saved| saved.name).collect()
+    }
+
+    #[test]
+    fn move_down_reorders_the_sidebar_and_the_saved_file() {
+        let (mut harness, store) = saved_connections_harness();
+
+        harness.get_by_label("one").click_secondary();
+        harness.run();
+        harness.get_by_label("Move down").click();
+        harness.run();
+
+        let names: Vec<_> = harness
+            .state()
+            .connections
+            .iter()
+            .map(|e| e.saved.name.clone())
+            .collect();
+        assert_eq!(names, ["two", "one", "three"]);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while saved_names(&store) != names {
+            assert!(Instant::now() < deadline, "the new order was not saved");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

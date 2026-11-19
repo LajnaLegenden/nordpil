@@ -30,6 +30,11 @@ pub enum Action {
     /// Asks for confirmation first.
     DeleteConnection(Uuid),
     DeleteConnectionConfirmed(Uuid),
+    /// Moves a connection to `index` in the sidebar.
+    MoveConnection {
+        id: Uuid,
+        index: usize,
+    },
     Connect(Uuid),
     ConnectWithPassword {
         id: Uuid,
