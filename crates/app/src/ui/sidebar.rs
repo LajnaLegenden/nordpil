@@ -2,8 +2,9 @@
 
 use eframe::egui::collapsing_header::CollapsingState;
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, Response,
-    Role, Sense, Stroke, WidgetInfo, pos2, vec2,
+    self, Align, Align2, Color32, CornerRadius, CursorIcon, DragAndDrop, FontId, Frame, Layout,
+    Margin, PointerButton, Pos2, Rangef, Rect, Response, Role, Sense, Stroke, WidgetInfo, pos2,
+    vec2,
 };
 use nordpil_backend::CollectionKind;
 use nordpil_backend::store::ConnectionColor;
@@ -16,6 +17,9 @@ use crate::theme::{self, Palette};
 use crate::widgets::kit;
 
 const INDENT: f32 = 16.0;
+
+/// The drag-and-drop payload while a connection is dragged to a new place.
+struct DraggedConnection(uuid::Uuid);
 
 /// `links` offers editing a database's linked fields, for lookups.
 pub fn show(
@@ -62,13 +66,21 @@ pub fn show(
         .show(ui, |ui| {
             Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
+                let dragged = DragAndDrop::payload::<DraggedConnection>(ui.ctx()).map(|d| d.0);
+                let mut blocks = Vec::with_capacity(entries.len());
                 for (index, entry) in entries.iter().enumerate() {
                     let place = Place {
                         index,
                         last: index + 1 == entries.len(),
+                        dragged: dragged == Some(entry.saved.id),
                     };
+                    let top = ui.cursor().top();
                     connection(ui, entry, place, selection, links, actions);
+                    blocks.push(Rangef::new(top, ui.cursor().top()));
                     ui.add_space(4.0);
+                }
+                if let Some(id) = dragged {
+                    drag_connection(ui, entries, &blocks, id, actions);
                 }
             });
         });
@@ -79,6 +91,96 @@ pub fn show(
 struct Place {
     index: usize,
     last: bool,
+    /// It is being dragged to a new place.
+    dragged: bool,
+}
+
+/// Follows a dragged connection: its ghost, the gap it would land in, and the
+/// move when the pointer lets go. `blocks` are the heights the connections
+/// take up, their databases included.
+fn drag_connection(
+    ui: &egui::Ui,
+    entries: &[ConnectionEntry],
+    blocks: &[Rangef],
+    id: uuid::Uuid,
+    actions: &mut Vec<Action>,
+) {
+    let Some(from) = entries.iter().position(|entry| entry.saved.id == id) else {
+        return;
+    };
+    let Some(pointer) = ui.ctx().pointer_interact_pos() else {
+        return;
+    };
+    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+    ghost(ui, &entries[from], pointer);
+    if !ui.clip_rect().contains(pointer) {
+        return;
+    }
+    let gap = blocks
+        .iter()
+        .position(|block| pointer.y < block.center())
+        .unwrap_or(blocks.len());
+    // The gaps on either side of the dragged connection leave it in place.
+    if gap == from || gap == from + 1 {
+        return;
+    }
+    let above = gap.checked_sub(1).map(|index| blocks[index].max - 2.0);
+    let below = blocks.get(gap).map(|block| block.min);
+    let y = match (above, below) {
+        (Some(above), Some(below)) => (above + below) / 2.0,
+        (None, Some(below)) => below - 3.0,
+        (Some(above), None) => above + 3.0,
+        (None, None) => return,
+    };
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        y,
+        Stroke::new(2.0, theme::palette(ui).accent),
+    );
+    if ui.input(|input| input.pointer.any_released()) {
+        actions.push(Action::MoveConnection {
+            id,
+            index: if gap > from { gap - 1 } else { gap },
+        });
+    }
+}
+
+/// The dragged connection's dot and name, next to the pointer.
+fn ghost(ui: &egui::Ui, entry: &ConnectionEntry, pointer: Pos2) {
+    let palette = theme::palette(ui);
+    let color = entry
+        .saved
+        .color
+        .map_or(palette.subtle, |color| color32(&palette, color));
+    let connected = matches!(entry.state, ConnectionState::Connected(_));
+    egui::Area::new(egui::Id::unique("connection_ghost"))
+        .order(egui::Order::Tooltip)
+        .interactable(false)
+        .fixed_pos(pointer + vec2(12.0, -16.0))
+        .show(ui.ctx(), |ui| {
+            Frame::new()
+                .fill(palette.raised)
+                .stroke(Stroke::new(1.0, palette.line))
+                .corner_radius(CornerRadius::same(8))
+                .shadow(ui.visuals().popup_shadow)
+                .inner_margin(Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let (dot, _) = ui.allocate_exact_size(vec2(10.0, 20.0), Sense::hover());
+                        if connected {
+                            ui.painter().circle_filled(dot.center(), 4.5, color);
+                        } else {
+                            ui.painter()
+                                .circle_stroke(dot.center(), 3.8, Stroke::new(2.0, color));
+                        }
+                        ui.label(
+                            egui::RichText::new(&entry.saved.name)
+                                .font(FontId::new(14.0, theme::medium()))
+                                .color(palette.text),
+                        );
+                    });
+                });
+        });
 }
 
 /// What a tree row shows after its label.
@@ -99,14 +201,25 @@ struct Row<'a> {
     label: &'a str,
     strong: bool,
     selected: bool,
+    /// Faded, while it is dragged to a new place.
+    dimmed: bool,
     trailing: Trailing,
 }
 
 fn tree_row(ui: &mut egui::Ui, row: Row<'_>) -> Response {
     let palette = theme::palette(ui);
     let height = if row.depth == 0 { 32.0 } else { 30.0 };
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+    // Connections can be dragged to a new place.
+    let sense = if row.depth == 0 {
+        Sense::click_and_drag()
+    } else {
+        Sense::click()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), sense);
+    let opacity = ui.opacity();
+    if row.dimmed {
+        ui.set_opacity(0.4);
+    }
     let painter = ui.painter();
     if row.selected {
         painter.rect_filled(rect, CornerRadius::same(8), palette.accent_soft);
@@ -190,6 +303,7 @@ fn tree_row(ui: &mut egui::Ui, row: Row<'_>) -> Response {
     let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
     ui.painter()
         .galley(pos2(x, y - galley.size().y / 2.0), galley, text_color);
+    ui.set_opacity(opacity);
     let label = row.label.to_owned();
     let selected = row.selected;
     response.widget_info(|| WidgetInfo::selected(Role::TreeItem, true, selected, &label));
@@ -301,6 +415,7 @@ fn connection(
                 label: &entry.saved.name,
                 strong: true,
                 selected: false,
+                dimmed: place.dragged,
                 trailing: if connecting || matches!(entry.state, ConnectionState::Failed(_)) {
                     Trailing::None
                 } else {
@@ -331,6 +446,7 @@ fn connection(
             }
             _ => {}
         }
+        start_drag(&response, id);
         if response.clicked() && !connecting {
             actions.push(Action::Connect(id));
         }
@@ -356,9 +472,11 @@ fn connection(
             label: &entry.saved.name,
             strong: true,
             selected: false,
+            dimmed: place.dragged,
             trailing,
         },
     );
+    start_drag(&response, id);
     if response.clicked() {
         state.set_open(!open);
         state.store(ui.ctx());
@@ -385,6 +503,12 @@ fn connection(
     }
 }
 
+fn start_drag(row: &Response, id: uuid::Uuid) {
+    if row.drag_started_by(PointerButton::Primary) {
+        row.dnd_set_drag_payload(DraggedConnection(id));
+    }
+}
+
 /// The first host of a connection string, without its port.
 fn host(uri: &str) -> Option<String> {
     let parsed = ConnectionUri::parse(uri).ok()?;
@@ -401,7 +525,7 @@ fn connection_menu_common(
     place: Place,
     actions: &mut Vec<Action>,
 ) {
-    let Place { index, last } = place;
+    let Place { index, last, .. } = place;
     ui.separator();
     if ui
         .add_enabled(index > 0, egui::Button::new("Move up"))
@@ -460,6 +584,7 @@ fn database_node(
             label: name,
             strong: false,
             selected: false,
+            dimmed: false,
             trailing: Trailing::None,
         },
     );
@@ -546,6 +671,7 @@ fn database_node(
                         label: &collection.name,
                         strong: false,
                         selected,
+                        dimmed: false,
                         trailing,
                     },
                 );
