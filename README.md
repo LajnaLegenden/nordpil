@@ -12,6 +12,8 @@ when idle, against roughly 1 GB for Compass.
   kept in sync. Passwords are stored in the system keyring, or asked for on each connect
   when there is none. Connections can be colored and marked read-only, which blocks every
   write.
+  Drag a connection in the sidebar to reorder the list, or use Move up and Move down in
+  its right-click menu.
 - **Browse**: a tree of databases and collections (with views, time series and capped
   collections marked). Create and drop databases and collections.
 - **Go to collection**: Ctrl+K finds any collection by name, recent ones first, across
