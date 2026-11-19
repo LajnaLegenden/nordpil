@@ -3603,6 +3603,30 @@ mod tests {
     }
 
     #[test]
+    fn dragging_a_connection_below_another_moves_it_there() {
+        let (mut harness, _store) = saved_connections_harness();
+        let from = harness.get_by_label("one").rect().center();
+        let below_last = harness.get_by_label("three").rect().center() + egui::vec2(0.0, 10.0);
+
+        harness.drag_at(from);
+        harness.run();
+        harness.hover_at(from.lerp(below_last, 0.5));
+        harness.run();
+        harness.hover_at(below_last);
+        harness.run();
+        harness.drop_at(below_last);
+        harness.run();
+
+        let names: Vec<_> = harness
+            .state()
+            .connections
+            .iter()
+            .map(|e| e.saved.name.clone())
+            .collect();
+        assert_eq!(names, ["two", "three", "one"]);
+    }
+
+    #[test]
     fn ctrl_comma_opens_and_closes_settings() {
         let mut harness = lookup_harness(&["orders"], bson::doc! { "_id": 1 });
 
