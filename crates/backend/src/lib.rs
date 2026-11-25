@@ -101,6 +101,9 @@ pub enum Command {
         remember_password: bool,
     },
     Disconnect(Uuid),
+    /// Closes every connection, answering [`Response::Stored`] so the app
+    /// keeps its tabs.
+    DisconnectAll,
     ListDatabases(Uuid),
     ListCollections {
         connection: Uuid,
@@ -573,6 +576,11 @@ impl Handler for Backend {
                 self.cursors.close_connection(id);
                 Response::Disconnected(id)
             }
+            Command::DisconnectAll => {
+                self.lock_sessions().clear();
+                self.cursors.close_all();
+                Response::Stored(Ok(()))
+            }
             Command::ListDatabases(connection) => Response::Databases {
                 connection,
                 result: self.list_databases(connection).await,
@@ -947,3 +955,7 @@ mod tests {
         assert_eq!(result.unwrap_err().kind, ErrorKind::PasswordRequired);
     }
 }
+
+#[cfg(test)]
+#[path = "tests/lib_lock.rs"]
+mod lock_tests;

@@ -73,6 +73,12 @@ impl Cursors {
         drop(closed);
     }
 
+    /// Closes every cursor of every connection.
+    pub(crate) fn close_all(&self) {
+        let closed = std::mem::take(&mut *self.lock());
+        drop(closed);
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.lock().len()
