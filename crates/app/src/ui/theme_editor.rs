@@ -163,6 +163,11 @@ impl ThemeEditor {
         self.confirm_close
     }
 
+    /// Closes the close confirmation as its Cancel does; the editor stays.
+    pub fn cancel_close(&mut self) {
+        self.confirm_close = false;
+    }
+
     /// The file to send for saving; the answer goes to [`Self::saved`].
     pub fn start_save(&mut self) -> ThemeFile {
         self.error = None;

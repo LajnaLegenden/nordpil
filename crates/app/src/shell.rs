@@ -261,6 +261,15 @@ impl ShellState {
         });
     }
 
+    /// Drops the last run's results and output, for the lock. The script
+    /// stays.
+    pub fn clear_results(&mut self) {
+        self.results.clear();
+        self.output.clear();
+        self.ending = None;
+        self.selected = None;
+    }
+
     /// The text changed; the draft is saved once typing pauses.
     pub fn edited(&mut self) {
         self.edited_at = Some(Instant::now());

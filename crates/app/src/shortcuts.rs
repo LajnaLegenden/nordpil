@@ -30,6 +30,8 @@ pub enum AppCommand {
     StopScript,
     /// Ask AI for the Documents query or the pipeline.
     AskAi,
+    /// Locks nordpil now, or once running work ends.
+    Lock,
 }
 
 /// Where a key is listed in the shortcuts sheet.
@@ -88,6 +90,8 @@ const fn command(key: Key) -> KeyboardShortcut {
 
 pub const GO_TO: KeyboardShortcut = command(Key::K);
 pub const FOCUS_EDITOR: KeyboardShortcut = command(Key::L);
+pub const LOCK: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::L);
 pub const CLOSE_TAB: KeyboardShortcut = command(Key::W);
 pub const REOPEN_TAB: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::T);
@@ -155,6 +159,7 @@ pub const BINDINGS: &[Binding] = &[
         "Go to collection",
         Group::General,
     ),
+    bind(AppCommand::Lock, &[LOCK], "Lock nordpil", Group::General),
     bind(
         AppCommand::FocusEditor,
         &[FOCUS_EDITOR],
@@ -451,4 +456,7 @@ mod tests {
             Vec::new()
         );
     }
+
+    #[path = "lock.rs"]
+    mod lock;
 }

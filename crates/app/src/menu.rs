@@ -24,6 +24,10 @@ pub struct MacMenu {
 /// What decides which items are enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuState {
+    /// Every item is off while locked.
+    pub locked: bool,
+    /// The lock is on and something can check the user.
+    pub can_lock: bool,
     pub has_tabs: bool,
     pub can_reopen: bool,
     pub on_shell: bool,
@@ -63,12 +67,14 @@ impl MacMenu {
             }),
         );
         let settings = item("Settings…", AppCommand::Settings);
+        let lock = item("Lock nordpil", AppCommand::Lock);
         let app_menu = submenu(
             "nordpil",
             &[
                 &about,
                 &separator(),
                 &settings,
+                &lock,
                 &separator(),
                 &PredefinedMenuItem::services(None),
                 &separator(),
@@ -172,6 +178,7 @@ impl MacMenu {
         self.state = Some(state);
         for (item, command) in &self.items {
             let enabled = match command {
+                _ if state.locked => false,
                 AppCommand::CloseTab
                 | AppCommand::FocusEditor
                 | AppCommand::NextTab
@@ -184,6 +191,7 @@ impl MacMenu {
                 AppCommand::ReopenTab => state.can_reopen,
                 AppCommand::SaveScript | AppCommand::OpenScript => state.on_shell,
                 AppCommand::StopScript => state.on_shell || state.on_aggregate,
+                AppCommand::Lock => state.can_lock,
                 AppCommand::GoTo | AppCommand::Settings | AppCommand::Shortcuts => true,
             };
             item.set_enabled(enabled);

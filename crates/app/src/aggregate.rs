@@ -991,6 +991,17 @@ impl AggregateState {
         }
     }
 
+    /// Drops what the previews and the run read, for the lock. The stages
+    /// stay as typed.
+    pub fn clear_results(&mut self, requests: &mut impl Requests) {
+        self.cancel_previews(requests);
+        self.stale_from = None;
+        for card in &mut self.stages {
+            card.preview = Preview::None;
+        }
+        self.close_run(requests);
+    }
+
     /// Takes a page of the run. False when `request` isn't one.
     pub fn page_arrived(
         &mut self,
