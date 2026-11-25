@@ -34,6 +34,14 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// What an auth attempt is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    Unlock,
+    /// Turns the lock on with this timeout; it was off.
+    Enable(LockTimeout),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     Idle(LockTimeout),
@@ -62,10 +70,18 @@ pub struct Lock {
     manual_pending: bool,
     /// The window had focus last frame.
     focused: bool,
+    /// Unlocks run only while locked and enables only while the lock is
+    /// off, so one at a time is enough.
+    attempt: Option<Attempt>,
     locked: Option<Locked>,
 }
 
-/// What the lock screen shows, and its unlock attempt.
+struct Attempt {
+    purpose: Purpose,
+    answer: Receiver<Outcome>,
+}
+
+/// What the lock screen shows.
 pub struct Locked {
     pub reason: Reason,
     pub at: SystemTime,
@@ -77,15 +93,8 @@ pub struct Locked {
     pub error: Option<String>,
     /// How to get past a check that keeps failing.
     pub hint: Option<String>,
-    attempt: Option<Receiver<Outcome>>,
     /// The next focus gain opens the OS prompt.
     armed: bool,
-}
-
-impl Locked {
-    pub fn attempting(&self) -> bool {
-        self.attempt.is_some()
-    }
 }
 
 impl Lock {
@@ -98,6 +107,7 @@ impl Lock {
             manual_pending: false,
             // So the first frame of a launch lock counts as gaining focus.
             focused: false,
+            attempt: None,
             locked: None,
         }
     }
@@ -112,6 +122,17 @@ impl Lock {
 
     pub fn is_locked(&self) -> bool {
         self.locked.is_some()
+    }
+
+    /// `None` when nordpil can't lock.
+    pub fn method(&self) -> Option<Method> {
+        self.authenticator
+            .as_ref()
+            .map(|authenticator| authenticator.method())
+    }
+
+    pub fn attempting(&self) -> bool {
+        self.attempt.is_some()
     }
 
     pub fn can_lock(&self, timeout: LockTimeout) -> bool {
@@ -172,7 +193,6 @@ impl Lock {
             password: String::new(),
             error: None,
             hint: None,
-            attempt: None,
             armed: true,
         });
     }
@@ -189,15 +209,7 @@ impl Lock {
         let Some(locked) = &mut self.locked else {
             return false;
         };
-        let answer = match locked.attempt.as_ref().map(Receiver::try_recv) {
-            Some(Ok(outcome)) => Some(outcome),
-            Some(Err(TryRecvError::Disconnected)) => Some(Outcome::Failed(
-                "The unlock check stopped without an answer.".to_owned(),
-            )),
-            _ => None,
-        };
-        if let Some(outcome) = answer {
-            locked.attempt = None;
+        if let Some((Purpose::Unlock, outcome)) = take_answer(&mut self.attempt) {
             match outcome {
                 Outcome::Granted => {
                     self.locked = None;
@@ -216,7 +228,7 @@ impl Lock {
             }
         }
         // A prompt that takes focus and then gives it back mustn't open again.
-        if !focused && was_focused && !locked.attempting() {
+        if !focused && was_focused && self.attempt.is_none() {
             locked.armed = true;
         }
         if focused && !was_focused && locked.armed && locked.method == Method::Prompt {
@@ -225,28 +237,78 @@ impl Lock {
         false
     }
 
-    /// Asks the authenticator on its own thread, unless an attempt runs.
+    /// Asks the authenticator to unlock, unless an attempt runs.
     pub fn attempt(&mut self, ctx: &egui::Context) {
-        let (Some(locked), Some(authenticator)) = (&mut self.locked, &self.authenticator) else {
+        let Some(locked) = &mut self.locked else {
             return;
         };
-        if locked.attempting() {
+        if self.attempt.is_some() {
             return;
         }
         let password = (locked.method == Method::Password)
             .then(|| Password::new(std::mem::take(&mut locked.password)));
+        locked.armed = false;
+        locked.error = None;
+        locked.hint = None;
+        self.ask(ctx, Purpose::Unlock, password);
+    }
+
+    /// Asks the authenticator before the lock turns on with `timeout`,
+    /// unless an attempt runs.
+    pub fn attempt_enable(
+        &mut self,
+        ctx: &egui::Context,
+        timeout: LockTimeout,
+        password: Option<Password>,
+    ) {
+        if self.attempt.is_none() {
+            self.ask(ctx, Purpose::Enable(timeout), password);
+        }
+    }
+
+    /// While unlocked: takes the answer of an attempt to turn the lock on,
+    /// with the timeout it was for.
+    pub fn poll_enable(&mut self) -> Option<(LockTimeout, Outcome)> {
+        let Some((Purpose::Enable(timeout), outcome)) = take_answer(&mut self.attempt) else {
+            return None;
+        };
+        if outcome == Outcome::Granted {
+            self.last_activity = SystemTime::now();
+        }
+        Some((timeout, outcome))
+    }
+
+    /// Runs the authenticator on its own thread, which wakes the UI when it
+    /// answers.
+    fn ask(&mut self, ctx: &egui::Context, purpose: Purpose, password: Option<Password>) {
+        let Some(authenticator) = &self.authenticator else {
+            return;
+        };
         let authenticator = Arc::clone(authenticator);
-        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let (sender, answer) = crossbeam_channel::bounded(1);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let _ = sender.send(authenticator.authenticate(password.as_ref()));
             ctx.request_repaint();
         });
-        locked.attempt = Some(receiver);
-        locked.armed = false;
-        locked.error = None;
-        locked.hint = None;
+        self.attempt = Some(Attempt { purpose, answer });
     }
+}
+
+/// The answer of the running attempt, once it came, and what it was for.
+fn take_answer(attempt: &mut Option<Attempt>) -> Option<(Purpose, Outcome)> {
+    let Attempt { purpose, answer } = attempt.as_ref()?;
+    let outcome = match answer.try_recv() {
+        Ok(outcome) => outcome,
+        Err(TryRecvError::Empty) => return None,
+        Err(TryRecvError::Disconnected) => Outcome::Failed(match purpose {
+            Purpose::Unlock => "The unlock check stopped without an answer.".to_owned(),
+            Purpose::Enable(_) => "The check stopped without an answer.".to_owned(),
+        }),
+    };
+    let purpose = *purpose;
+    *attempt = None;
+    Some((purpose, outcome))
 }
 
 /// Input from the user; focus changes don't count.

@@ -1,13 +1,17 @@
-//! Settings: themes, text size, what Ctrl+K searches, id lookups and updates.
-//! Changes apply at once and are saved to `config.toml`.
+//! Settings: themes, text size, what Ctrl+K searches, id lookups, the idle
+//! lock and updates. Changes apply at once and are saved to `config.toml`;
+//! turning the lock on waits for the OS user to say it is them.
 
-use eframe::egui::{self, CornerRadius, Frame, Margin, RichText, Stroke};
+use eframe::egui::{self, CornerRadius, Frame, Key, Margin, RichText, Stroke, TextEdit};
+use nordpil_backend::Password;
 use nordpil_backend::settings::{
-    AiAgent, AiSettings, GotoScope, Settings, TextSize, ThemeMode, Updates,
+    AiAgent, AiSettings, GotoScope, LockTimeout, Settings, TextSize, ThemeMode, Updates,
 };
 
 use crate::icons;
+use crate::lock::{Lock, Method};
 use crate::theme::{self, Themes};
+use crate::ui::dialogs;
 use crate::widgets::kit::{self, Tone};
 
 #[derive(Default)]
@@ -15,6 +19,7 @@ pub struct SettingsDialog {
     /// The AI text fields as typed; saved when one loses focus or the
     /// dialog closes, not on every key.
     ai: Option<AiDraft>,
+    lock_draft: LockDraft,
 }
 
 struct AiDraft {
@@ -61,6 +66,11 @@ pub enum Outcome {
     Close,
     Changed,
     Theme(ThemeAction),
+    /// Turn the lock on from off, once the authenticator grants it.
+    EnableLock {
+        timeout: LockTimeout,
+        password: Option<Password>,
+    },
 }
 
 /// A theme button the app acts on.
@@ -74,17 +84,30 @@ pub enum ThemeAction {
     OpenFolder,
 }
 
+/// The settings [`SettingsDialog::show`] changes, and what it shows them with.
+pub struct ShowArgs<'a> {
+    pub settings: &'a mut Settings,
+    pub themes: &'a Themes,
+    pub lock: &'a Lock,
+    /// The theme editor is open, so themes can't change here.
+    pub editing: bool,
+}
+
 impl SettingsDialog {
     pub fn show(
         &mut self,
         ctx: &egui::Context,
-        settings: &mut Settings,
-        themes: &Themes,
-        editing: bool,
+        ShowArgs {
+            settings,
+            themes,
+            lock,
+            editing,
+        }: ShowArgs<'_>,
     ) -> Outcome {
         let before = settings.clone();
         let mut outcome = Outcome::Open;
         let mut action = None;
+        let mut enable_lock = None;
         let draft = self.ai.get_or_insert_with(|| AiDraft::new(&settings.ai));
         let mut save_draft = false;
         let modal = kit::modal(ctx, egui::Id::unique("settings_dialog")).show(ctx, |ui| {
@@ -270,6 +293,8 @@ impl SettingsDialog {
                         });
                         ui.end_row();
 
+                        enable_lock = self.lock_draft.show(ui, &mut settings.lock.timeout, lock);
+
                         described(ui, "Updates", "From GitHub releases");
                         kit::segmented(
                             ui,
@@ -300,10 +325,163 @@ impl SettingsDialog {
         if let Some(action) = action {
             return Outcome::Theme(action);
         }
+        if let Some(enable_lock) = enable_lock {
+            return enable_lock;
+        }
         if *settings != before {
             outcome = Outcome::Changed;
         }
         outcome
+    }
+
+    /// Shows why the lock didn't turn on.
+    pub fn lock_not_enabled(&mut self, error: String) {
+        self.lock_draft.error = Some(error);
+    }
+
+    /// The OS prompt couldn't ask, so the lock row asks for the password
+    /// that turns the lock on with `timeout`.
+    pub fn lock_needs_password(&mut self, timeout: LockTimeout) {
+        self.lock_draft.picked = Some(timeout);
+    }
+}
+
+/// Turning the lock on from off, until the authenticator answers.
+#[derive(Default)]
+struct LockDraft {
+    /// Waits for the password before it turns on.
+    picked: Option<LockTimeout>,
+    password: String,
+    /// Why the last try didn't turn it on.
+    error: Option<String>,
+}
+
+impl LockDraft {
+    /// The lock row, hidden when nordpil can't lock. Other picks apply at
+    /// once, but one from off returns what to ask the authenticator, so a
+    /// broken OS login can't lock anyone out.
+    fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        timeout: &mut LockTimeout,
+        lock: &Lock,
+    ) -> Option<Outcome> {
+        lock.method()?;
+        if *timeout != LockTimeout::Off {
+            self.picked = None;
+        }
+        described(ui, "Lock", "After this long without input");
+        let enable = ui
+            .vertical(|ui| {
+                ui.set_width(330.0);
+                let on_pick = self.pick(ui, timeout, lock);
+                let on_password = self
+                    .picked
+                    .and_then(|picked| self.password_row(ui, picked, lock.attempting()));
+                if lock.attempting() {
+                    ui.spinner();
+                }
+                if let Some(error) = &self.error {
+                    dialogs::error_label(ui, error);
+                }
+                on_password.or(on_pick)
+            })
+            .inner;
+        ui.end_row();
+        enable
+    }
+
+    /// The timeouts. A pick from off waits for the authenticator: at once
+    /// for an OS prompt, else for the password.
+    fn pick(
+        &mut self,
+        ui: &mut egui::Ui,
+        timeout: &mut LockTimeout,
+        lock: &Lock,
+    ) -> Option<Outcome> {
+        let mut shown = self.picked.unwrap_or(*timeout);
+        let changed = ui
+            .add_enabled_ui(!lock.attempting(), |ui| {
+                kit::segmented(
+                    ui,
+                    &mut shown,
+                    &[
+                        (LockTimeout::Off, None, "Off"),
+                        (LockTimeout::M15, None, "15 min"),
+                        (LockTimeout::H1, None, "1 h"),
+                        (LockTimeout::H4, None, "4 h"),
+                        (LockTimeout::H8, None, "8 h"),
+                    ],
+                    38.0,
+                )
+            })
+            .inner;
+        if !changed {
+            return None;
+        }
+        self.error = None;
+        self.password.clear();
+        if *timeout != LockTimeout::Off || shown == LockTimeout::Off {
+            *timeout = shown;
+            self.picked = None;
+            return None;
+        }
+        if lock.method() == Some(Method::Prompt) {
+            return Some(Outcome::EnableLock {
+                timeout: shown,
+                password: None,
+            });
+        }
+        self.picked = Some(shown);
+        None
+    }
+
+    /// The password that turns the lock on with `picked`.
+    fn password_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        picked: LockTimeout,
+        attempting: bool,
+    ) -> Option<Outcome> {
+        ui.add_space(6.0);
+        let palette = theme::palette(ui);
+        let label = ui.label(RichText::new("Password").size(12.5).color(palette.muted));
+        let mut output = ui
+            .add_enabled_ui(!attempting, |ui| {
+                TextEdit::singleline(&mut self.password)
+                    .id(egui::Id::unique("lock_draft_password"))
+                    .password(true)
+                    .desired_width(f32::INFINITY)
+                    .show(ui)
+            })
+            .inner;
+        // Undo would bring back a password typed before a try or another pick.
+        output.state.clear_undoer();
+        output.state.store(ui.ctx(), output.response.id);
+        let field = output.response.response.labelled_by(label.id);
+        if !attempting && ui.memory(|memory| memory.focused().is_none()) {
+            field.request_focus();
+        }
+        let entered = field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+        ui.label(
+            RichText::new("Your Linux login password, checked by the system.")
+                .size(12.5)
+                .color(palette.muted),
+        );
+        ui.add_space(4.0);
+        let turn_on = ui
+            .add_enabled_ui(!attempting, |ui| {
+                kit::button(ui, Tone::Secondary, Some(icons::KEY), "Turn on", 32.0)
+            })
+            .inner;
+        if attempting || !(entered || turn_on.clicked()) {
+            return None;
+        }
+        self.error = None;
+        Some(Outcome::EnableLock {
+            timeout: picked,
+            password: Some(Password::new(std::mem::take(&mut self.password))),
+        })
     }
 }
 

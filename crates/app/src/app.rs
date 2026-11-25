@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::ai::{AskAi, Preview, Rejected};
 use crate::connections::{Collections, ConnectionEntry, ConnectionState, Selection};
-use crate::lock::{Authenticator, Lock, Reason};
+use crate::lock::{self, Authenticator, Lock, Reason};
 use crate::lookup::References;
 use crate::shell::{Body, Ending, FileJob, PageRequest, Running};
 use crate::shortcuts::{self, AppCommand};
@@ -2993,8 +2993,16 @@ impl NordpilApp {
             return;
         };
         let mut settings = self.settings.clone();
-        let editing = self.theme_editor.is_some();
-        match dialog.show(ctx, &mut settings, &self.themes, editing) {
+        let outcome = dialog.show(
+            ctx,
+            settings_dialog::ShowArgs {
+                settings: &mut settings,
+                themes: &self.themes,
+                lock: &self.lock,
+                editing: self.theme_editor.is_some(),
+            },
+        );
+        match outcome {
             settings_dialog::Outcome::Open => {}
             settings_dialog::Outcome::Close => {
                 self.settings_dialog = None;
@@ -3003,6 +3011,12 @@ impl NordpilApp {
                 }
             }
             settings_dialog::Outcome::Changed => self.set_settings(ctx, settings),
+            settings_dialog::Outcome::EnableLock { timeout, password } => {
+                if settings != self.settings {
+                    self.set_settings(ctx, settings);
+                }
+                self.lock.attempt_enable(ctx, timeout, password);
+            }
             settings_dialog::Outcome::Theme(action) => {
                 if settings != self.settings {
                     self.set_settings(ctx, settings);
@@ -3189,13 +3203,14 @@ impl NordpilApp {
             }
             return false;
         }
+        let attempting = self.lock.attempting();
         let Some(locked) = self.lock.screen() else {
             return false;
         };
         let palette = theme::palette(ui);
         let unlock = egui::CentralPanel::no_frame()
             .frame(Frame::new().fill(palette.main))
-            .show(ui, |ui| lock_screen::show(ui, locked))
+            .show(ui, |ui| lock_screen::show(ui, locked, attempting))
             .inner;
         if unlock {
             self.lock.attempt(&ctx);
@@ -3215,6 +3230,35 @@ impl NordpilApp {
             self.notify(BackendError::new(
                 "nordpil locks when the running work finishes.",
             ));
+        }
+    }
+
+    /// Turns the lock on once the OS user said it is them, also when
+    /// Settings closed meanwhile.
+    fn poll_lock_enable(&mut self, ctx: &egui::Context) {
+        let Some((timeout, outcome)) = self.lock.poll_enable() else {
+            return;
+        };
+        match outcome {
+            lock::Outcome::Granted => {
+                let mut settings = self.settings.clone();
+                settings.lock.timeout = timeout;
+                self.set_settings(ctx, settings);
+            }
+            lock::Outcome::Denied(error) | lock::Outcome::Failed(error) => {
+                if let Some(dialog) = &mut self.settings_dialog {
+                    dialog.lock_not_enabled(error);
+                }
+            }
+            // A dismissed prompt leaves it off. One that couldn't show turned
+            // into the password, which the row asks for now.
+            lock::Outcome::Cancelled => {
+                if self.lock.method() == Some(lock::Method::Password)
+                    && let Some(dialog) = &mut self.settings_dialog
+                {
+                    dialog.lock_needs_password(timeout);
+                }
+            }
         }
     }
 
@@ -3332,6 +3376,7 @@ impl NordpilApp {
         self.poll_shells(&ctx);
         self.poll_aggregates(&ctx);
         self.poll_ask_ai(&ctx);
+        self.poll_lock_enable(&ctx);
         self.shortcuts(&ctx);
         // Ctrl+Shift+L may have locked it just now.
         if self.show_lock(ui) {

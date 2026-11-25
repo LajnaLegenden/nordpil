@@ -13,6 +13,8 @@ struct FakeAuth {
     method: Method,
     outcomes: Mutex<VecDeque<Outcome>>,
     calls: AtomicUsize,
+    /// The text of each password it was given; empty when it got none.
+    seen: Mutex<Vec<String>>,
 }
 
 impl Authenticator for FakeAuth {
@@ -20,8 +22,10 @@ impl Authenticator for FakeAuth {
         self.method
     }
 
-    fn authenticate(&self, _password: Option<&Password>) -> Outcome {
+    fn authenticate(&self, password: Option<&Password>) -> Outcome {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        let text = password.map(Password::expose).unwrap_or_default();
+        self.seen.lock().unwrap().push(text.to_owned());
         self.outcomes
             .lock()
             .unwrap()
@@ -35,6 +39,7 @@ fn fake(method: Method, outcomes: impl IntoIterator<Item = Outcome>) -> Arc<Fake
         method,
         outcomes: Mutex::new(outcomes.into_iter().collect()),
         calls: AtomicUsize::new(0),
+        seen: Mutex::new(Vec::new()),
     })
 }
 
@@ -538,6 +543,111 @@ fn a_pending_write_confirmation_does_not_block_the_idle_lock() {
         mongosh(&mongo, "db.getSiblingDB('test').items.countDocuments({})"),
         "0"
     );
+}
+
+/// Other rows have an "Off" too, so this takes the one level with "Lock".
+fn click_lock_option(harness: &mut Harness<'_, NordpilApp>, label: &str) {
+    // The row is below the fold of the dialog's scroll area.
+    harness.get_by_label("Text size").hover();
+    harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -1000.0),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
+        modifiers: Modifiers::default(),
+    });
+    harness.step();
+    harness.step();
+    let row = harness.get_by_label("Lock").rect().center().y;
+    let distance = |y: f32| (y - row).abs();
+    harness
+        .query_all_by_role_and_label(Role::Tab, label)
+        .min_by(|a, b| distance(a.rect().center().y).total_cmp(&distance(b.rect().center().y)))
+        .unwrap()
+        .click();
+    harness.step();
+    harness.step();
+}
+
+#[test]
+fn turning_the_lock_on_needs_one_successful_auth() {
+    let dir = lock_dir();
+    let mut harness = harness_in(&dir);
+    let auth = fake(
+        Method::Prompt,
+        [Outcome::Denied("Not you".to_owned()), Outcome::Granted],
+    );
+    enable(&mut harness, LockTimeout::Off, &auth);
+    harness.state_mut().settings_dialog = Some(SettingsDialog::default());
+    harness.run();
+
+    click_lock_option(&mut harness, "1 h");
+    wait_for_label(&mut harness, "Not you");
+    assert_eq!(harness.state().settings.lock.timeout, LockTimeout::Off);
+
+    click_lock_option(&mut harness, "1 h");
+    wait_for(&mut harness, |app| {
+        app.settings.lock.timeout == LockTimeout::H1
+    });
+    wait_for_config(&dir, "timeout = \"1h\"");
+
+    click_lock_option(&mut harness, "4 h");
+    assert_eq!(harness.state().settings.lock.timeout, LockTimeout::H4);
+    click_lock_option(&mut harness, "Off");
+    assert_eq!(harness.state().settings.lock.timeout, LockTimeout::Off);
+    assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_lock_row_is_hidden_without_an_authenticator() {
+    let mut harness = harness();
+    harness.state_mut().settings_dialog = Some(SettingsDialog::default());
+    harness.run();
+
+    assert!(harness.query_by_label("Updates").is_some());
+    assert!(harness.query_by_label("Lock").is_none());
+}
+
+#[test]
+fn undo_in_the_password_field_does_not_bring_back_a_password() {
+    let mut harness = owner_harness();
+    let auth = fake(
+        Method::Password,
+        [
+            Outcome::Granted,
+            Outcome::Denied("Wrong password.".to_owned()),
+        ],
+    );
+    enable(&mut harness, LockTimeout::H1, &auth);
+    harness.step();
+    rewind(&mut harness, 3601);
+    wait_for(&mut harness, is_locked);
+
+    type_password(&mut harness, "hunter2");
+    // Over a second of the harness's simulated time, so the undoer saves.
+    for _ in 0..6 {
+        harness.step();
+    }
+    click_unlock(&mut harness);
+    wait_for(&mut harness, |app| !app.lock.is_locked());
+
+    rewind(&mut harness, 3601);
+    wait_for(&mut harness, is_locked);
+    harness
+        .get_by_role_and_label(Role::PasswordInput, "Password")
+        .focus();
+    harness.step();
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    harness.step();
+    harness.step();
+    click_unlock(&mut harness);
+    wait_for(&mut harness, |_| auth.calls.load(Ordering::SeqCst) == 2);
+
+    let seen = auth.seen.lock().unwrap();
+    assert_eq!(seen[0], "hunter2");
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1], "");
 }
 
 #[test]
