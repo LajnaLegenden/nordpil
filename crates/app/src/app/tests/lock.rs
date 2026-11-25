@@ -539,3 +539,93 @@ fn a_pending_write_confirmation_does_not_block_the_idle_lock() {
         "0"
     );
 }
+
+#[test]
+fn unlock_leaves_connections_without_a_saved_password_disconnected() {
+    let dir = lock_dir();
+    let store = ConnectionStore::new(dir.join("connections.toml"));
+    store
+        .save(&[SavedConnection {
+            id: Uuid::new_v4(),
+            name: "Bob".to_owned(),
+            uri: "mongodb://bob@localhost:1/".to_owned(),
+            color: None,
+            read_only: false,
+        }])
+        .unwrap();
+    let mut harness = harness_in(&dir);
+    run_until(&mut harness, |app| app.connections.len() == 1);
+    harness.state_mut().connections[0].state = ConnectionState::Connected(Vec::new());
+    let auth = fake(Method::Password, [Outcome::Granted]);
+    enable(&mut harness, LockTimeout::H1, &auth);
+    harness.step();
+
+    press_lock(&mut harness);
+    assert!(harness.state().lock.is_locked());
+    type_password(&mut harness, "right");
+    click_unlock(&mut harness);
+    wait_for(&mut harness, |app| {
+        matches!(app.connections[0].state, ConnectionState::Connecting(_))
+    });
+    wait_for(&mut harness, |app| {
+        !app.backend.is_busy() && matches!(app.connections[0].state, ConnectionState::Disconnected)
+    });
+
+    assert!(harness.state().dialog.is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "needs Docker"]
+fn unlock_reconnects_and_reruns_the_active_find_tab() {
+    let mongo = Mongo::default().with_tag("8.0").start().unwrap();
+    let port = mongo.get_host_port_ipv4(27017).unwrap();
+    mongosh(
+        &mongo,
+        "db.getSiblingDB('test').a.insertMany([{ n: 1 }, { n: 2 }]); db.getSiblingDB('test').b.insertMany([{ n: 3 }]); db.getSiblingDB('test').items.insertOne({ n: 0 })",
+    );
+    let mut harness = connected_shell_harness(port);
+    let connection = harness.state().connections[0].saved.id;
+    let select = |collection: &str| {
+        Action::Select(Selection {
+            connection,
+            database: "test".to_owned(),
+            collection: collection.to_owned(),
+        })
+    };
+    {
+        let shell = &mut harness.state_mut().tabs[0].shell;
+        shell.loaded = true;
+        shell.text = "db.items.find({})".to_owned();
+    }
+    // New tabs open on the last panel, which the shell tab set to Shell.
+    harness.state_mut().settings.last_panel = Panel::Documents;
+    harness.state_mut().apply(select("a"));
+    run_until(&mut harness, |app| {
+        app.tabs.get(1).is_some_and(|tab| tab.results.is_some())
+    });
+    harness.state_mut().apply(select("b"));
+    run_until(&mut harness, |app| {
+        app.tabs.get(2).is_some_and(|tab| tab.results.is_some())
+    });
+    assert_eq!(harness.state().active_tab, Some(2));
+
+    let auth = fake(Method::Password, [Outcome::Granted]);
+    enable(&mut harness, LockTimeout::H1, &auth);
+    press_lock(&mut harness);
+    assert!(harness.state().lock.is_locked());
+    type_password(&mut harness, "right");
+    click_unlock(&mut harness);
+    wait_for(&mut harness, |app| {
+        matches!(app.connections[0].state, ConnectionState::Connected(_))
+            && app.tabs[2].results.is_some()
+    });
+
+    let app = harness.state();
+    assert!(app.tabs[1].results.is_none());
+    assert!(app.tabs[0].shell.results.is_empty());
+    assert_eq!(app.tabs[0].shell.text, "db.items.find({})");
+
+    harness.state_mut().active_tab = Some(1);
+    wait_for(&mut harness, |app| app.tabs[1].results.is_some());
+}

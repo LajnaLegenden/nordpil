@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -171,6 +172,9 @@ pub struct NordpilApp {
     /// `logic` looked whether the lock is due this frame, so `show` needn't.
     lock_checked: bool,
     lock: Lock,
+    /// Open when it locked, so connected again on unlock. Until each
+    /// answers, a missing password leaves it disconnected without a prompt.
+    quiet_reconnects: HashSet<Uuid>,
     #[cfg(target_os = "macos")]
     menu: Option<crate::menu::MacMenu>,
 }
@@ -228,6 +232,7 @@ impl NordpilApp {
             updater: None,
             lock_checked: false,
             lock: Lock::new(config_path),
+            quiet_reconnects: HashSet::new(),
             #[cfg(target_os = "macos")]
             menu: None,
         };
@@ -1620,6 +1625,7 @@ impl NordpilApp {
         }
         tab.error = None;
         tab.stopped = false;
+        tab.needs_rerun = false;
         tab.pending_find = Some(self.backend.send(Command::Find {
             namespace: namespace.clone(),
             query: Box::new(query.clone()),
@@ -2038,6 +2044,7 @@ impl NordpilApp {
     fn connected(&mut self, id: Uuid, result: Result<Vec<DatabaseInfo>, BackendError>) {
         let keyring_available = self.keyring_available;
         let remember = self.settings.goto_scope == GotoScope::AllSaved;
+        let quiet = self.quiet_reconnects.remove(&id);
         let Some(entry) = self.entry_mut(id) else {
             return;
         };
@@ -2057,11 +2064,15 @@ impl NordpilApp {
                     None => {}
                 }
             }
+            Err(error) if quiet && error.kind == ErrorKind::PasswordRequired => {
+                entry.state = ConnectionState::Disconnected;
+            }
             Err(error)
-                if matches!(
-                    error.kind,
-                    ErrorKind::PasswordRequired | ErrorKind::AuthenticationFailed
-                ) =>
+                if !quiet
+                    && matches!(
+                        error.kind,
+                        ErrorKind::PasswordRequired | ErrorKind::AuthenticationFailed
+                    ) =>
             {
                 entry.state = ConnectionState::Disconnected;
                 self.dialog = Some(Dialog::Password(PasswordPrompt {
@@ -2180,6 +2191,7 @@ impl NordpilApp {
         for entry in &mut self.connections {
             if matches!(entry.state, ConnectionState::Connecting(r) if r == request) {
                 entry.state = ConnectionState::Disconnected;
+                self.quiet_reconnects.remove(&entry.saved.id);
             }
         }
     }
@@ -2689,7 +2701,11 @@ impl NordpilApp {
                     }
                     Panel::Indexes => {
                         let tab = &self.tabs[index];
-                        if tab.indexes.is_none() && tab.indexes_request.is_none() {
+                        // Waits for the connection, e.g. its reconnect after an unlock.
+                        let connected = self.entry(tab.target.connection).is_some_and(|entry| {
+                            matches!(entry.state, ConnectionState::Connected(_))
+                        });
+                        if tab.indexes.is_none() && tab.indexes_request.is_none() && connected {
                             let namespace = tab.namespace();
                             self.load_indexes(&namespace);
                         }
@@ -3168,6 +3184,9 @@ impl NordpilApp {
             self.settings.lock.locked = false;
             self.backend
                 .send(Command::SaveSettings(self.settings.clone()));
+            for id in self.quiet_reconnects.clone() {
+                self.connect(id, None, false);
+            }
             return false;
         }
         let Some(locked) = self.lock.screen() else {
@@ -3212,7 +3231,8 @@ impl NordpilApp {
     }
 
     /// Saves the drafts, closes every dialog, drops the sessions and what
-    /// the tabs loaded, and stays locked across a restart.
+    /// the tabs loaded, notes what unlocking brings back, and stays locked
+    /// across a restart.
     fn lock_now(&mut self, ctx: &egui::Context, reason: Reason) {
         for tab in &mut self.tabs {
             if let Some(text) = tab.shell.draft_to_save(true) {
@@ -3230,7 +3250,14 @@ impl NordpilApp {
             tab.aggregate.confirm = None;
             tab.aggregate.explain = None;
             tab.aggregate.paste = None;
+            tab.needs_rerun |= tab.results.is_some();
         }
+        self.quiet_reconnects = self
+            .connections
+            .iter()
+            .filter(|entry| matches!(entry.state, ConnectionState::Connected(_)))
+            .map(|entry| entry.saved.id)
+            .collect();
         self.close_ask_ai();
         self.form = None;
         self.connect_after_save = None;
@@ -3396,6 +3423,22 @@ impl NordpilApp {
             self.apply(action);
         }
         self.remember_panel();
+        self.rerun_after_unlock();
+    }
+
+    /// A find the lock dropped runs again, on the same page, once its tab
+    /// is active on Documents and its connection is open.
+    fn rerun_after_unlock(&mut self) {
+        let Some(index) = self.active_tab else {
+            return;
+        };
+        let tab = &self.tabs[index];
+        let connected = self
+            .entry(tab.target.connection)
+            .is_some_and(|entry| matches!(entry.state, ConnectionState::Connected(_)));
+        if tab.needs_rerun && tab.panel == Panel::Documents && connected {
+            self.tab_action(index, TabAction::Refresh);
+        }
     }
 
     /// Keeps the active tab's panel in the settings, for new tabs to open on.
