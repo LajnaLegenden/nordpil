@@ -260,10 +260,6 @@ impl NordpilApp {
 
     /// Locks after the `[lock]` idle time or on Ctrl+Shift+L, and unlocks
     /// once `authenticator` says it is the user.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "dark until the OS authenticators are wired")
-    )]
     pub fn enable_lock(&mut self, authenticator: Arc<dyn Authenticator>) {
         self.lock.enable(authenticator, self.settings.lock);
         // Past a lock with `timeout = "off"`: the next save mustn't lock the next launch.

@@ -11,6 +11,27 @@ use eframe::egui::{self, Event};
 use nordpil_backend::Password;
 use nordpil_backend::settings::{LockSettings, LockTimeout};
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+
+/// The OS check for this platform; `None` where nordpil can't lock.
+pub fn os_authenticator() -> Option<Arc<dyn Authenticator>> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(Arc::new(linux::LinuxAuthenticator::new()))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(Arc::new(macos::MacAuthenticator))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
 /// How an [`Authenticator`] checks the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
@@ -21,10 +42,6 @@ pub enum Method {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "made by the OS authenticators, not wired yet")
-)]
 pub enum Outcome {
     Granted,
     /// A wrong password; the text says so.
@@ -210,6 +227,10 @@ impl Lock {
             return false;
         };
         if let Some((Purpose::Unlock, outcome)) = take_answer(&mut self.attempt) {
+            // An OS prompt that couldn't show turns into the password field.
+            if let Some(authenticator) = &self.authenticator {
+                locked.method = authenticator.method();
+            }
             match outcome {
                 Outcome::Granted => {
                     self.locked = None;

@@ -42,6 +42,8 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: scripts/bump-version.sh "$VERSION"
       - run: cargo fmt --all --check
+      # The lock checks passwords through PAM, so the app links libpam.
+      - run: sudo apt-get update && sudo apt-get install -y libpam0g-dev
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       # The tests marked "needs Docker": MongoDB 8.0 through testcontainers.

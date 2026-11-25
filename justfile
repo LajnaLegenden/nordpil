@@ -38,10 +38,14 @@ install prefix="/usr/local":
     sudo install -Dm755 target/release/nordpil "{{prefix}}/bin/nordpil"
     sudo install -Dm644 target/release/nordpil.desktop "{{prefix}}/share/applications/nordpil.desktop"
     sudo install -Dm644 crates/app/assets/nordpil.svg "{{prefix}}/share/icons/hicolor/scalable/apps/nordpil.svg"
+    # polkit reads actions only from /usr/share, whatever the prefix.
+    sudo install -Dm644 crates/app/assets/io.github.lajnalegenden.nordpil.policy \
+        /usr/share/polkit-1/actions/io.github.lajnalegenden.nordpil.policy
     echo "Installed nordpil to {{prefix}}."
 
 # Remove what `just install` put in place. Saved connections and settings stay.
 uninstall prefix="/usr/local":
     sudo rm -f "{{prefix}}/bin/nordpil" \
         "{{prefix}}/share/applications/nordpil.desktop" \
-        "{{prefix}}/share/icons/hicolor/scalable/apps/nordpil.svg"
+        "{{prefix}}/share/icons/hicolor/scalable/apps/nordpil.svg" \
+        /usr/share/polkit-1/actions/io.github.lajnalegenden.nordpil.policy

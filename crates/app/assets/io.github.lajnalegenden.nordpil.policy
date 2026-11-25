@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- Lets nordpil's lock ask for the account password in polkit's own dialog. -->
+<policyconfig>
+  <vendor>nordpil</vendor>
+  <vendor_url>https://github.com/LajnaLegenden/nordpil</vendor_url>
+  <action id="io.github.lajnalegenden.nordpil.unlock">
+    <description>Unlock nordpil</description>
+    <message>Authentication is required to unlock nordpil</message>
+    <!-- auth_self, never auth_self_keep: a kept authorization would unlock
+         without asking. -->
+    <defaults>
+      <allow_any>auth_self</allow_any>
+      <allow_inactive>auth_self</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
