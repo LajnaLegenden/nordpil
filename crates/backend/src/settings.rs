@@ -1,6 +1,7 @@
 //! User settings, kept in `config.toml` next to the saved connections.
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -226,6 +227,43 @@ impl Default for AiSettings {
     }
 }
 
+/// How long nordpil may sit idle before it locks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LockTimeout {
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "15m")]
+    M15,
+    #[serde(rename = "1h")]
+    H1,
+    #[serde(rename = "4h")]
+    H4,
+    #[serde(rename = "8h")]
+    H8,
+}
+
+impl LockTimeout {
+    /// `None` when it never locks.
+    pub fn duration(self) -> Option<Duration> {
+        match self {
+            Self::Off => None,
+            Self::M15 => Some(Duration::from_mins(15)),
+            Self::H1 => Some(Duration::from_hours(1)),
+            Self::H4 => Some(Duration::from_hours(4)),
+            Self::H8 => Some(Duration::from_hours(8)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LockSettings {
+    pub timeout: LockTimeout,
+    /// Kept so a restart doesn't get past the lock.
+    pub locked: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -241,6 +279,7 @@ pub struct Settings {
     pub shell: ShellLayout,
     pub aggregate: AggregateSettings,
     pub ai: AiSettings,
+    pub lock: LockSettings,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -282,6 +321,11 @@ impl Backend {
     /// before the first frame, so the window opens in the right theme.
     pub fn load_settings(&self) -> Result<Settings, BackendError> {
         load(&self.settings_path)
+    }
+
+    /// Where the settings live: `config.toml`.
+    pub fn settings_path(&self) -> &Path {
+        &self.settings_path
     }
 
     pub(crate) async fn save_settings(&self, settings: Settings) -> Result<(), BackendError> {
@@ -335,6 +379,7 @@ mod tests {
                 },
                 timeout_secs: 30,
             },
+            lock: LockSettings::default(),
         };
         save(&path, settings.clone()).unwrap();
 
@@ -400,3 +445,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+#[cfg(test)]
+#[path = "tests/settings_lock.rs"]
+mod lock_tests;

@@ -105,9 +105,11 @@ impl<H: Handler> Bridge<H> {
                 () = cancel.cancelled() => Outcome::Cancelled,
                 response = handler.handle(command, cancel.clone()) => Outcome::Done(response),
             };
-            lock(&in_flight).remove(&id);
+            // Queued before it leaves `in_flight`, so `is_busy` holds until it's drained.
             // The receiver lives as long as the bridge, so this only fails during shutdown.
-            if events_tx.send(Event { id, outcome }).is_ok() {
+            let sent = events_tx.send(Event { id, outcome }).is_ok();
+            lock(&in_flight).remove(&id);
+            if sent {
                 wake();
             }
         });
@@ -120,6 +122,11 @@ impl<H: Handler> Bridge<H> {
         if let Some(token) = lock(&self.in_flight).get(&id) {
             token.cancel();
         }
+    }
+
+    /// Whether any request is still running, or its result waits to be drained.
+    pub fn is_busy(&self) -> bool {
+        !lock(&self.in_flight).is_empty() || !self.events_rx.is_empty()
     }
 
     /// Returns the events that arrived since the last call, without blocking.
@@ -228,3 +235,7 @@ mod tests {
         assert!(lock(&bridge.in_flight).is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "tests/bridge_lock.rs"]
+mod lock_tests;
