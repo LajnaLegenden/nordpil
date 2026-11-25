@@ -11,6 +11,7 @@ pub mod documents;
 pub mod goto;
 pub mod index_dialog;
 pub mod indexes;
+pub mod lock_screen;
 pub mod mappings_dialog;
 pub mod settings_dialog;
 pub mod shell;

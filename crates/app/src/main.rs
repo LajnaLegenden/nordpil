@@ -5,6 +5,7 @@ mod ai;
 mod app;
 mod connections;
 mod icons;
+mod lock;
 mod logging;
 mod lookup;
 #[cfg(target_os = "macos")]

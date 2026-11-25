@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::ai::{AskAi, Preview, Rejected};
 use crate::connections::{Collections, ConnectionEntry, ConnectionState, Selection};
+use crate::lock::{Authenticator, Lock, Reason};
 use crate::lookup::References;
 use crate::shell::{Body, Ending, FileJob, PageRequest, Running};
 use crate::shortcuts::{self, AppCommand};
@@ -35,7 +36,7 @@ use crate::ui::shell::ShellAction;
 use crate::ui::shortcuts_dialog;
 use crate::ui::theme_editor::{self, NewThemeDialog, ThemeEditor};
 use crate::ui::transfer_dialog::{self, TransferDialog};
-use crate::ui::{Action, chrome, documents, sidebar};
+use crate::ui::{Action, chrome, documents, lock_screen, sidebar};
 use crate::update::{self, Updater};
 use crate::widgets::kit::{self, Tone};
 use crate::{icons, theme};
@@ -167,6 +168,9 @@ pub struct NordpilApp {
     closed: Vec<ClosedTab>,
     /// Off in development builds and tests.
     updater: Option<Updater>,
+    /// `logic` looked whether the lock is due this frame, so `show` needn't.
+    lock_checked: bool,
+    lock: Lock,
     #[cfg(target_os = "macos")]
     menu: Option<crate::menu::MacMenu>,
 }
@@ -183,6 +187,7 @@ impl NordpilApp {
             Ok(loaded) => (loaded, None),
             Err(error) => (Vec::new(), Some(error)),
         };
+        let config_path = backend.settings_path().to_owned();
         theme::install(ctx);
         ctx.options_mut(|options| options.input_options.line_scroll_speed = LINE_SCROLL_SPEED);
         let repaint = ctx.clone();
@@ -221,6 +226,8 @@ impl NordpilApp {
             pending_open: None,
             closed: Vec::new(),
             updater: None,
+            lock_checked: false,
+            lock: Lock::new(config_path),
             #[cfg(target_os = "macos")]
             menu: None,
         };
@@ -244,6 +251,18 @@ impl NordpilApp {
     /// Checks GitHub for newer releases, as the `updates` setting says.
     pub fn enable_updates(&mut self, ctx: &egui::Context) {
         self.updater = Some(Updater::new(ctx.clone()));
+    }
+
+    /// Locks after the `[lock]` idle time or on Ctrl+Shift+L, and unlocks
+    /// once `authenticator` says it is the user.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "dark until the OS authenticators are wired")
+    )]
+    pub fn enable_lock(&mut self, authenticator: Arc<dyn Authenticator>) {
+        self.lock.enable(authenticator, self.settings.lock);
+        // Past a lock with `timeout = "off"`: the next save mustn't lock the next launch.
+        self.settings.lock.locked = self.lock.is_locked();
     }
 
     fn entry(&self, id: Uuid) -> Option<&ConnectionEntry> {
@@ -2745,6 +2764,8 @@ impl NordpilApp {
             commands.extend(menu.commands());
             let panel = self.active_tab.map(|index| self.tabs[index].panel);
             menu.update(crate::menu::MenuState {
+                locked: false,
+                can_lock: self.lock.can_lock(self.settings.lock.timeout),
                 has_tabs: !self.tabs.is_empty(),
                 can_reopen: !self.closed.is_empty(),
                 on_shell: panel == Some(Panel::Shell),
@@ -2757,6 +2778,10 @@ impl NordpilApp {
             commands.push(AppCommand::StopScript);
         }
         for command in commands {
+            // What came after a lock would act behind the lock screen.
+            if self.lock.is_locked() {
+                break;
+            }
             self.run_command(ctx, command);
         }
     }
@@ -2830,10 +2855,12 @@ impl NordpilApp {
                 | (Some(Modal::Settings), AppCommand::Settings)
                 | (Some(Modal::Shortcuts), AppCommand::Shortcuts)
         );
-        if self.open_modal().is_some() && !toggles_own_modal {
+        // Locking closes the modals itself.
+        if self.open_modal().is_some() && !toggles_own_modal && command != AppCommand::Lock {
             return;
         }
         match command {
+            AppCommand::Lock => self.lock_on_request(ctx),
             AppCommand::GoTo => {
                 self.goto = match self.goto {
                     Some(_) => None,
@@ -3106,6 +3133,147 @@ impl NordpilApp {
         self.restyle = Some(false);
     }
 
+    /// Locks when it is due and no work runs. Runs from `logic` too, which
+    /// eframe calls also while the window is hidden and `ui` isn't.
+    fn lock_when_due(&mut self, ctx: &egui::Context) {
+        let Some(reason) = self.lock.due(ctx, self.settings.lock.timeout) else {
+            return;
+        };
+        self.stop_pending_writes();
+        if !self.backend.is_busy() {
+            self.lock_now(ctx, reason);
+        }
+    }
+
+    /// While locked, shows only the lock screen and returns true.
+    fn show_lock(&mut self, ui: &mut egui::Ui) -> bool {
+        if !self.lock.is_locked() {
+            return false;
+        }
+        let ctx = ui.ctx().clone();
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = &mut self.menu {
+            // Picks made while locked are dropped, not run after unlocking.
+            menu.commands();
+            menu.update(crate::menu::MenuState {
+                locked: true,
+                can_lock: false,
+                has_tabs: false,
+                can_reopen: false,
+                on_shell: false,
+                on_aggregate: false,
+            });
+        }
+        if self.lock.poll(&ctx) {
+            self.settings.lock.locked = false;
+            self.backend
+                .send(Command::SaveSettings(self.settings.clone()));
+            return false;
+        }
+        let Some(locked) = self.lock.screen() else {
+            return false;
+        };
+        let palette = theme::palette(ui);
+        let unlock = egui::CentralPanel::no_frame()
+            .frame(Frame::new().fill(palette.main))
+            .show(ui, |ui| lock_screen::show(ui, locked))
+            .inner;
+        if unlock {
+            self.lock.attempt(&ctx);
+        }
+        true
+    }
+
+    /// Ctrl+Shift+L: locks now, or once running work ends.
+    fn lock_on_request(&mut self, ctx: &egui::Context) {
+        if !self.lock.can_lock(self.settings.lock.timeout) {
+            return;
+        }
+        self.stop_pending_writes();
+        if !self.backend.is_busy() {
+            self.lock_now(ctx, Reason::Manual);
+        } else if self.lock.lock_after_work() {
+            self.notify(BackendError::new(
+                "nordpil locks when the running work finishes.",
+            ));
+        }
+    }
+
+    /// A run waiting to be allowed its first write would hold the lock off,
+    /// so it gets the dialog's Stop run: nothing is written.
+    fn stop_pending_writes(&self) {
+        for running in self
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.shell.running.as_ref())
+        {
+            running.run.answer(false);
+        }
+    }
+
+    /// Saves the drafts, closes every dialog, drops the sessions and what
+    /// the tabs loaded, and stays locked across a restart.
+    fn lock_now(&mut self, ctx: &egui::Context, reason: Reason) {
+        for tab in &mut self.tabs {
+            if let Some(text) = tab.shell.draft_to_save(true) {
+                self.backend.send(Command::SaveDraft {
+                    namespace: tab.namespace(),
+                    text,
+                });
+            }
+            if let Some(pipeline) = tab.aggregate.draft_to_save(true) {
+                self.backend.send(Command::SavePipelineDraft {
+                    namespace: tab.namespace(),
+                    pipeline: Box::new(pipeline),
+                });
+            }
+            tab.aggregate.confirm = None;
+            tab.aggregate.explain = None;
+            tab.aggregate.paste = None;
+        }
+        self.close_ask_ai();
+        self.form = None;
+        self.connect_after_save = None;
+        self.dialog = None;
+        self.document_dialog = None;
+        self.index_dialog = None;
+        self.transfer_dialog = None;
+        self.settings_dialog = None;
+        self.new_theme = None;
+        if let Some(editor) = &mut self.theme_editor {
+            editor.cancel_close();
+        }
+        self.mappings_dialog = None;
+        self.goto = None;
+        self.shortcuts_sheet = false;
+        self.notifications.clear();
+        self.pending_open = None;
+        egui::Popup::close_all(ctx);
+        self.clear_loaded_data();
+        self.backend.send(Command::DisconnectAll);
+        self.lock.lock(reason);
+        self.settings.lock.locked = true;
+        self.backend
+            .send(Command::SaveSettings(self.settings.clone()));
+    }
+
+    /// Drops what came from the servers: databases, documents, indexes and
+    /// results. The tabs and their inputs stay.
+    fn clear_loaded_data(&mut self) {
+        for entry in &mut self.connections {
+            entry.state = ConnectionState::Disconnected;
+        }
+        for tab in &mut self.tabs {
+            tab.results = None;
+            tab.values.clear();
+            tab.count = None;
+            tab.error = None;
+            tab.indexes = None;
+            tab.shell.clear_results();
+            tab.aggregate.clear_results(&mut self.backend);
+        }
+    }
+
     /// Applies the backend results that arrived since the last frame.
     pub fn process_events(&mut self) {
         if let Some(updater) = &mut self.updater {
@@ -3118,15 +3286,30 @@ impl NordpilApp {
                 Outcome::Cancelled => self.cancelled(event.id),
             }
         }
+        // An answer already on its way when it locked mustn't bring data back.
+        if self.lock.is_locked() {
+            self.clear_loaded_data();
+        }
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        // Once a frame: here only when the host didn't call `logic`.
+        if !std::mem::take(&mut self.lock_checked) {
+            self.lock_when_due(ui.ctx());
+        }
+        if self.show_lock(ui) {
+            return;
+        }
         let mut actions = Vec::new();
         let ctx = ui.ctx().clone();
         self.poll_shells(&ctx);
         self.poll_aggregates(&ctx);
         self.poll_ask_ai(&ctx);
         self.shortcuts(&ctx);
+        // Ctrl+Shift+L may have locked it just now.
+        if self.show_lock(ui) {
+            return;
+        }
         if let Some(announce) = self.restyle.take() {
             self.apply_themes(&ctx, announce);
         }
@@ -3230,8 +3413,10 @@ impl NordpilApp {
 }
 
 impl eframe::App for NordpilApp {
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_events();
+        self.lock_when_due(ctx);
+        self.lock_checked = true;
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -4635,6 +4820,9 @@ fi"#,
         assert!(!harness.ctx.global_style().visuals.dark_mode);
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[path = "lock.rs"]
+    mod lock;
 }
 
 #[cfg(all(test, feature = "screenshots"))]
