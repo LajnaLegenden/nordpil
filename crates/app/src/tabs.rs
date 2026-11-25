@@ -89,6 +89,9 @@ pub struct CollectionTab {
     pub error: Option<String>,
     /// The user stopped the query before it returned.
     pub stopped: bool,
+    /// The lock dropped the results: the find runs again once the tab shows
+    /// Documents on an open connection.
+    pub needs_rerun: bool,
     /// From reading the query inputs.
     pub input_errors: Vec<String>,
     /// This collection's favorite and recent queries.
@@ -134,6 +137,7 @@ impl CollectionTab {
             pending_count: None,
             error: None,
             stopped: false,
+            needs_rerun: false,
             input_errors: Vec::new(),
             history: Vec::new(),
             fields: Vec::new(),
