@@ -46,6 +46,9 @@ fn main() -> eframe::Result {
             let mut app = app::NordpilApp::new(&cc.egui_ctx, backend)?;
             #[cfg(target_os = "macos")]
             app.install_menu(&cc.egui_ctx);
+            if let Some(authenticator) = lock::os_authenticator() {
+                app.enable_lock(authenticator);
+            }
             // Development builds aren't replaced by releases.
             if !cfg!(debug_assertions) {
                 app.enable_updates(&cc.egui_ctx);

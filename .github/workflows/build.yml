@@ -53,6 +53,8 @@ jobs:
             target
           key: linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: linux-${{ matrix.arch }}-
+      # The lock checks passwords through PAM, so the app links libpam.
+      - run: sudo apt-get update && sudo apt-get install -y libpam0g-dev
       - name: Install cargo-deb
         run: command -v cargo-deb >/dev/null || cargo install cargo-deb --locked --version 3.8.0
       - if: ${{ inputs.bump }}
