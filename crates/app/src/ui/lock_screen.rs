@@ -9,9 +9,8 @@ use crate::widgets::kit::{self, Tone};
 use crate::{icons, theme};
 
 /// Returns true when the user asks to unlock.
-pub fn show(ui: &mut Ui, locked: &mut Locked) -> bool {
+pub fn show(ui: &mut Ui, locked: &mut Locked, attempting: bool) -> bool {
     let palette = theme::palette(ui);
-    let attempting = locked.attempting();
     let mut unlock = false;
     ui.vertical_centered(|ui| {
         let top = (ui.available_height() - 340.0).max(0.0) / 2.0;
