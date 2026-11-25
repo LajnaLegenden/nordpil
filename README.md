@@ -65,9 +65,16 @@ when idle, against roughly 1 GB for Compass.
   or by hand in a TOML file; see [Themes](#themes).
 - **Settings**: three text sizes, and whether Ctrl+K searches all saved connections or
   only open ones.
+- **Lock**: off by default; in Settings, lock after 15 min, 1 h, 4 h or 8 h without input,
+  and Ctrl+Shift+L (⇧⌘L) locks at once. Your OS account unlocks it: on Linux polkit's own
+  prompt when installed with `just install` or the `.deb`, otherwise a password field
+  checked through PAM; on macOS Touch ID or your password. While locked nordpil drops its
+  connections and loaded documents, and reconnects after. Turning the lock on asks once.
+  If unlocking stops working, set `timeout = "off"` under `[lock]` in `config.toml`.
 - **Keyboard**: F1 lists every shortcut. Ctrl+W closes a tab and Ctrl+Shift+T brings it
   back, Ctrl+Tab and Ctrl+1–9 switch tabs, Alt+1/2/3/4 switch between Documents, Indexes,
-  Shell and Aggregation, Ctrl+R reruns the query or pipeline, Ctrl+I asks AI and Ctrl+, opens the settings. On macOS the keys use
+  Shell and Aggregation, Ctrl+R reruns the query or pipeline, Ctrl+I asks AI, Ctrl+Shift+L
+  locks nordpil and Ctrl+, opens the settings. On macOS the keys use
   ⌘ and the same commands sit in the menu bar; panels take ⌥⌘1–4, since Option+digit types
   a character there. Tabs carry their connection's color.
 
