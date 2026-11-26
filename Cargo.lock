@@ -4040,7 +4040,7 @@ dependencies = [
 
 [[package]]
 name = "nordpil"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bson",
  "chrono",
@@ -4073,7 +4073,7 @@ dependencies = [
 
 [[package]]
 name = "nordpil-backend"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aws-config",
  "aws-credential-types",
@@ -4104,7 +4104,7 @@ dependencies = [
 
 [[package]]
 name = "nordpil-query"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.23.1",
  "bson",
@@ -4114,7 +4114,7 @@ dependencies = [
 
 [[package]]
 name = "nordpil-shell"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bson",
  "nordpil-query",
